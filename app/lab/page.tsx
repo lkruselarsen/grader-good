@@ -1,12 +1,19 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Slider } from "@/components/ui/slider";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Separator } from "@/components/ui/separator";
+import {
+  type LookParams,
+  DEFAULT_LOOK_PARAMS,
+} from "@/lib/look-params";
+import { runPipeline as runPipelineFn } from "@/lib/run-pipeline";
 
 type ImgFile = { id: string; file: File; url: string };
 
@@ -23,72 +30,42 @@ async function fileToDataUrl(file: File): Promise<string> {
   });
 }
 
-async function drawToCanvas(canvas: HTMLCanvasElement, srcUrl: string) {
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
+/** Data-driven parameter sections; add halation/grain here later without refactoring layout. */
+const PARAM_SECTIONS: Array<{
+  id: keyof Pick<LookParams, "match" | "grading" | "halation" | "grain">;
+  label: string;
+  params: Array<{
+    key: string;
+    label: string;
+    min: number;
+    max: number;
+    step: number;
+  }>;
+}> = [
+  {
+    id: "match",
+    label: "Match",
+    params: [
+      { key: "strength", label: "Strength", min: 0, max: 1, step: 0.01 },
+    ],
+  },
+];
 
-  const img = new Image();
-  img.crossOrigin = "anonymous";
-  await new Promise<void>((resolve, reject) => {
-    img.onload = () => resolve();
-    img.onerror = () => reject(new Error("Failed to load image"));
-    img.src = srcUrl;
-  });
+function useDebouncedEffect(
+  fn: () => void,
+  deps: React.DependencyList,
+  ms: number
+) {
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fnRef = useRef(fn);
+  fnRef.current = fn;
 
-  // Fit into a reasonable preview size
-  const maxEdge = 1600;
-  const scale = Math.min(1, maxEdge / Math.max(img.width, img.height));
-  const w = Math.max(1, Math.round(img.width * scale));
-  const h = Math.max(1, Math.round(img.height * scale));
-
-  canvas.width = w;
-  canvas.height = h;
-  ctx.clearRect(0, 0, w, h);
-  ctx.drawImage(img, 0, 0, w, h);
-}
-
-function applyBasicLook(canvas: HTMLCanvasElement, strength: number) {
-  // Placeholder: tiny contrast/sat-ish effect just to prove the pipeline + sliders.
-  // We'll replace this with OKLab model + reference fitting.
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-  const { width, height } = canvas;
-  const img = ctx.getImageData(0, 0, width, height);
-  const d = img.data;
-
-  const s = strength; // 0..1
-  // Basic curve: lift shadows a bit + compress highlights a bit (cheap "filmic-ish")
-  const lift = 12 * s;
-  const comp = 18 * s;
-
-  for (let i = 0; i < d.length; i += 4) {
-    let r = d[i],
-      g = d[i + 1],
-      b = d[i + 2];
-
-    // luma
-    const y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-
-    // lift shadows
-    const shadow = (1 - y / 255) * lift;
-    r = Math.min(255, r + shadow);
-    g = Math.min(255, g + shadow);
-    b = Math.min(255, b + shadow);
-
-    // compress highlights
-    const hi = Math.max(0, (y - 220) / 35);
-    const hcomp = hi * comp;
-    r = Math.max(0, r - hcomp);
-    g = Math.max(0, g - hcomp);
-    b = Math.max(0, b - hcomp);
-
-    d[i] = r;
-    d[i + 1] = g;
-    d[i + 2] = b;
-    // alpha unchanged
-  }
-
-  ctx.putImageData(img, 0, 0);
+  useEffect(() => {
+    timeoutRef.current = setTimeout(() => fnRef.current(), ms);
+    return () => {
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    };
+  }, deps);
 }
 
 export default function LabPage() {
@@ -97,20 +74,68 @@ export default function LabPage() {
   const [source, setSource] = useState<ImgFile | null>(null);
   const [refs, setRefs] = useState<ImgFile[]>([]);
   const [activeRefId, setActiveRefId] = useState<string | null>(null);
+  const [lookParams, setLookParams] = useState<LookParams>(DEFAULT_LOOK_PARAMS);
+  const [applyError, setApplyError] = useState<string | null>(null);
+  const [isApplying, setIsApplying] = useState(false);
+  const [applySuccess, setApplySuccess] = useState(false);
 
-  const [strength, setStrength] = useState<number>(0.35);
   const activeRef = useMemo(
     () => refs.find((r) => r.id === activeRefId) ?? null,
     [refs, activeRefId]
   );
 
+  const skipNextAutoApplyRef = useRef(false);
+
+  const applyPipeline = useCallback(async () => {
+    setApplyError(null);
+    setApplySuccess(false);
+    if (!source) {
+      setApplyError("No source image");
+      return;
+    }
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      setApplyError("Canvas not ready");
+      return;
+    }
+    setIsApplying(true);
+    try {
+      const result = await runPipelineFn(
+        source.file,
+        activeRef?.file ?? null,
+        lookParams,
+        canvas
+      );
+      if (result.fittedGrading) {
+        skipNextAutoApplyRef.current = true;
+        setLookParams((prev) => ({ ...prev, grading: result.fittedGrading! }));
+      }
+      setApplySuccess(true);
+      setTimeout(() => setApplySuccess(false), 2500);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setApplyError(message);
+    } finally {
+      setIsApplying(false);
+    }
+  }, [source, activeRef?.file, lookParams]);
+
+  useDebouncedEffect(
+    () => {
+      if (skipNextAutoApplyRef.current) {
+        skipNextAutoApplyRef.current = false;
+        return;
+      }
+      applyPipeline();
+    },
+    [source, activeRef?.file, lookParams],
+    120
+  );
+
   async function onPickSource(file: File | null) {
     if (!file) return;
     const url = await fileToDataUrl(file);
-    const item = { id: uuid(), file, url };
-    setSource(item);
-    // render immediately
-    if (canvasRef.current) await drawToCanvas(canvasRef.current, url);
+    setSource({ id: uuid(), file, url });
   }
 
   async function onPickRefs(files: FileList | null) {
@@ -124,10 +149,19 @@ export default function LabPage() {
     if (!activeRefId && items[0]) setActiveRefId(items[0].id);
   }
 
-  async function onRunMatch() {
-    if (!source?.url || !canvasRef.current) return;
-    await drawToCanvas(canvasRef.current, source.url);
-    applyBasicLook(canvasRef.current, strength);
+  function setParam(
+    sectionId: keyof LookParams,
+    paramKey: string,
+    value: number
+  ) {
+    setLookParams((prev) => {
+      const section = prev[sectionId];
+      if (!section || typeof section !== "object") return prev;
+      return {
+        ...prev,
+        [sectionId]: { ...section, [paramKey]: value },
+      };
+    });
   }
 
   async function onExport() {
@@ -144,86 +178,173 @@ export default function LabPage() {
   }
 
   return (
-    <div className="p-6 space-y-4">
-      <h1 className="text-2xl font-semibold">Lab</h1>
+    <div className="p-4 md:p-6">
+      <h1 className="text-2xl font-semibold mb-4">Lab</h1>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <Card className="p-4 space-y-4">
-          <div className="space-y-2">
-            <Label>Source (JPG/PNG for now)</Label>
-            <Input
-              type="file"
-              accept="image/png,image/jpeg"
-              onChange={(e) => onPickSource(e.target.files?.[0] ?? null)}
-            />
-          </div>
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(320px,400px)_1fr] gap-4 lg:gap-6">
+        <Card className="p-4 flex flex-col border bg-card overflow-hidden">
+          <ScrollArea className="flex-1 max-h-[calc(100vh-12rem)] lg:max-h-[calc(100vh-10rem)]">
+            <div className="space-y-4 pr-4">
+              <section className="space-y-2">
+                <h2 className="text-sm font-medium text-muted-foreground">
+                  Source
+                </h2>
+                <Input
+                  type="file"
+                  accept="image/png,image/jpeg"
+                  onChange={(e) =>
+                    onPickSource(e.target.files?.[0] ?? null)
+                  }
+                />
+              </section>
 
-          <div className="space-y-2">
-            <Label>Reference photos (3–4)</Label>
-            <Input
-              type="file"
-              multiple
-              accept="image/png,image/jpeg"
-              onChange={(e) => onPickRefs(e.target.files)}
-            />
-          </div>
+              <Separator />
 
-          <Tabs
-            value={activeRefId ?? ""}
-            onValueChange={(v) => setActiveRefId(v)}
-          >
-            <TabsList className="flex flex-wrap">
-              {refs.map((r, idx) => (
-                <TabsTrigger key={r.id} value={r.id}>
-                  Ref {idx + 1}
-                </TabsTrigger>
-              ))}
-            </TabsList>
-            {refs.map((r) => (
-              <TabsContent key={r.id} value={r.id} className="pt-3">
-                <div className="flex gap-3 items-start">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={r.url}
-                    alt="reference"
-                    className="w-40 h-40 object-cover rounded-md border"
-                  />
-                  <div className="text-sm text-muted-foreground">
-                    {r.file.name}
-                  </div>
-                </div>
-              </TabsContent>
-            ))}
-          </Tabs>
+              <section className="space-y-2">
+                <h2 className="text-sm font-medium text-muted-foreground">
+                  References
+                </h2>
+                <Input
+                  type="file"
+                  multiple
+                  accept="image/png,image/jpeg"
+                  onChange={(e) => onPickRefs(e.target.files)}
+                />
 
-          <div className="space-y-2">
-            <Label>Match strength</Label>
-            <Slider
-              value={[strength]}
-              min={0}
-              max={1}
-              step={0.01}
-              onValueChange={(v) => setStrength(v[0] ?? 0)}
-            />
-          </div>
+                {refs.length > 0 && (
+                  <Tabs
+                    value={activeRefId ?? ""}
+                    onValueChange={(v) => setActiveRefId(v)}
+                  >
+                    <TabsList className="flex flex-wrap gap-1 h-auto p-1">
+                      {refs.map((r, idx) => (
+                        <TabsTrigger
+                          key={r.id}
+                          value={r.id}
+                          className="flex flex-col items-center gap-0.5 p-2 data-[state=active]:ring-2"
+                        >
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            src={r.url}
+                            alt={`Ref ${idx + 1}`}
+                            className="size-12 object-cover rounded border"
+                          />
+                          <span className="text-xs">Ref {idx + 1}</span>
+                        </TabsTrigger>
+                      ))}
+                    </TabsList>
+                    {refs.map((r) => (
+                      <TabsContent
+                        key={r.id}
+                        value={r.id}
+                        className="pt-3 space-y-1"
+                      >
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={r.url}
+                          alt="reference"
+                          className="w-full max-h-40 object-contain rounded-md border"
+                        />
+                        <p className="text-xs text-muted-foreground truncate">
+                          {r.file.name}
+                        </p>
+                      </TabsContent>
+                    ))}
+                  </Tabs>
+                )}
+              </section>
 
-          <div className="flex gap-2">
-            <Button onClick={onRunMatch} disabled={!source}>
-              Run match (stub)
-            </Button>
-            <Button variant="secondary" onClick={onExport} disabled={!source}>
-              Export PNG
-            </Button>
-          </div>
+              <Separator />
 
-          <div className="text-xs text-muted-foreground">
-            Active ref: {activeRef ? activeRef.file.name : "none"}
-          </div>
+              <section className="space-y-3">
+                <h2 className="text-sm font-medium text-muted-foreground">
+                  Parameters
+                </h2>
+                {PARAM_SECTIONS.map((section) => {
+                  const sectionParams = lookParams[section.id];
+                  if (!sectionParams || typeof sectionParams !== "object")
+                    return null;
+                  return (
+                    <div key={`${section.id}-${section.label}`} className="space-y-3">
+                      <h3 className="text-xs font-medium text-muted-foreground/80">
+                        {section.label}
+                      </h3>
+                      {section.params.map((param) => {
+                        const value =
+                          (sectionParams as Record<string, number>)[param.key];
+                        if (typeof value !== "number") return null;
+                        return (
+                          <div key={param.key} className="space-y-1.5">
+                            <Label className="text-xs">{param.label}</Label>
+                            <Slider
+                              value={[value]}
+                              min={param.min}
+                              max={param.max}
+                              step={param.step}
+                              onValueChange={(v) =>
+                                setParam(
+                                  section.id,
+                                  param.key,
+                                  v[0] ?? param.min
+                                )
+                              }
+                            />
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+              </section>
+
+              <Separator />
+
+              <section className="flex gap-2 flex-wrap items-center">
+                <Button
+                  onClick={() => void applyPipeline()}
+                  disabled={!source || isApplying}
+                  size="sm"
+                >
+                  {isApplying ? "Processing…" : "Apply"}
+                </Button>
+                <Button
+                  variant="secondary"
+                  onClick={onExport}
+                  disabled={!source || isApplying}
+                  size="sm"
+                >
+                  Export
+                </Button>
+                {isApplying && (
+                  <span className="text-xs text-muted-foreground">
+                    Running pipeline…
+                  </span>
+                )}
+                {applySuccess && !isApplying && (
+                  <span className="text-xs text-green-600 dark:text-green-400">
+                    Applied
+                  </span>
+                )}
+                {applyError && (
+                  <p className="w-full text-xs text-destructive">
+                    Apply failed: {applyError}
+                  </p>
+                )}
+              </section>
+            </div>
+          </ScrollArea>
         </Card>
 
-        <Card className="p-4">
-          <div className="text-sm text-muted-foreground mb-2">Preview</div>
-          <canvas ref={canvasRef} className="w-full rounded-md border" />
+        <Card className="p-4 flex flex-col min-h-[320px]">
+          <h2 className="text-sm font-medium text-muted-foreground mb-2">
+            Result
+          </h2>
+          <div className="flex-1 flex items-center justify-center rounded-md border bg-muted/30 min-h-[280px]">
+            <canvas
+              ref={canvasRef}
+              className="max-w-full max-h-[calc(100vh-14rem)] object-contain"
+            />
+          </div>
         </Card>
       </div>
     </div>
