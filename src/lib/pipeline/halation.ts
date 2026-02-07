@@ -7,7 +7,7 @@ import type { PixelFrameRGBA, PipelineParams } from "./types";
 
 export function halation(
   frame: PixelFrameRGBA,
-  _params: PipelineParams
+  _params: PipelineParams // eslint-disable-line @typescript-eslint/no-unused-vars
 ): PixelFrameRGBA {
   return frame;
 }

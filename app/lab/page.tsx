@@ -58,14 +58,15 @@ function useDebouncedEffect(
 ) {
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fnRef = useRef(fn);
-  fnRef.current = fn;
 
   useEffect(() => {
+    fnRef.current = fn;
     timeoutRef.current = setTimeout(() => fnRef.current(), ms);
     return () => {
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
     };
-  }, deps);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- deps from caller
+  }, [fn, ms, ...deps]);
 }
 
 export default function LabPage() {
