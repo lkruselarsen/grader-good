@@ -103,12 +103,18 @@ export async function runPipeline(
   }
 
   const engine = gradingToEngine(finalGrading);
-  engine.colorDensity = colorDensity;
+  const engineWithMatch = engine as typeof engine & {
+    colorDensity?: number;
+    lumaStrength?: number;
+    colorStrength?: number;
+    exposureStrength?: number;
+  };
+  engineWithMatch.colorDensity = colorDensity;
   // Luma/color strengths are UI-only controls; pass them into engine params without
   // affecting stored grading/embeddings (they default to 1 when omitted).
-  (engine as any).lumaStrength = lumaStrength;
-  (engine as any).colorStrength = colorStrength;
-  (engine as any).exposureStrength = exposureStrength;
+  engineWithMatch.lumaStrength = lumaStrength;
+  engineWithMatch.colorStrength = colorStrength;
+  engineWithMatch.exposureStrength = exposureStrength;
   const result = await processOne(sourceFile, referenceFile, {
     strength: 1,
     grading: engine,

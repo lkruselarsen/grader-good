@@ -453,25 +453,6 @@ export function fitLookParamsFromReference(ref: ImageData): LookParams {
   };
 }
 
-/**
- * Compute source L range (p2, p98) for contrast-preserving curve application.
- */
-function sourceLRange(d: Uint8ClampedArray): { L_min: number; L_max: number; range: number } {
-  const Ls: number[] = [];
-  for (let i = 0; i < d.length; i += 4) {
-    if (d[i + 3] < 128) continue;
-    const { L } = srgb8ToOklab(d[i], d[i + 1], d[i + 2]);
-    Ls.push(L);
-  }
-  if (Ls.length === 0) return { L_min: 0, L_max: 1, range: 1 };
-  const sorted = [...Ls].sort((a, b) => a - b);
-  const m = sorted.length;
-  const p2 = sorted[Math.min(Math.floor(m * 0.02), m - 1)] ?? 0;
-  const p98 = sorted[Math.min(Math.floor(m * 0.98), m - 1)] ?? 1;
-  const range = Math.max(1e-6, p98 - p2);
-  return { L_min: p2, L_max: p98, range };
-}
-
 /** Median source L over opaque pixels (used for exposure matching). */
 function sourceMidL(d: Uint8ClampedArray): number {
   const Ls: number[] = [];
@@ -640,7 +621,9 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
     }
 
     const lab = srgb8ToOklab(r, g, b);
-    let { L, a: oa, b: ob } = lab;
+    let { L } = lab;
+    const oa = lab.a;
+    const ob = lab.b;
 
     // Stage A0: global exposure match (shift L towards reference mid-L before tone curve / LGG).
     let L_exposed = L + exposureDelta;
@@ -731,7 +714,7 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
       continue;
     }
 
-    let L = L_final[pix];
+    const L = L_final[pix];
     const aSrc = aBuf[pix];
     const bSrc = bBuf[pix];
     let oa = aSrc;

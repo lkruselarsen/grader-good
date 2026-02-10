@@ -130,7 +130,7 @@ export default function LabPage() {
     }
   }, [source, activeRef?.file, lookParams]);
 
-  const useEmbeddings = useCallback(async () => {
+  const runEmbeddingSearch = useCallback(async () => {
     previewAbortRef.current?.abort();
     setApplyError(null);
     setApplySuccess(false);
@@ -274,7 +274,7 @@ export default function LabPage() {
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => void useEmbeddings()}
+                  onClick={() => void runEmbeddingSearch()}
                   disabled={!source || isApplying || isUsingEmbeddings}
                 >
                   {isUsingEmbeddings ? "Searching…" : "Use embeddings"}
