@@ -1,0 +1,19 @@
+# Supabase project config
+# Run: npx supabase link --project-ref ucrlqvdvyentabhvcwhj
+# Then: npx supabase db push  (to apply migrations)
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 15
+
+[studio]
+enabled = true
+port = 54323

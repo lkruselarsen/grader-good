@@ -1,4 +1,9 @@
-import type { LookParams as EngineLookParams } from "@/src/lib/pipeline/stages/match";
+import type {
+  LookParams as EngineLookParams,
+  ToneCurveParams,
+  TintByLParams,
+  SaturationByLParams,
+} from "@/src/lib/pipeline/stages/match";
 
 /**
  * Look parameters for the grading pipeline.
@@ -6,7 +11,14 @@ import type { LookParams as EngineLookParams } from "@/src/lib/pipeline/stages/m
  */
 
 export interface LookParamsMatch {
-  strength: number;
+  /** Luma match strength (0..2, 1 = match reference). */
+  lumaStrength: number;
+  /** Color match strength (0..2, 1 = match reference). */
+  colorStrength: number;
+  /** Global chroma multiplier (1 = neutral, >1 = richer). */
+  colorDensity: number;
+  /** Exposure match strength (0..2, 1 = match reference). */
+  exposureStrength: number;
 }
 
 /** Flat grading params for UI; converted to EngineLookParams for pipeline. */
@@ -19,11 +31,19 @@ export interface LookParamsGrading {
   shadowColorDensity: number;
   highlightColorDensity: number;
   warmth: number;
+  tint: number;
   shadowTintA: number;
   shadowTintB: number;
   highlightTintA: number;
   highlightTintB: number;
   shadowContrast: number;
+  toneCurve?: ToneCurveParams;
+  tintByL?: TintByLParams;
+  saturationByL?: SaturationByLParams;
+  /** Overall reference saturation (1 = neutral). Fitted from reference; applied to source. */
+  refSaturation?: number;
+  /** Reference midtone micro-contrast scalar (RMS of detail on L in mids). */
+  microContrastMid?: number;
 }
 
 export interface LookParams {
@@ -43,16 +63,29 @@ function defaultGrading(): LookParamsGrading {
     shadowColorDensity: 1,
     highlightColorDensity: 1,
     warmth: 0,
+    tint: 0,
     shadowTintA: 0,
     shadowTintB: 0,
     highlightTintA: 0,
     highlightTintB: 0,
     shadowContrast: 1,
+    toneCurve: undefined,
+    tintByL: undefined,
+    saturationByL: undefined,
+    refSaturation: undefined,
+    microContrastMid: undefined,
   };
 }
 
 export const DEFAULT_LOOK_PARAMS: LookParams = {
-  match: { strength: 1 },
+  // Default UI match controls, tuned to designer-selected slider positions.
+  // Ranges are 0..2, so percentages map directly: e.g. 10.5% ≈ 0.21.
+  match: {
+    lumaStrength: 0.21, // ~10.5% thumb position
+    colorStrength: 0.35, // ~17.5% thumb position (aria-valuenow=0.35)
+    colorDensity: 1,
+    exposureStrength: 1.11, // ~55.5% track fill → 1.11 on 0..2
+  },
   grading: defaultGrading(),
 };
 
@@ -67,9 +100,15 @@ export function gradingToEngine(g: LookParamsGrading): EngineLookParams {
       highlightColorDensity: g.highlightColorDensity,
     },
     warmth: g.warmth,
+    tint: g.tint,
     shadowTint: { a: g.shadowTintA, b: g.shadowTintB },
     highlightTint: { a: g.highlightTintA, b: g.highlightTintB },
     shadowContrast: g.shadowContrast,
+    toneCurve: g.toneCurve,
+    tintByL: g.tintByL,
+    saturationByL: g.saturationByL,
+    refSaturation: g.refSaturation,
+    microContrastMid: g.microContrastMid,
   };
 }
 
@@ -84,10 +123,16 @@ export function engineToGrading(e: EngineLookParams): LookParamsGrading {
     shadowColorDensity: e.saturation.shadowColorDensity,
     highlightColorDensity: e.saturation.highlightColorDensity,
     warmth: e.warmth,
+    tint: e.tint ?? 0,
     shadowTintA: e.shadowTint.a,
     shadowTintB: e.shadowTint.b,
     highlightTintA: e.highlightTint.a,
     highlightTintB: e.highlightTint.b,
     shadowContrast: e.shadowContrast,
+    toneCurve: e.toneCurve,
+    tintByL: e.tintByL,
+    saturationByL: e.saturationByL,
+    refSaturation: e.refSaturation,
+    microContrastMid: e.microContrastMid,
   };
 }
