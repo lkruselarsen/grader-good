@@ -12,8 +12,13 @@ import { Separator } from "@/components/ui/separator";
 import {
   type LookParams,
   DEFAULT_LOOK_PARAMS,
+  engineToGrading,
 } from "@/lib/look-params";
-import { runPipeline as runPipelineFn } from "@/lib/run-pipeline";
+import {
+  runPipeline as runPipelineFn,
+  previewSource,
+} from "@/lib/run-pipeline";
+import { imageToSemanticEmbedding } from "@/src/lib/semanticEmbeddings";
 
 type ImgFile = { id: string; file: File; url: string };
 
@@ -46,28 +51,31 @@ const PARAM_SECTIONS: Array<{
     id: "match",
     label: "Match",
     params: [
-      { key: "strength", label: "Strength", min: 0, max: 1, step: 0.01 },
+      {
+        key: "exposureStrength",
+        label: "Exposure match",
+        min: 0,
+        max: 2,
+        step: 0.01,
+      },
+      {
+        key: "lumaStrength",
+        label: "Luma match",
+        min: 0,
+        max: 2,
+        step: 0.01,
+      },
+      {
+        key: "colorStrength",
+        label: "Color match",
+        min: 0,
+        max: 2,
+        step: 0.01,
+      },
+      { key: "colorDensity", label: "Color density", min: 0.5, max: 2, step: 0.05 },
     ],
   },
 ];
-
-function useDebouncedEffect(
-  fn: () => void,
-  deps: React.DependencyList,
-  ms: number
-) {
-  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const fnRef = useRef(fn);
-
-  useEffect(() => {
-    fnRef.current = fn;
-    timeoutRef.current = setTimeout(() => fnRef.current(), ms);
-    return () => {
-      if (timeoutRef.current) clearTimeout(timeoutRef.current);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- deps from caller
-  }, [fn, ms, ...deps]);
-}
 
 export default function LabPage() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -78,16 +86,18 @@ export default function LabPage() {
   const [lookParams, setLookParams] = useState<LookParams>(DEFAULT_LOOK_PARAMS);
   const [applyError, setApplyError] = useState<string | null>(null);
   const [isApplying, setIsApplying] = useState(false);
+  const [isUsingEmbeddings, setIsUsingEmbeddings] = useState(false);
   const [applySuccess, setApplySuccess] = useState(false);
+
+  const previewAbortRef = useRef<AbortController | null>(null);
 
   const activeRef = useMemo(
     () => refs.find((r) => r.id === activeRefId) ?? null,
     [refs, activeRefId]
   );
 
-  const skipNextAutoApplyRef = useRef(false);
-
   const applyPipeline = useCallback(async () => {
+    previewAbortRef.current?.abort();
     setApplyError(null);
     setApplySuccess(false);
     if (!source) {
@@ -108,7 +118,6 @@ export default function LabPage() {
         canvas
       );
       if (result.fittedGrading) {
-        skipNextAutoApplyRef.current = true;
         setLookParams((prev) => ({ ...prev, grading: result.fittedGrading! }));
       }
       setApplySuccess(true);
@@ -121,17 +130,63 @@ export default function LabPage() {
     }
   }, [source, activeRef?.file, lookParams]);
 
-  useDebouncedEffect(
-    () => {
-      if (skipNextAutoApplyRef.current) {
-        skipNextAutoApplyRef.current = false;
-        return;
+  const useEmbeddings = useCallback(async () => {
+    previewAbortRef.current?.abort();
+    setApplyError(null);
+    setApplySuccess(false);
+    if (!source) {
+      setApplyError("No source image");
+      return;
+    }
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      setApplyError("Canvas not ready");
+      return;
+    }
+    setIsUsingEmbeddings(true);
+    try {
+      const embeddingSemantic = await imageToSemanticEmbedding(source.file);
+      const res = await fetch("/api/dataset/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ embeddingSemantic }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error ?? "Search failed");
       }
-      applyPipeline();
-    },
-    [source, activeRef?.file, lookParams],
-    120
-  );
+      const matches = data.matches ?? [];
+      if (matches.length === 0) {
+        throw new Error("No matches. Add samples in Dataset first.");
+      }
+      const top = matches[0];
+      const grading = engineToGrading(top.look_params);
+      const nextParams: LookParams = { ...lookParams, grading };
+      setLookParams(nextParams);
+      await runPipelineFn(source.file, null, nextParams, canvas);
+      setApplySuccess(true);
+      setTimeout(() => setApplySuccess(false), 2500);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setApplyError(message);
+    } finally {
+      setIsUsingEmbeddings(false);
+    }
+  }, [source, lookParams]);
+
+  // Show raw source preview when source is uploaded (no grading applied)
+  useEffect(() => {
+    if (!source || !canvasRef.current) return;
+    previewAbortRef.current?.abort();
+    const ctrl = new AbortController();
+    previewAbortRef.current = ctrl;
+    void previewSource(source.file, canvasRef.current, ctrl.signal).finally(
+      () => {
+        if (previewAbortRef.current === ctrl) previewAbortRef.current = null;
+      }
+    );
+    return () => ctrl.abort();
+  }, [source]);
 
   async function onPickSource(file: File | null) {
     if (!file) return;
@@ -180,7 +235,12 @@ export default function LabPage() {
 
   return (
     <div className="p-4 md:p-6">
-      <h1 className="text-2xl font-semibold mb-4">Lab</h1>
+      <div className="flex items-center justify-between mb-4">
+        <h1 className="text-2xl font-semibold">Lab</h1>
+        <a href="/dataset" className="text-sm text-muted-foreground hover:underline">
+          Dataset
+        </a>
+      </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-[minmax(320px,400px)_1fr] gap-4 lg:gap-6">
         <Card className="p-4 flex flex-col border bg-card overflow-hidden">
@@ -211,6 +271,14 @@ export default function LabPage() {
                   accept="image/png,image/jpeg"
                   onChange={(e) => onPickRefs(e.target.files)}
                 />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void useEmbeddings()}
+                  disabled={!source || isApplying || isUsingEmbeddings}
+                >
+                  {isUsingEmbeddings ? "Searching…" : "Use embeddings"}
+                </Button>
 
                 {refs.length > 0 && (
                   <Tabs
@@ -303,7 +371,7 @@ export default function LabPage() {
               <section className="flex gap-2 flex-wrap items-center">
                 <Button
                   onClick={() => void applyPipeline()}
-                  disabled={!source || isApplying}
+                  disabled={!source || isApplying || isUsingEmbeddings}
                   size="sm"
                 >
                   {isApplying ? "Processing…" : "Apply"}
@@ -311,14 +379,14 @@ export default function LabPage() {
                 <Button
                   variant="secondary"
                   onClick={onExport}
-                  disabled={!source || isApplying}
+                  disabled={!source || isApplying || isUsingEmbeddings}
                   size="sm"
                 >
                   Export
                 </Button>
-                {isApplying && (
+                {(isApplying || isUsingEmbeddings) && (
                   <span className="text-xs text-muted-foreground">
-                    Running pipeline…
+                    {isUsingEmbeddings ? "Searching…" : "Running pipeline…"}
                   </span>
                 )}
                 {applySuccess && !isApplying && (
