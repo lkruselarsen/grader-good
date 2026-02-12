@@ -19,6 +19,56 @@ export interface LookParamsMatch {
   colorDensity: number;
   /** Exposure match strength (0..2, 1 = match reference). */
   exposureStrength: number;
+  /** How strongly to apply black/shadow alignment (0..4, 1 = normal). */
+  blackStrength: number;
+  /**
+   * Upper luminance bound for the black/shadow pull (0..1).
+   * Pixels with L <= blackRange are affected; higher = extends into midtones.
+   */
+  blackRange: number;
+  /** Black point anchor (0..0.15). Overrides fitted refBlackL when set. */
+  blackPoint?: number;
+  /** Per-band color match strength: deepest shadows. */
+  bandLowerShadow: number;
+  /** Per-band color match strength: upper shadows / low mids. */
+  bandUpperShadow: number;
+  /** Per-band color match strength: true midtones. */
+  bandMid: number;
+  /** Per-band color match strength: lower highlights. */
+  bandLowerHigh: number;
+  /** Per-band color match strength: brightest highlights. */
+  bandUpperHigh: number;
+  /**
+   * Per-band manual hue overrides (-1..1, 0 = neutral). Applied on top of the
+   * automatic 5-band match; interpreted as a small hue rotation per band.
+   */
+  bandLowerShadowHue: number;
+  bandUpperShadowHue: number;
+  bandMidHue: number;
+  bandLowerHighHue: number;
+  bandUpperHighHue: number;
+  /**
+   * Per-band manual saturation multipliers (0..2, 1 = neutral). Applied after
+   * automatic chroma match so you can locally push/pull saturation.
+   */
+  bandLowerShadowSat: number;
+  bandUpperShadowSat: number;
+  bandMidSat: number;
+  bandLowerHighSat: number;
+  bandUpperHighSat: number;
+  /**
+   * Per-band manual luma offsets (-0.2..0.2, 0 = neutral). Applied late in the
+   * pipeline to nudge tone per band without fighting the main tone curve.
+   */
+  bandLowerShadowLuma: number;
+  bandUpperShadowLuma: number;
+  bandMidLuma: number;
+  bandLowerHighLuma: number;
+  bandUpperHighLuma: number;
+  /** Highlight fill (bloom/density) strength (0..1). Gated to top L percentiles and specular texture. */
+  highlightFillStrength: number;
+  /** Optional highlight fill warmth (-1..1). Small warm tint in affected highlights. */
+  highlightFillWarmth?: number;
 }
 
 /** Flat grading params for UI; converted to EngineLookParams for pipeline. */
@@ -44,6 +94,16 @@ export interface LookParamsGrading {
   refSaturation?: number;
   /** Reference midtone micro-contrast scalar (RMS of detail on L in mids). */
   microContrastMid?: number;
+  /** Reference median L (exposure match target). Fitted from reference. */
+  refMidL?: number;
+  /** Reference 5th percentile L (black/shadow match target). Fitted from reference. */
+  refBlackL?: number;
+  /** Optional per-band reference stats for 5-band colour matching. */
+  colorMatchBands?: {
+    refA: number[];
+    refB: number[];
+    refC: number[];
+  };
 }
 
 export interface LookParams {
@@ -74,17 +134,41 @@ function defaultGrading(): LookParamsGrading {
     saturationByL: undefined,
     refSaturation: undefined,
     microContrastMid: undefined,
+    refMidL: undefined,
+    refBlackL: undefined,
   };
 }
 
 export const DEFAULT_LOOK_PARAMS: LookParams = {
-  // Default UI match controls, tuned to designer-selected slider positions.
-  // Ranges are 0..2, so percentages map directly: e.g. 10.5% ≈ 0.21.
   match: {
-    lumaStrength: 0.21, // ~10.5% thumb position
-    colorStrength: 0.35, // ~17.5% thumb position (aria-valuenow=0.35)
+    lumaStrength: 0.21,
+    colorStrength: 0.35,
     colorDensity: 1,
-    exposureStrength: 1.11, // ~55.5% track fill → 1.11 on 0..2
+    exposureStrength: 1.11,
+    blackStrength: 1,
+    blackRange: 0.6,
+    bandLowerShadow: 1,
+    bandUpperShadow: 1,
+    bandMid: 1,
+    bandLowerHigh: 1,
+    bandUpperHigh: 1,
+    bandLowerShadowHue: 0,
+    bandUpperShadowHue: 0,
+    bandMidHue: 0,
+    bandLowerHighHue: 0,
+    bandUpperHighHue: 0,
+    bandLowerShadowSat: 1,
+    bandUpperShadowSat: 1,
+    bandMidSat: 1,
+    bandLowerHighSat: 1,
+    bandUpperHighSat: 1,
+    bandLowerShadowLuma: 0,
+    bandUpperShadowLuma: 0,
+    bandMidLuma: 0,
+    bandLowerHighLuma: 0,
+    bandUpperHighLuma: 0,
+    highlightFillStrength: 0,
+    highlightFillWarmth: 0,
   },
   grading: defaultGrading(),
 };
@@ -109,6 +193,9 @@ export function gradingToEngine(g: LookParamsGrading): EngineLookParams {
     saturationByL: g.saturationByL,
     refSaturation: g.refSaturation,
     microContrastMid: g.microContrastMid,
+    refMidL: g.refMidL,
+    refBlackL: g.refBlackL,
+    colorMatchBands: g.colorMatchBands,
   };
 }
 
@@ -134,5 +221,8 @@ export function engineToGrading(e: EngineLookParams): LookParamsGrading {
     saturationByL: e.saturationByL,
     refSaturation: e.refSaturation,
     microContrastMid: e.microContrastMid,
+    refMidL: e.refMidL,
+    refBlackL: e.refBlackL,
+    colorMatchBands: e.colorMatchBands,
   };
 }

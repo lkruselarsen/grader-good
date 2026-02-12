@@ -11,6 +11,7 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase/server";
 import type { LookParams } from "@/src/lib/pipeline/stages/match";
+import type { ExposureLevel, ChromaDistribution } from "@/src/lib/pipeline/imageStats";
 import { EMBEDDING_DIM } from "@/src/lib/embeddings";
 import { SEMANTIC_EMBEDDING_DIM } from "@/src/lib/semanticEmbeddings";
 
@@ -35,6 +36,27 @@ function validateSemanticEmbedding(arr: unknown): arr is number[] {
   return arr.every((x) => typeof x === "number");
 }
 
+function validateExposureLevel(obj: unknown): obj is ExposureLevel {
+  if (!obj || typeof obj !== "object") return false;
+  const o = obj as Record<string, unknown>;
+  return (
+    typeof o.medianL === "number" &&
+    typeof o.p05L === "number" &&
+    typeof o.p95L === "number"
+  );
+}
+
+function validateChromaDistribution(obj: unknown): obj is ChromaDistribution {
+  if (!obj || typeof obj !== "object") return false;
+  const o = obj as Record<string, unknown>;
+  return (
+    typeof o.meanA === "number" &&
+    typeof o.meanB === "number" &&
+    typeof o.meanC === "number" &&
+    Array.isArray(o.bands)
+  );
+}
+
 export async function POST(request: Request) {
   if (!supabaseAdmin) {
     return NextResponse.json(
@@ -57,6 +79,8 @@ export async function POST(request: Request) {
   const lookParamsStr = formData.get("lookParams") as string | null;
   const embeddingStr = formData.get("embedding") as string | null;
   const embeddingSemanticStr = formData.get("embeddingSemantic") as string | null;
+  const referenceExposureStr = formData.get("reference_exposure") as string | null;
+  const referenceChromaStr = formData.get("reference_chroma_distribution") as string | null;
   const name = (formData.get("name") as string | null)?.trim() || null;
 
   if (!file || !lookParamsStr || !embeddingStr || !embeddingSemanticStr) {
@@ -97,6 +121,21 @@ export async function POST(request: Request) {
       { error: `embeddingSemantic must be array of ${SEMANTIC_EMBEDDING_DIM} numbers` },
       { status: 400 }
     );
+  }
+
+  let reference_exposure: ExposureLevel | null = null;
+  let reference_chroma_distribution: ChromaDistribution | null = null;
+  if (referenceExposureStr && referenceChromaStr) {
+    try {
+      const exp = JSON.parse(referenceExposureStr) as unknown;
+      const chroma = JSON.parse(referenceChromaStr) as unknown;
+      if (validateExposureLevel(exp) && validateChromaDistribution(chroma)) {
+        reference_exposure = exp;
+        reference_chroma_distribution = chroma;
+      }
+    } catch {
+      // Optional; leave null if invalid
+    }
   }
 
   const ext = file.name.split(".").pop()?.toLowerCase() || "jpg";
@@ -140,6 +179,8 @@ export async function POST(request: Request) {
       look_params: lookParams,
       embedding,
       embedding_semantic: embeddingSemantic,
+      reference_exposure: reference_exposure ?? null,
+      reference_chroma_distribution: reference_chroma_distribution ?? null,
     })
     .select("id, created_at, image_url")
     .single();

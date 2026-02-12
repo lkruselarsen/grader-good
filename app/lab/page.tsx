@@ -17,8 +17,28 @@ import {
 import {
   runPipeline as runPipelineFn,
   previewSource,
+  exportBaselinePngBlob,
 } from "@/lib/run-pipeline";
 import { imageToSemanticEmbedding } from "@/src/lib/semanticEmbeddings";
+import {
+  decode,
+  frameToImageData,
+  computeImageStats,
+  type ImageStats,
+  type ExposureLevel,
+  type ChromaDistribution,
+} from "@/src/lib/pipeline";
+import { LEARNED_HEURISTICS } from "@/src/config/learnedHeuristics";
+import {
+  applyHeuristicsToMatch,
+  type MatchContext,
+} from "@/src/lib/pipeline/heuristicsAdapter";
+import {
+  bucketForSourceExposure,
+  bucketForRefExposure,
+  bucketForRefColor,
+  type BucketName,
+} from "@/src/lib/pipeline/heuristicsBuckets";
 
 type ImgFile = { id: string; file: File; url: string };
 
@@ -32,6 +52,55 @@ async function fileToDataUrl(file: File): Promise<string> {
     r.onload = () => res(String(r.result));
     r.onerror = () => rej(r.error);
     r.readAsDataURL(file);
+  });
+}
+
+function isDngFile(file: File): boolean {
+  const type = file.type.toLowerCase();
+  if (type === "image/x-adobe-dng" || type === "image/dng") return true;
+  const name = (file.name || "").toLowerCase();
+  return name.endsWith(".dng");
+}
+
+function exposureScoreFromLevel(
+  exposure: ExposureLevel | null | undefined
+): number | null {
+  const medianL = exposure?.medianL;
+  if (typeof medianL !== "number" || !Number.isFinite(medianL)) {
+    return null;
+  }
+  // Map medianL in [0, 1] to a score in [-1, 1] with a soft centre around 0.5.
+  // Values ~0.3 → ≈ -1 (under), ~0.5 → 0 (normal), ~0.7 → ≈ +1 (over).
+  const mid = 0.5;
+  const span = 0.2;
+  const raw = (medianL - mid) / span;
+  const score = Math.max(-1, Math.min(1, raw));
+  return Number.isFinite(score) ? score : null;
+}
+
+async function sourceFileForProcessing(
+  file: File,
+  canvas: HTMLCanvasElement | null
+): Promise<File> {
+  if (!isDngFile(file) || !canvas) return file;
+
+  return new Promise<File>((resolve) => {
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) {
+          resolve(file);
+          return;
+        }
+        const safeName = file.name.replace(/\.dng$/i, ".png");
+        resolve(
+          new File([blob], safeName, {
+            type: "image/png",
+          })
+        );
+      },
+      "image/png",
+      0.95
+    );
   });
 }
 
@@ -72,7 +141,70 @@ const PARAM_SECTIONS: Array<{
         max: 2,
         step: 0.01,
       },
+      {
+        key: "blackStrength",
+        label: "Black match strength",
+        min: 0,
+        max: 8,
+        step: 0.05,
+      },
+      {
+        key: "blackRange",
+        label: "Black range",
+        min: 0.2,
+        max: 1.8,
+        step: 0.01,
+      },
+      {
+        key: "bandLowerShadow",
+        label: "Lower shadow color",
+        min: 0,
+        max: 2,
+        step: 0.05,
+      },
+      {
+        key: "bandUpperShadow",
+        label: "Upper shadow color",
+        min: 0,
+        max: 2,
+        step: 0.05,
+      },
+      {
+        key: "bandMid",
+        label: "Mid color",
+        min: 0,
+        max: 2,
+        step: 0.05,
+      },
+      {
+        key: "bandLowerHigh",
+        label: "Lower highlight color",
+        min: 0,
+        max: 2,
+        step: 0.05,
+      },
+      {
+        key: "bandUpperHigh",
+        label: "Upper highlight color",
+        min: 0,
+        max: 2,
+        step: 0.05,
+      },
       { key: "colorDensity", label: "Color density", min: 0.5, max: 2, step: 0.05 },
+      {
+        key: "highlightFillStrength",
+        label: "Highlight fill strength",
+        min: 0,
+        max: 1,
+        step: 0.01,
+      },
+      {
+        key: "highlightFillWarmth",
+        label: "Highlight fill warmth",
+        min: -1,
+        max: 1,
+        step: 0.05,
+      },
     ],
   },
 ];
@@ -88,8 +220,18 @@ export default function LabPage() {
   const [isApplying, setIsApplying] = useState(false);
   const [isUsingEmbeddings, setIsUsingEmbeddings] = useState(false);
   const [applySuccess, setApplySuccess] = useState(false);
+  const [correctionStatus, setCorrectionStatus] = useState<string | null>(null);
+  const [hasAppliedHeuristics, setHasAppliedHeuristics] = useState(false);
+  const [lastSourceStats, setLastSourceStats] = useState<ImageStats | null>(null);
+  const [lastRefStats, setLastRefStats] = useState<ImageStats | null>(null);
+  const [sourceType, setSourceType] = useState<"raw" | "png" | null>(null);
 
   const previewAbortRef = useRef<AbortController | null>(null);
+  const autoParamsRef = useRef<LookParams | null>(null);
+  const lastMatchRef = useRef<{
+    reference_exposure?: unknown;
+    reference_chroma_distribution?: unknown;
+  } | null>(null);
 
   const activeRef = useMemo(
     () => refs.find((r) => r.id === activeRefId) ?? null,
@@ -111,15 +253,40 @@ export default function LabPage() {
     }
     setIsApplying(true);
     try {
+      // Use original source so we grade the source image, not whatever is on the canvas.
       const result = await runPipelineFn(
         source.file,
         activeRef?.file ?? null,
         lookParams,
         canvas
       );
-      if (result.fittedGrading) {
-        setLookParams((prev) => ({ ...prev, grading: result.fittedGrading! }));
+      if (result.sourceStats) {
+        setLastSourceStats(result.sourceStats);
       }
+      if (result.refStats) {
+        setLastRefStats(result.refStats);
+      }
+      if (result.fittedGrading) {
+        setLookParams((prev) => {
+          // Use an explicit blackPoint in match so corrections/heuristics can learn it.
+          const effectiveBlackPoint =
+            prev.match.blackPoint ??
+            result.fittedGrading?.refBlackL ??
+            0.05;
+          const nextMatch = {
+            ...prev.match,
+            blackPoint: effectiveBlackPoint,
+          };
+          const next: LookParams = {
+            ...prev,
+            match: nextMatch,
+            grading: result.fittedGrading!,
+          };
+          autoParamsRef.current = next;
+          return next;
+        });
+      }
+      setHasAppliedHeuristics(false);
       setApplySuccess(true);
       setTimeout(() => setApplySuccess(false), 2500);
     } catch (err) {
@@ -144,8 +311,10 @@ export default function LabPage() {
       return;
     }
     setIsUsingEmbeddings(true);
+    setHasAppliedHeuristics(false);
     try {
-      const embeddingSemantic = await imageToSemanticEmbedding(source.file);
+      const processingFile = await sourceFileForProcessing(source.file, canvas);
+      const embeddingSemantic = await imageToSemanticEmbedding(processingFile);
       const res = await fetch("/api/dataset/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -160,10 +329,66 @@ export default function LabPage() {
         throw new Error("No matches. Add samples in Dataset first.");
       }
       const top = matches[0];
+      lastMatchRef.current = {
+        reference_exposure: top.reference_exposure ?? undefined,
+        reference_chroma_distribution: top.reference_chroma_distribution ?? undefined,
+      };
       const grading = engineToGrading(top.look_params);
-      const nextParams: LookParams = { ...lookParams, grading };
+      // Pull black/shadow and band strengths from the embedding when present.
+      const embedded = top.look_params ?? {};
+      const baseMatch = lookParams.match;
+      // Anchor blackPoint to the effective reference black so auto/heuristics can learn from it.
+      const effectiveBlackPoint =
+        baseMatch.blackPoint ?? grading.refBlackL ?? 0.05;
+      const nextMatch = {
+        ...baseMatch,
+        blackPoint: effectiveBlackPoint,
+        blackStrength:
+          typeof embedded.blackStrength === "number"
+            ? embedded.blackStrength
+            : baseMatch.blackStrength,
+        blackRange:
+          typeof embedded.blackRange === "number"
+            ? embedded.blackRange
+            : baseMatch.blackRange,
+        bandLowerShadow:
+          typeof embedded.colorBandStrengths?.lowerShadow === "number"
+            ? embedded.colorBandStrengths.lowerShadow
+            : baseMatch.bandLowerShadow,
+        bandUpperShadow:
+          typeof embedded.colorBandStrengths?.upperShadow === "number"
+            ? embedded.colorBandStrengths.upperShadow
+            : baseMatch.bandUpperShadow,
+        bandMid:
+          typeof embedded.colorBandStrengths?.mid === "number"
+            ? embedded.colorBandStrengths.mid
+            : baseMatch.bandMid,
+        bandLowerHigh:
+          typeof embedded.colorBandStrengths?.lowerHigh === "number"
+            ? embedded.colorBandStrengths.lowerHigh
+            : baseMatch.bandLowerHigh,
+        bandUpperHigh:
+          typeof embedded.colorBandStrengths?.upperHigh === "number"
+            ? embedded.colorBandStrengths.upperHigh
+            : baseMatch.bandUpperHigh,
+      };
+      const nextParams: LookParams = {
+        ...lookParams,
+        match: nextMatch,
+        grading,
+      };
       setLookParams(nextParams);
-      await runPipelineFn(source.file, null, nextParams, canvas);
+      autoParamsRef.current = nextParams;
+      const pipelineResult = await runPipelineFn(
+        source.file,
+        null,
+        nextParams,
+        canvas
+      );
+      if (pipelineResult.sourceStats) {
+        setLastSourceStats(pipelineResult.sourceStats);
+      }
+      setLastRefStats(null);
       setApplySuccess(true);
       setTimeout(() => setApplySuccess(false), 2500);
     } catch (err) {
@@ -192,6 +417,11 @@ export default function LabPage() {
     if (!file) return;
     const url = await fileToDataUrl(file);
     setSource({ id: uuid(), file, url });
+    setSourceType(isDngFile(file) ? "raw" : "png");
+    setLastSourceStats(null);
+    setLastRefStats(null);
+    lastMatchRef.current = null;
+    setHasAppliedHeuristics(false);
   }
 
   async function onPickRefs(files: FileList | null) {
@@ -233,6 +463,128 @@ export default function LabPage() {
     }, "image/png");
   }
 
+  async function onExportBaseline() {
+    if (!source) return;
+    try {
+      const blob = await exportBaselinePngBlob(source.file);
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `baseline_${source.file.name.replace(/\.[^.]+$/, "")}.png`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch {
+      // Swallow debug export errors; they shouldn't block normal usage.
+    }
+  }
+
+  async function onUploadCorrection() {
+    setCorrectionStatus(null);
+    if (!source) {
+      setCorrectionStatus("No source image to associate with this correction.");
+      return;
+    }
+    const autoParams = autoParamsRef.current ?? lookParams;
+    try {
+      const sourceFrame = await decode(source.file);
+      const sourceStats = computeImageStats(frameToImageData(sourceFrame));
+      const source_type = source.file.name.toLowerCase().endsWith(".dng")
+        ? "raw"
+        : "png";
+
+      let reference_exposure: typeof sourceStats.exposureLevel | null = null;
+      let reference_chroma_distribution: typeof sourceStats.chromaDistribution | null = null;
+
+      if (activeRef?.file) {
+        const refFrame = await decode(activeRef.file);
+        const refStats = computeImageStats(frameToImageData(refFrame));
+        reference_exposure = refStats.exposureLevel;
+        reference_chroma_distribution = refStats.chromaDistribution;
+      } else if (lastMatchRef.current?.reference_exposure && lastMatchRef.current?.reference_chroma_distribution) {
+        reference_exposure = lastMatchRef.current.reference_exposure as typeof sourceStats.exposureLevel;
+        reference_chroma_distribution = lastMatchRef.current.reference_chroma_distribution as typeof sourceStats.chromaDistribution;
+      }
+
+      const payload = {
+        sourceId: `${source.file.name}:${source.file.size}:${source.file.lastModified}`,
+        referenceId: activeRef?.id ?? null,
+        sourceFilename: source.file.name,
+        referenceFilename: activeRef?.file.name ?? null,
+        autoParams,
+        correctedParams: lookParams,
+        source_exposure: sourceStats.exposureLevel,
+        source_chroma_distribution: sourceStats.chromaDistribution,
+        reference_exposure,
+        reference_chroma_distribution,
+        source_type,
+      };
+      const res = await fetch("/api/corrections", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error ?? "Failed to upload correction");
+      }
+      setCorrectionStatus("Correction uploaded.");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setCorrectionStatus(`Upload failed: ${message}`);
+    }
+  }
+
+  function onApplyHeuristics() {
+    if (!LEARNED_HEURISTICS) return;
+    if (!source) return;
+    if (hasAppliedHeuristics) return;
+
+    const baseMatch = lookParams.match;
+
+    const sourceExposureLevel = lastSourceStats?.exposureLevel ?? null;
+    const sourceExposureBucket = bucketForSourceExposure(sourceExposureLevel);
+    const sourceExposureScore = exposureScoreFromLevel(sourceExposureLevel);
+
+    const sourceTypeBucket: BucketName | undefined = sourceType
+      ? (`source_type:${sourceType}` as BucketName)
+      : undefined;
+
+    const refExposureSource: ExposureLevel | null =
+      (lastMatchRef.current?.reference_exposure as ExposureLevel | null) ??
+      lastRefStats?.exposureLevel ??
+      null;
+    const refColorSource: ChromaDistribution | null =
+      (lastMatchRef.current
+        ?.reference_chroma_distribution as ChromaDistribution | null) ??
+      lastRefStats?.chromaDistribution ??
+      null;
+
+    const refExposureBucket = bucketForRefExposure(refExposureSource);
+    const refExposureScore = exposureScoreFromLevel(refExposureSource);
+    const refColorBucket = bucketForRefColor(refColorSource);
+
+    const ctx: MatchContext = {
+      sourceExposureBucket,
+       // Soft weighting between exposure buckets
+      sourceExposureScore,
+      sourceTypeBucket,
+      refExposureBucket,
+      refExposureScore,
+      refColorBucket,
+    };
+
+    const adjustedMatch = applyHeuristicsToMatch(
+      baseMatch,
+      LEARNED_HEURISTICS,
+      ctx
+    );
+
+    setLookParams((prev) => ({
+      ...prev,
+      match: adjustedMatch,
+    }));
+    setHasAppliedHeuristics(true);
+  }
+
   return (
     <div className="p-4 md:p-6">
       <div className="flex items-center justify-between mb-4">
@@ -252,10 +604,8 @@ export default function LabPage() {
                 </h2>
                 <Input
                   type="file"
-                  accept="image/png,image/jpeg"
-                  onChange={(e) =>
-                    onPickSource(e.target.files?.[0] ?? null)
-                  }
+                  accept="image/png,image/jpeg,image/dng,image/x-adobe-dng,.dng"
+                  onChange={(e) => onPickSource(e.target.files?.[0] ?? null)}
                 />
               </section>
 
@@ -268,7 +618,7 @@ export default function LabPage() {
                 <Input
                   type="file"
                   multiple
-                  accept="image/png,image/jpeg"
+                  accept="image/png,image/jpeg,image/dng,image/x-adobe-dng,.dng"
                   onChange={(e) => onPickRefs(e.target.files)}
                 />
                 <Button
@@ -339,12 +689,24 @@ export default function LabPage() {
                         {section.label}
                       </h3>
                       {section.params.map((param) => {
-                        const value =
+                        const raw =
                           (sectionParams as Record<string, number>)[param.key];
-                        if (typeof value !== "number") return null;
+                        const value =
+                          typeof raw === "number"
+                            ? raw
+                            : (param.key === "highlightFillStrength" ||
+                               param.key === "highlightFillWarmth")
+                              ? 0
+                              : undefined;
+                        if (value === undefined) return null;
                         return (
                           <div key={param.key} className="space-y-1.5">
-                            <Label className="text-xs">{param.label}</Label>
+                            <div className="flex items-center justify-between gap-2">
+                              <Label className="text-xs">{param.label}</Label>
+                              <span className="text-[10px] tabular-nums text-muted-foreground">
+                                {value.toFixed(3)}
+                              </span>
+                            </div>
                             <Slider
                               value={[value]}
                               min={param.min}
@@ -361,6 +723,178 @@ export default function LabPage() {
                           </div>
                         );
                       })}
+                      {section.id === "match" && (
+                        <>
+                          <div className="space-y-1.5">
+                            <Label className="text-xs">Black point</Label>
+                            <div className="flex items-center gap-2">
+                              <Slider
+                                className="flex-1"
+                                value={[
+                                  lookParams.match.blackPoint ??
+                                    lookParams.grading.refBlackL ??
+                                    0.05,
+                                ]}
+                                min={0}
+                                max={0.6}
+                                step={0.005}
+                                onValueChange={(v) =>
+                                  setParam("match", "blackPoint", v[0] ?? 0.05)
+                                }
+                              />
+                              <Input
+                                type="number"
+                                className="w-16 h-8 text-xs"
+                                min={0}
+                                max={0.6}
+                                step={0.005}
+                                value={
+                                  lookParams.match.blackPoint ??
+                                  lookParams.grading.refBlackL ??
+                                  0.05
+                                }
+                                onChange={(e) => {
+                                  const n = parseFloat(e.target.value);
+                                  if (!Number.isNaN(n))
+                                    setParam(
+                                      "match",
+                                      "blackPoint",
+                                      Math.max(0, Math.min(0.6, n))
+                                    );
+                                }}
+                              />
+                            </div>
+                            <p className="text-[10px] text-muted-foreground">
+                              Reference black anchor (overrides fitted value)
+                            </p>
+                          </div>
+
+                          {/* Advanced per-band controls: hue / saturation / luma */}
+                          <div className="mt-3 space-y-2 border-t pt-2">
+                            <h4 className="text-[11px] font-medium text-muted-foreground/80">
+                              Band overrides (advanced)
+                            </h4>
+                            <p className="text-[10px] text-muted-foreground">
+                              Fine-tune hue, saturation, and tone per band on top of the
+                              automatic 5-band match.
+                            </p>
+                            {[
+                              {
+                                id: "lowerShadow",
+                                label: "Lower shadow",
+                              },
+                              {
+                                id: "upperShadow",
+                                label: "Upper shadow",
+                              },
+                              {
+                                id: "mid",
+                                label: "Mid",
+                              },
+                              {
+                                id: "lowerHigh",
+                                label: "Lower highlight",
+                              },
+                              {
+                                id: "upperHigh",
+                                label: "Upper highlight",
+                              },
+                            ].map((band) => {
+                              const hueKey = `band${band.id[0].toUpperCase()}${band.id.slice(
+                                1
+                              )}Hue`;
+                              const satKey = `band${band.id[0].toUpperCase()}${band.id.slice(
+                                1
+                              )}Sat`;
+                              const lumaKey = `band${
+                                band.id[0].toUpperCase() + band.id.slice(1)
+                              }Luma`;
+                              const matchSection =
+                                lookParams.match as unknown as Record<string, number>;
+                              const hueVal = matchSection[hueKey] ?? 0;
+                              const satVal = matchSection[satKey] ?? 1;
+                              const lumaVal = matchSection[lumaKey] ?? 0;
+                              return (
+                                <div
+                                  key={band.id}
+                                  className="space-y-1.5 rounded-md bg-muted/30 p-2"
+                                >
+                                  <div className="text-[11px] font-medium text-muted-foreground/90">
+                                    {band.label}
+                                  </div>
+                                  <div className="space-y-1.5">
+                                    <div className="flex items-center justify-between gap-2">
+                                      <Label className="text-[10px]">Hue</Label>
+                                      <span className="text-[10px] tabular-nums text-muted-foreground">
+                                        {hueVal.toFixed(2)}
+                                      </span>
+                                    </div>
+                                    <Slider
+                                      value={[hueVal]}
+                                      min={-1}
+                                      max={1}
+                                      step={0.01}
+                                      onValueChange={(v) =>
+                                        setParam(
+                                          "match",
+                                          hueKey,
+                                          v[0] ?? 0
+                                        )
+                                      }
+                                    />
+                                  </div>
+                                  <div className="space-y-1.5">
+                                    <div className="flex items-center justify-between gap-2">
+                                      <Label className="text-[10px]">
+                                        Saturation
+                                      </Label>
+                                      <span className="text-[10px] tabular-nums text-muted-foreground">
+                                        {satVal.toFixed(2)}
+                                      </span>
+                                    </div>
+                                    <Slider
+                                      value={[satVal]}
+                                      min={0}
+                                      max={2}
+                                      step={0.05}
+                                      onValueChange={(v) =>
+                                        setParam(
+                                          "match",
+                                          satKey,
+                                          v[0] ?? 1
+                                        )
+                                      }
+                                    />
+                                  </div>
+                                  <div className="space-y-1.5">
+                                    <div className="flex items-center justify-between gap-2">
+                                      <Label className="text-[10px]">
+                                        Tone
+                                      </Label>
+                                      <span className="text-[10px] tabular-nums text-muted-foreground">
+                                        {lumaVal.toFixed(3)}
+                                      </span>
+                                    </div>
+                                    <Slider
+                                      value={[lumaVal]}
+                                      min={-0.2}
+                                      max={0.2}
+                                      step={0.005}
+                                      onValueChange={(v) =>
+                                        setParam(
+                                          "match",
+                                          lumaKey,
+                                          v[0] ?? 0
+                                        )
+                                      }
+                                    />
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </>
+                      )}
                     </div>
                   );
                 })}
@@ -377,12 +911,42 @@ export default function LabPage() {
                   {isApplying ? "Processing…" : "Apply"}
                 </Button>
                 <Button
+                  variant="outline"
+                  onClick={() => onApplyHeuristics()}
+                  disabled={
+                    !source ||
+                    isApplying ||
+                    isUsingEmbeddings ||
+                    !LEARNED_HEURISTICS ||
+                    hasAppliedHeuristics
+                  }
+                  size="sm"
+                >
+                  Apply heuristics
+                </Button>
+                <Button
                   variant="secondary"
                   onClick={onExport}
                   disabled={!source || isApplying || isUsingEmbeddings}
                   size="sm"
                 >
                   Export
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => void onExportBaseline()}
+                  disabled={!source || isApplying || isUsingEmbeddings}
+                  size="sm"
+                >
+                  Export baseline PNG
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => void onUploadCorrection()}
+                  disabled={!source || isApplying || isUsingEmbeddings}
+                  size="sm"
+                >
+                  Upload correction
                 </Button>
                 {(isApplying || isUsingEmbeddings) && (
                   <span className="text-xs text-muted-foreground">
@@ -397,6 +961,11 @@ export default function LabPage() {
                 {applyError && (
                   <p className="w-full text-xs text-destructive">
                     Apply failed: {applyError}
+                  </p>
+                )}
+                {correctionStatus && (
+                  <p className="w-full text-xs text-muted-foreground">
+                    {correctionStatus}
                   </p>
                 )}
               </section>

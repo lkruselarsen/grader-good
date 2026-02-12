@@ -4,6 +4,13 @@
  */
 
 import { oklabToSrgb8, srgb8ToOklab } from "./oklab";
+import {
+  bucketForRefColor,
+  bucketForRefExposure,
+  bucketForSourceExposure,
+} from "@/src/lib/pipeline/heuristicsBuckets";
+import { applyHeuristicsToMatch } from "@/src/lib/pipeline/heuristicsAdapter";
+import { LEARNED_HEURISTICS } from "@/src/config/learnedHeuristics";
 
 /** Multi-segment tone curve: L_in -> L_out at anchors. Used when present instead of LGG. */
 export interface ToneCurveParams {
@@ -22,6 +29,49 @@ export interface TintByLParams {
 export interface SaturationByLParams {
   L_anchors: number[];
   scale: number[];
+}
+
+export type ColorBandId =
+  | "lowerShadow"
+  | "upperShadow"
+  | "mid"
+  | "lowerHigh"
+  | "upperHigh";
+
+export interface ColorBandStrengths {
+  lowerShadow: number;
+  upperShadow: number;
+  mid: number;
+  lowerHigh: number;
+  upperHigh: number;
+}
+
+/**
+ * Optional manual per-band overrides applied *after* the automatic 5-band
+ * colour match. These let the UI nudge hue/saturation/luma per band without
+ * changing how the core matcher derives deltas from the reference.
+ */
+export interface ColorBandOverrides {
+  /** Per-band hue shift control (-1..1, mapped to a small hue rotation). */
+  hue: ColorBandStrengths;
+  /** Per-band saturation multiplier (0..2, 1 = neutral). */
+  sat: ColorBandStrengths;
+  /** Per-band luma offset (-0.2..0.2, 0 = neutral). */
+  luma: ColorBandStrengths;
+}
+
+/**
+ * Optional reference-side statistics for 5-band colour matching.
+ * Each array has one entry per band, in the order:
+ *   [lowerShadow, upperShadow, mid, lowerHigh, upperHigh]
+ */
+export interface ColorMatchBandStats {
+  /** Mean OKLab a per band in the reference. */
+  refA: number[];
+  /** Mean OKLab b per band in the reference. */
+  refB: number[];
+  /** Mean chroma per band in the reference. */
+  refC: number[];
 }
 
 /** JSON-serializable grading parameters. Stable for embeddings. */
@@ -61,8 +111,46 @@ export interface LookParams {
   colorStrength?: number;
   /** Reference mid-L (median L) used for exposure matching (0..1, ~0.5 default). */
   refMidL?: number;
+  /** Reference "black" level (e.g. 5th percentile L) used for shadow / black matching. */
+  refBlackL?: number;
   /** UI-driven exposure match strength (0..2, 1 = match reference; <1 lean to source; >1 overshoot). */
   exposureStrength?: number;
+  /** UI-driven black match strength (0..4, 1 = normal, >1 = stronger pull). */
+  blackStrength?: number;
+  /**
+   * Upper luminance bound for black/shadow pull (0..1). Pixels with L below this
+   * are affected by Stage A4; higher values extend the pull into midtones.
+   */
+  blackRange?: number;
+  /**
+   * Per-luminance-band color match strengths. These modulate how strongly
+   * reference tint/grade is applied in:
+   *  - lowerShadow   (deepest shadows)
+   *  - upperShadow   (toe / low-mids)
+   *  - mid           (true midtones)
+   *  - lowerHigh     (lower highlights)
+   *  - upperHigh     (brightest highlights)
+   *
+   * 1 = use fitted reference grade as-is, 0 = disable band, >1 exaggerates.
+   */
+  colorBandStrengths?: ColorBandStrengths;
+  /**
+   * Optional per-band reference colour stats for true 5-band matching.
+   * When present, used together with source band stats to compute Δa/Δb
+   * per band in Stage B.
+   */
+  colorMatchBands?: ColorMatchBandStats;
+  /**
+   * Optional manual per-band overrides (hue/sat/luma) layered on top of the
+   * automatic 5-band match. These are designed to be driven directly from the
+   * Lab UI sliders.
+   */
+  colorBandOverrides?: ColorBandOverrides;
+  /**
+   * Optional highlight fill (bloom/density) for the halation stage. Not fitted
+   * from reference; driven from match UI and corrections.
+   */
+  highlightFill?: { strength: number; warmth?: number };
 }
 
 /** Identity / neutral params (no change). */
@@ -85,7 +173,18 @@ export function defaultLookParams(): LookParams {
     lumaStrength: 1,
     colorStrength: 1,
     refMidL: 0.5,
+    refBlackL: 0.05,
     exposureStrength: 1,
+    blackStrength: 1,
+    blackRange: 0.6,
+    colorBandStrengths: {
+      lowerShadow: 1,
+      upperShadow: 1,
+      mid: 1,
+      lowerHigh: 1,
+      upperHigh: 1,
+    },
+    colorMatchBands: undefined,
   };
 }
 
@@ -239,6 +338,10 @@ export function fitLookParamsFromReference(ref: ImageData): LookParams {
   const p75 = Lsorted[Math.floor(m * 0.75)] ?? 0.75;
   const p95 = Lsorted[Math.floor(m * 0.95)] ?? 0.95;
   const refMidL = Lsorted[Math.floor(m * 0.5)] ?? 0.5;
+  // Use 2nd percentile for a truer black anchor (5th percentile often lands too high).
+  const p02 = Lsorted[Math.floor(m * 0.02)] ?? 0.02;
+  const p05 = Lsorted[Math.floor(m * 0.05)] ?? 0.05;
+  const refBlackL = Math.min(p02, p05);
 
   const meanA = oas.reduce((s, x) => s + x, 0) / oas.length;
   const meanB = bs.reduce((s, x) => s + x, 0) / bs.length;
@@ -367,19 +470,96 @@ export function fitLookParamsFromReference(ref: ImageData): LookParams {
       rawB.push(k > 0 ? rawB[k - 1] : meanB);
     }
   }
-  // Stronger local tint: deviation from global mean, scaled up
-  const localScale = 1.4;
-  const tintA = rawA.map((v) =>
-    Math.max(-0.35, Math.min(0.35, (v - meanA) * localScale))
-  );
-  const tintB = rawB.map((v) =>
-    Math.max(-0.45, Math.min(0.45, (v - meanB) * localScale))
-  );
+  // Stronger local tint: deviation from global mean, scaled up.
+  // We keep this general-purpose but add a few safeguards so warm bands
+  // (skin, bricks, warm highlights) don't flip toward green/magenta due to
+  // small local deviations or a few outlier pixels.
+  const localScale = 1.1;
+  const maxDelta = 0.22; // max per-band deviation in any direction
+
+  const tintA: number[] = [];
+  const tintB: number[] = [];
+  for (let k = 0; k < rawA.length; k++) {
+    const vA = rawA[k];
+    const vB = rawB[k];
+    let dA = vA - meanA;
+    let dB = vB - meanB;
+
+    // If global reference is clearly warm (meanB > 0) and this band is also
+    // warm (vB > 0), avoid flipping the sign of warmth just because this band
+    // is *slightly* less warm than the global mean.
+    if (meanB > 0.03 && vB > 0.01 && dB * meanB < 0) {
+      dB *= 0.25;
+    }
+    // Same for cool refs but mirrored.
+    if (meanB < -0.03 && vB < -0.01 && dB * meanB < 0) {
+      dB *= 0.25;
+    }
+
+    // Global clamp on per-band tint distance so no band can run away and
+    // create wild colour shifts (e.g. green bricks from a few pixels).
+    const len = Math.hypot(dA, dB);
+    if (len > maxDelta && len > 1e-6) {
+      const s = maxDelta / len;
+      dA *= s;
+      dB *= s;
+    }
+
+    const aBand = Math.max(-0.35, Math.min(0.35, dA * localScale));
+    const bBand = Math.max(-0.45, Math.min(0.45, dB * localScale));
+    tintA.push(aBand);
+    tintB.push(bBand);
+  }
   const tintByL: TintByLParams = {
     L_anchors: tintAnchors,
     a: tintA,
     b: tintB,
   };
+
+  // Five-band reference stats for true 5-band colour matching.
+  // Anchors roughly span: deep shadows, upper shadows, mids, lower highs, upper highs.
+  const COLOR_BAND_ANCHORS = [0.08, 0.25, 0.5, 0.7, 0.9];
+  const bandCount = COLOR_BAND_ANCHORS.length;
+  const refSumA = new Array<number>(bandCount).fill(0);
+  const refSumB = new Array<number>(bandCount).fill(0);
+  const refSumC = new Array<number>(bandCount).fill(0);
+  const refSumW = new Array<number>(bandCount).fill(0);
+
+  function bandWeights(L: number): number[] {
+    const w: number[] = new Array(bandCount).fill(0);
+    const anchors = COLOR_BAND_ANCHORS;
+    // Triangular kernels around each anchor, with soft overlap.
+    for (let k = 0; k < bandCount; k++) {
+      const center = anchors[k];
+      const left = k === 0 ? 0 : anchors[k - 1];
+      const right = k === bandCount - 1 ? 1 : anchors[k + 1];
+      const width = Math.max(1e-3, Math.max(center - left, right - center));
+      const t = 1 - Math.abs(L - center) / width;
+      w[k] = t > 0 ? t : 0;
+    }
+    let sum = 0;
+    for (let k = 0; k < bandCount; k++) sum += w[k];
+    if (sum > 1e-6) {
+      for (let k = 0; k < bandCount; k++) w[k] /= sum;
+    }
+    return w;
+  }
+
+  for (let i = 0; i < m; i++) {
+    const L = Ls[i];
+    const C = Cs[i];
+    const aVal = oas[i];
+    const bVal = bs[i];
+    const w = bandWeights(L);
+    for (let k = 0; k < bandCount; k++) {
+      const wk = w[k];
+      if (wk <= 0) continue;
+      refSumA[k] += wk * aVal;
+      refSumB[k] += wk * bVal;
+      refSumC[k] += wk * C;
+      refSumW[k] += wk;
+    }
+  }
 
   const sumC: number[] = [];
   const countC: number[] = [];
@@ -410,6 +590,23 @@ export function fitLookParamsFromReference(ref: ImageData): LookParams {
     }
   }
   midChroma = cMidN > 0 ? midChroma / cMidN : 0.1;
+
+  const refA: number[] = [];
+  const refB: number[] = [];
+  const refC: number[] = [];
+  for (let k = 0; k < bandCount; k++) {
+    const w = refSumW[k];
+    if (w > 1e-4) {
+      refA[k] = refSumA[k] / w;
+      refB[k] = refSumB[k] / w;
+      refC[k] = refSumC[k] / w;
+    } else {
+      // Fall back to global means when band has almost no support.
+      refA[k] = meanA;
+      refB[k] = meanB;
+      refC[k] = midChroma || 0.1;
+    }
+  }
   const saturationScale = sumC.map((s, k) =>
     countC[k] > 0 && midChroma > 1e-6
       ? Math.max(0.2, Math.min(2, s / countC[k] / midChroma))
@@ -431,7 +628,47 @@ export function fitLookParamsFromReference(ref: ImageData): LookParams {
   // Reference midtone micro-contrast on L (RMS of high-frequency band in mid-L).
   const microContrastMid = computeMidDetailRms(Lgrid, mask, width, height);
 
-  return {
+  // Heuristic black match controls derived from reference shadows.
+  // References are hand-picked and generally well-exposed, so we can lean
+  // hard into them here. Deep, tight shadows → aggressive black pull; lifted
+  // blacks → gentler.
+  let blackStrength = 1;
+  let blackRange = 0.6;
+
+  const deepBlacks = refBlackL < 0.03;
+  const veryDeepBlacks = refBlackL < 0.015;
+  const tightShadows = shadowSpread < 0.12;
+  const veryTightShadows = shadowSpread < 0.08;
+
+  if (veryDeepBlacks && veryTightShadows) {
+    // Hard, punchy blacks (crisp neg / slide) – push strongly and far up
+    // into the lower mids so boring RAWs adopt the full reference depth.
+    blackStrength = 4.5;
+    blackRange = 0.9;
+  } else if (deepBlacks && tightShadows) {
+    blackStrength = 3.5;
+    blackRange = 0.85;
+  } else if (deepBlacks) {
+    blackStrength = 2.5;
+    blackRange = 0.8;
+  } else if (refBlackL < 0.06) {
+    blackStrength = 1.8;
+    blackRange = 0.7;
+  } else if (refBlackL > 0.09) {
+    // Very lifted blacks: keep match gentle and more local to the toe.
+    blackStrength = 0.7;
+    blackRange = 0.45;
+  }
+
+  const colorBandStrengths: ColorBandStrengths = {
+    lowerShadow: 1,
+    upperShadow: 1,
+    mid: 1,
+    lowerHigh: 1,
+    upperHigh: 1,
+  };
+
+  const base: LookParams = {
     tone: { lift, gamma, gain },
     toneCurve,
     saturation: {
@@ -450,7 +687,86 @@ export function fitLookParamsFromReference(ref: ImageData): LookParams {
     refSaturation,
     microContrastMid,
     refMidL,
+    refBlackL,
+    blackStrength,
+    blackRange,
+    colorBandStrengths,
+    colorMatchBands: {
+      refA,
+      refB,
+      refC,
+    },
+    colorBandOverrides: undefined,
   };
+
+  // Optionally apply learned heuristics as deltas on top of the analytic
+  // defaults derived above. At this point we only know about the reference, so
+  // we can populate reference-side buckets; source-side context is filled in
+  // later once source stats are available.
+  if (LEARNED_HEURISTICS) {
+    const refExposureBucket = bucketForRefExposure({
+      medianL: refMidL,
+      p05L: p05,
+      p95L: p95,
+    });
+    const refColorBucket = bucketForRefColor({
+      meanA: meanA,
+      meanB: meanB,
+      meanC: Cs.length
+        ? Cs.reduce((s, c) => s + c, 0) / Cs.length
+        : 0,
+      bands: [],
+    });
+
+    const adjustedMatch = applyHeuristicsToMatch(
+      {
+        // match.ts works with the engine-side LookParams; we only have grading
+        // params here, so we apply heuristics later in the pipeline when
+        // LookParamsMatch is available. This call is a no-op placeholder to
+        // keep types aligned and will be wired to real match defaults in the
+        // surrounding pipeline code.
+        lumaStrength: 1,
+        colorStrength: 1,
+        colorDensity: 1,
+        exposureStrength: 1,
+        blackStrength: blackStrength,
+        blackRange: blackRange,
+        bandLowerShadow: 1,
+        bandUpperShadow: 1,
+        bandMid: 1,
+        bandLowerHigh: 1,
+        bandUpperHigh: 1,
+        bandLowerShadowHue: 0,
+        bandUpperShadowHue: 0,
+        bandMidHue: 0,
+        bandLowerHighHue: 0,
+        bandUpperHighHue: 0,
+        bandLowerShadowSat: 1,
+        bandUpperShadowSat: 1,
+        bandMidSat: 1,
+        bandLowerHighSat: 1,
+        bandUpperHighSat: 1,
+        bandLowerShadowLuma: 0,
+        bandUpperShadowLuma: 0,
+        bandMidLuma: 0,
+        bandLowerHighLuma: 0,
+        bandUpperHighLuma: 0,
+        highlightFillStrength: 0,
+        highlightFillWarmth: 0,
+      },
+      LEARNED_HEURISTICS,
+      {
+        refExposureBucket,
+        refColorBucket,
+      }
+    );
+    // Currently we only care about black-strength related heuristics here;
+    // the full match object is applied at the UI / run-pipeline layer.
+    base.blackStrength = adjustedMatch.blackStrength;
+    base.blackRange = adjustedMatch.blackRange;
+  }
+
+  return base;
 }
 
 /** Median source L over opaque pixels (used for exposure matching). */
@@ -465,6 +781,38 @@ function sourceMidL(d: Uint8ClampedArray): number {
   const sorted = [...Ls].sort((a, b) => a - b);
   const m = sorted.length;
   return sorted[Math.floor(m * 0.5)] ?? 0.5;
+}
+
+/** Approximate "black" level of source: low-percentile L over opaque pixels (e.g. 5th percentile). */
+function sourceBlackL(d: Uint8ClampedArray): number {
+  const Ls: number[] = [];
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i + 3] < 128) continue;
+    const { L } = srgb8ToOklab(d[i], d[i + 1], d[i + 2]);
+    Ls.push(L);
+  }
+  if (Ls.length === 0) return 0.05;
+  const sorted = [...Ls].sort((a, b) => a - b);
+  const m = sorted.length;
+  return sorted[Math.floor(m * 0.05)] ?? 0.05;
+}
+
+/** Percentile of L from a grid, restricted to opaque pixels by mask. */
+function percentileFromLGrid(
+  Lgrid: Float32Array,
+  mask: Uint8Array,
+  p: number
+): number {
+  const vals: number[] = [];
+  const n = Lgrid.length;
+  for (let i = 0; i < n; i++) {
+    if (!mask[i]) continue;
+    vals.push(Lgrid[i]);
+  }
+  if (vals.length === 0) return 0;
+  vals.sort((a, b) => a - b);
+  const idx = Math.floor(Math.max(0, Math.min(1, p)) * (vals.length - 1));
+  return vals[idx] ?? 0;
 }
 
 /** Simple separable 5-tap Gaussian blur (approx σ≈1) on a luminance grid. */
@@ -517,8 +865,21 @@ function gaussianBlur5(
 }
 
 /**
- * RMS of a single high-frequency detail band on L, restricted to midtones.
- * Used as a simple scalar "micro-contrast in mids" descriptor.
+ * Heavier blur for film-like microcontrast: captures medium-frequency, coarser
+ * detail rather than sharp high-frequency. Two passes of 5-tap ≈ σ≈1.4.
+ */
+function gaussianBlurFilm(
+  src: Float32Array,
+  width: number,
+  height: number
+): Float32Array {
+  const once = gaussianBlur5(src, width, height);
+  return gaussianBlur5(once, width, height);
+}
+
+/**
+ * RMS of a medium-frequency detail band on L, restricted to midtones.
+ * Uses heavier blur for film-like, low-resolution microcontrast.
  */
 function computeMidDetailRms(
   Lgrid: Float32Array,
@@ -528,7 +889,7 @@ function computeMidDetailRms(
 ): number {
   const n = width * height;
   if (n === 0) return 0;
-  const blurred = gaussianBlur5(Lgrid, width, height);
+  const blurred = gaussianBlurFilm(Lgrid, width, height);
   let sumSq = 0;
   let count = 0;
   for (let idx = 0; idx < n; idx++) {
@@ -571,7 +932,13 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
     lumaStrength = 1,
     colorStrength = 1,
     refMidL = 0.5,
+    refBlackL = 0.05,
     exposureStrength = 1,
+    blackStrength = 1,
+    blackRange = 0.6,
+    colorBandStrengths,
+    colorMatchBands,
+    colorBandOverrides,
   } = params;
   const { lift, gamma, gain } = tone;
   const {
@@ -581,7 +948,8 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
     highlightColorDensity,
   } = saturation;
 
-  const useToneCurve = toneCurve && toneCurve.L_in.length > 0 && toneCurve.L_out.length > 0;
+  const useToneCurve =
+    toneCurve && toneCurve.L_in.length > 0 && toneCurve.L_out.length > 0;
   const useTintByL = tintByL && tintByL.L_anchors.length > 0;
   const useSaturationByL =
     saturationByL && saturationByL.L_anchors.length > 0 && saturationByL.scale.length > 0;
@@ -591,7 +959,25 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
   const srcMidL = sourceMidL(d);
   const clampedRefMidL = Math.max(0, Math.min(1, refMidL));
   const clampedExposureStrength = Math.max(0, Math.min(2, exposureStrength));
-  const exposureDelta = clampedExposureStrength * (clampedRefMidL - srcMidL);
+  // Ideal delta to align medians, with a mild clamp so extremely different
+  // pairs don't blow up. We treat exposureStrength in [0,1] as interpolation
+  // between 0 and this ideal delta; >1 only extends it gently.
+  const idealDeltaRaw = clampedRefMidL - srcMidL;
+  const idealDelta = Math.max(-0.6, Math.min(0.6, idealDeltaRaw));
+  let exposureDelta = 0;
+  if (clampedExposureStrength <= 1) {
+    exposureDelta = clampedExposureStrength * idealDelta;
+  } else {
+    const extra = clampedExposureStrength - 1; // 0..1
+    const maxOvershoot = 0.3; // up to 30% beyond ideal
+    exposureDelta = idealDelta * (1 + maxOvershoot * extra);
+  }
+
+  // Source and reference "black" levels (low-percentile L) for shadow / black matching.
+  const srcBlack = sourceBlackL(d);
+  const clampedRefBlack = Math.max(0, Math.min(0.2, refBlackL));
+  const clampedBlackStrength = Math.max(0, Math.min(8, blackStrength));
+  const blackDelta = clampedBlackStrength * (clampedRefBlack - srcBlack);
 
 
   // No scene-based scaling – same behaviour for day and night; reference drives everything
@@ -599,6 +985,8 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
   // Stage A: tone mapping on L only (no color changes yet).
   const L_src = new Float32Array(nPix);
   const L_tone = new Float32Array(nPix);
+  // L after exposure + tone + luma/black matching (before microcontrast).
+  const L_luma = new Float32Array(nPix);
   const aBuf = new Float32Array(nPix);
   const bBuf = new Float32Array(nPix);
   const alphaBuf = new Uint8ClampedArray(nPix);
@@ -647,15 +1035,104 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
     mask[pix] = 1;
   }
 
-  // Optional Stage A2: micro-contrast on L in midtones, matching reference's mid-detail RMS.
+  // Optional Stage A2: micro-contrast on L in midtones, film-like (medium-frequency detail).
+  // Start from tone-mapped L before microcontrast; this buffer will host
+  // luma-strength blending and black/shadow alignment *before* actuance.
+  for (let idx = 0; idx < nPix; idx++) {
+    L_luma[idx] = L_tone[idx];
+  }
+
+  // Stage A3: blend luma between source and matched using lumaStrength (0..2).
+  // Semantics:
+  //   0   = keep exposed source luma
+  //   1   = use reference tone curve shape (no overshoot)
+  //   >1  = gently increase contrast beyond reference
+  const lumaS = Math.max(0, Math.min(2, lumaStrength));
+  let lumaBlend = 0;
+  if (lumaS <= 1) {
+    lumaBlend = lumaS;
+  } else {
+    const extra = lumaS - 1; // 0..1
+    const maxOvershoot = 0.3; // allow up to 30% beyond reference
+    lumaBlend = 1 + maxOvershoot * extra;
+  }
+  if (Math.abs(lumaBlend) > 1e-3) {
+    for (let idx = 0; idx < nPix; idx++) {
+      const Ls = L_src[idx];
+      const Lg = L_luma[idx];
+      // 0 = source, 1 = reference; no overshoot. Quadratic mapping keeps
+      // low strengths subtle and encourages using the full slider travel.
+      let L = Ls + lumaBlend * (Lg - Ls);
+      if (L < 0) L = 0;
+      else if (L > 1) L = 1;
+      L_luma[idx] = L;
+    }
+  }
+
+  // Stage A4: explicit black / shadow alignment with safety normalization.
+  // Use low-percentile L from reference and source to gently pull shadows
+  // toward the reference black while avoiding over-crushing.
+  if (Math.abs(blackDelta) > 1e-3) {
+    const L_beforeBlack = new Float32Array(L_luma);
+    // When user sets black point to 0, use wider range and linear falloff so the pull is visible.
+    const pullDown = blackDelta < 0;
+    const baseShadowCeiling = Math.max(0.1, Math.min(0.95, blackRange));
+    const useWideRange = pullDown && clampedRefBlack < 0.02;
+    const shadowCeiling = useWideRange
+      ? Math.min(0.95, baseShadowCeiling + 0.2)
+      : baseShadowCeiling;
+    const linearWeight = useWideRange; // (1-t) instead of (1-t)^2 for stronger pull
+
+    // Soft shadow compression: affect L <= shadowCeiling, strongest near 0.
+    for (let idx = 0; idx < nPix; idx++) {
+      if (!mask[idx]) continue;
+      let L = L_luma[idx];
+      if (L <= shadowCeiling) {
+        const tShadow = L / shadowCeiling;
+        const weight = linearWeight ? 1 - tShadow : (1 - tShadow) * (1 - tShadow); // linear when pulling to 0 for visibility
+        L += blackDelta * weight;
+        if (L < 0) L = 0;
+        else if (L > 1) L = 1;
+        L_luma[idx] = L;
+      }
+    }
+
+    // Normalization: ensure processed shadows aren't much darker than reference.
+    const p5Ref = clampedRefBlack;
+    const p5Before = percentileFromLGrid(L_beforeBlack, mask, 0.05);
+    const p5After = percentileFromLGrid(L_luma, mask, 0.05);
+    // Allow up to ~0.03 deeper blacks than reference.
+    const minAllowed = Math.max(0, p5Ref - 0.03);
+    if (p5After < minAllowed && p5Before > minAllowed) {
+      const denom = p5After - p5Before;
+      if (Math.abs(denom) > 1e-5) {
+        let alpha = (minAllowed - p5Before) / denom;
+        if (alpha < 0) alpha = 0;
+        else if (alpha > 1) alpha = 1;
+        for (let idx = 0; idx < nPix; idx++) {
+          if (!mask[idx]) continue;
+          const L0 = L_beforeBlack[idx];
+          let L = L0 + alpha * (L_luma[idx] - L0);
+          if (L < 0) L = 0;
+          else if (L > 1) L = 1;
+          L_luma[idx] = L;
+        }
+      }
+    }
+  }
+
+  // Stage A5: actuance / microcontrast on the *final* luma (after exposure,
+  // tone curve, luma-strength blend, and black alignment). This keeps local
+  // contrast tied to the final tone structure instead of fighting later
+  // luma/black stages.
   const L_final = new Float32Array(nPix);
   if (microContrastMid > 0) {
-    const blurred = gaussianBlur5(L_tone, width, height);
+    const blurred = gaussianBlurFilm(L_luma, width, height);
     let sumSq = 0;
     let count = 0;
     for (let idx = 0; idx < nPix; idx++) {
       if (!mask[idx]) continue;
-      const L = L_tone[idx];
+      const L = L_luma[idx];
       if (L < 0.25 || L > 0.75) continue;
       const dL = L - blurred[idx];
       sumSq += dL * dL;
@@ -674,36 +1151,161 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
         continue;
       }
       const base = blurred[idx];
-      const dL = L_tone[idx] - base;
+      const dL = L_luma[idx] - base;
       let L = base + gain * dL;
       if (L < 0) L = 0;
       else if (L > 1) L = 1;
       L_final[idx] = L;
     }
   } else {
-    // No reference micro-contrast info: use tone-mapped L as-is.
     for (let idx = 0; idx < nPix; idx++) {
-      L_final[idx] = L_tone[idx];
-    }
-  }
-
-  // Stage A3: blend luma between source and matched using lumaStrength (0..2).
-  const lumaS = Math.max(0, Math.min(2, lumaStrength));
-  const lumaBlend = lumaS <= 1 ? lumaS : 1 + 0.5 * (lumaS - 1);
-  if (Math.abs(lumaBlend - 1) > 1e-3) {
-    for (let idx = 0; idx < nPix; idx++) {
-      const Ls = L_src[idx];
-      const Lg = L_final[idx];
-      // Linear extrapolation with gentle overshoot: 0 = source, 1 = reference, >1 = softened overshoot.
-      let L = Ls + lumaBlend * (Lg - Ls);
-      if (L < 0) L = 0;
-      else if (L > 1) L = 1;
-      L_final[idx] = L;
+      L_final[idx] = L_luma[idx];
     }
   }
 
   // Stage B: color mapping (chroma + tint) using final L.
   const colorS = Math.max(0, Math.min(2, colorStrength));
+  const bands = colorBandStrengths;
+
+  // Precompute 5-band source stats for true 5-band colour matching when we
+  // have reference-side stats available.
+  const useColorBands =
+    !!colorMatchBands &&
+    Array.isArray(colorMatchBands.refA) &&
+    colorMatchBands.refA.length === 5 &&
+    Array.isArray(colorMatchBands.refB) &&
+    colorMatchBands.refB.length === 5 &&
+    Array.isArray(colorMatchBands.refC) &&
+    colorMatchBands.refC.length === 5;
+
+  const COLOR_BAND_ANCHORS = [0.08, 0.25, 0.5, 0.7, 0.9];
+  const bandCount = COLOR_BAND_ANCHORS.length;
+
+  function bandWeights(L: number): number[] {
+    const w = new Array<number>(bandCount).fill(0);
+    const anchors = COLOR_BAND_ANCHORS;
+    for (let k = 0; k < bandCount; k++) {
+      const center = anchors[k];
+      const left = k === 0 ? 0 : anchors[k - 1];
+      const right = k === bandCount - 1 ? 1 : anchors[k + 1];
+      const width = Math.max(1e-3, Math.max(center - left, right - center));
+      const tL = 1 - Math.abs(L - center) / width;
+      w[k] = tL > 0 ? tL : 0;
+    }
+    let sum = 0;
+    for (let k = 0; k < bandCount; k++) sum += w[k];
+    if (sum > 1e-6) {
+      for (let k = 0; k < bandCount; k++) w[k] /= sum;
+    }
+    return w;
+  }
+
+  const srcSumA = new Array<number>(bandCount).fill(0);
+  const srcSumB = new Array<number>(bandCount).fill(0);
+  const srcSumC = new Array<number>(bandCount).fill(0);
+  const srcSumW = new Array<number>(bandCount).fill(0);
+
+  if (useColorBands) {
+    for (let idx = 0; idx < nPix; idx++) {
+      if (!mask[idx]) continue;
+      const L = L_final[idx];
+      const aVal = aBuf[idx];
+      const bVal = bBuf[idx];
+      const C = chroma(aVal, bVal);
+      const w = bandWeights(L);
+      for (let k = 0; k < bandCount; k++) {
+        const wk = w[k];
+        if (wk <= 0) continue;
+        srcSumA[k] += wk * aVal;
+        srcSumB[k] += wk * bVal;
+        srcSumC[k] += wk * C;
+        srcSumW[k] += wk;
+      }
+    }
+  }
+
+  const bandDeltaA = new Array<number>(bandCount).fill(0);
+  const bandDeltaB = new Array<number>(bandCount).fill(0);
+  const bandScaleC = new Array<number>(bandCount).fill(1);
+
+  if (useColorBands) {
+    const refA = colorMatchBands!.refA;
+    const refB = colorMatchBands!.refB;
+    const refC = colorMatchBands!.refC;
+    for (let k = 0; k < bandCount; k++) {
+      const w = srcSumW[k];
+      if (w <= 1e-4) {
+        bandDeltaA[k] = 0;
+        bandDeltaB[k] = 0;
+        bandScaleC[k] = 1;
+        continue;
+      }
+      const aSrc = srcSumA[k] / w;
+      const bSrc = srcSumB[k] / w;
+      const cSrc = srcSumC[k] / w;
+      const aRef = refA[k];
+      const bRef = refB[k];
+      const cRef = refC[k];
+
+      let dA = aRef - aSrc;
+      let dB = bRef - bSrc;
+
+      // Clamp vector length (hue shift + saturation change) so no band can
+      // run away and create wild colour shifts.
+      const len = Math.hypot(dA, dB);
+      const maxLen = 0.16;
+      if (len > maxLen && len > 1e-6) {
+        const s = maxLen / len;
+        dA *= s;
+        dB *= s;
+      }
+
+      // Avoid flipping warm bands toward green/cyan and vice versa.
+      if (aSrc > -0.02 && bSrc > 0.02 && aRef > -0.02 && bRef > 0.02) {
+        // Warm in both; dampen deltas that would strongly cross the a/b axes.
+        if (dB < 0) dB *= 0.4;
+      }
+
+      bandDeltaA[k] = dA;
+      bandDeltaB[k] = dB;
+
+      if (cSrc > 1e-4 && cRef > 1e-4) {
+        let kC = cRef / cSrc;
+        if (kC < 0.5) kC = 0.5;
+        else if (kC > 1.8) kC = 1.8;
+        bandScaleC[k] = kC;
+      } else {
+        bandScaleC[k] = 1;
+      }
+    }
+  }
+  // Helpers to read per-band override values safely.
+  function bandValue(
+    id: number,
+    values:
+      | ColorBandStrengths
+      | undefined
+  ): number {
+    if (!values) return id === 0 || id === 1 || id === 2 || id === 3 || id === 4
+      ? (id === 0
+          ? 0
+          : 0)
+      : 0;
+    switch (id) {
+      case 0:
+        return values.lowerShadow;
+      case 1:
+        return values.upperShadow;
+      case 2:
+        return values.mid;
+      case 3:
+        return values.lowerHigh;
+      case 4:
+      default:
+        return values.upperHigh;
+    }
+  }
+
   for (let pix = 0, i = 0; pix < nPix; pix++, i += 4) {
     const a = alphaBuf[pix];
     if (a < 128) {
@@ -714,7 +1316,7 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
       continue;
     }
 
-    const L = L_final[pix];
+    let L = L_final[pix];
     const aSrc = aBuf[pix];
     const bSrc = bBuf[pix];
     let oa = aSrc;
@@ -732,13 +1334,102 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
     oa *= scale;
     ob *= scale;
 
-    if (useTintByL) {
+    if (useColorBands) {
+      // True 5-band Δa/Δb matching: blend per-band deltas and chroma scales
+      // based on this pixel's luminance, then apply on top of the source.
+      const w = bandWeights(L);
+      let numA = 0;
+      let numB = 0;
+      let numCScale = 0;
+      let den = 0;
+      for (let k = 0; k < bandCount; k++) {
+        let wk = w[k];
+        if (wk <= 0) continue;
+        if (bands) {
+          const strength =
+            k === 0
+              ? bands.lowerShadow
+              : k === 1
+              ? bands.upperShadow
+              : k === 2
+              ? bands.mid
+              : k === 3
+              ? bands.lowerHigh
+              : bands.upperHigh;
+          wk *= strength;
+        }
+        numA += wk * bandDeltaA[k];
+        numB += wk * bandDeltaB[k];
+        numCScale += wk * bandScaleC[k];
+        den += wk;
+      }
+      const baseA = aSrc;
+      const baseB = bSrc;
+      if (den > 1e-4) {
+        const dA = numA / den;
+        const dB = numB / den;
+        const kC = numCScale / den;
+        const baseC = chroma(baseA, baseB);
+        let aMatch = baseA + dA;
+        let bMatch = baseB + dB;
+        // Apply chroma scaling along the matched hue direction.
+        const cMatch = chroma(aMatch, bMatch);
+        if (cMatch > 1e-5 && baseC > 1e-5) {
+          const scaleToRef = (baseC * kC) / cMatch;
+          const clampScale = Math.max(0.4, Math.min(2.2, scaleToRef));
+          aMatch *= clampScale;
+          bMatch *= clampScale;
+        }
+        oa = aMatch;
+        ob = bMatch;
+      }
+      // Global tint/warmth still apply as gentle bias.
+      oa += tint * 0.25;
+      ob += warmth * 0.25;
+      } else if (useTintByL) {
       const t = interpolateTintByL(L, tintByL);
+      // Per-band color strength: modulate how strongly reference tint is applied
+      // in shadows/mids/highlights. When not provided, falls back to 1.
+      let bandFactor = 1;
+      if (bands) {
+        const ls = Math.max(0, Math.min(1, L));
+        // Five overlapping triangular bands across L.
+        const wLowerShadow = ls <= 0.3 ? (ls <= 0.15 ? 1 - ls / 0.15 : Math.max(0, (0.3 - ls) / 0.15)) : 0;
+        const wUpperShadow =
+          ls >= 0.1 && ls <= 0.45
+            ? 1 - Math.abs(ls - 0.275) / 0.175
+            : 0;
+        const wMid =
+          ls >= 0.3 && ls <= 0.7
+            ? 1 - Math.abs(ls - 0.5) / 0.2
+            : 0;
+        const wLowerHigh =
+          ls >= 0.5 && ls <= 0.85
+            ? 1 - Math.abs(ls - 0.675) / 0.175
+            : 0;
+        const wUpperHigh =
+          ls >= 0.7
+            ? (ls <= 0.85 ? (ls - 0.7) / 0.15 : Math.max(0, (1 - ls) / 0.15))
+            : 0;
+        const num =
+          wLowerShadow * bands.lowerShadow +
+          wUpperShadow * bands.upperShadow +
+          wMid * bands.mid +
+          wLowerHigh * bands.lowerHigh +
+          wUpperHigh * bands.upperHigh;
+        const den =
+          wLowerShadow +
+          wUpperShadow +
+          wMid +
+          wLowerHigh +
+          wUpperHigh;
+        bandFactor = den > 1e-3 ? num / den : 1;
+      }
       const localContrast = 1 + 0.25 * Math.min(1, C / 0.08);
       const highlightFade = 1 - 0.15 * L * L;
       const shadowMidBoost = 1 + 0.75 * (1 - L) ** 0.585;
-      oa += t.a * localContrast * highlightFade * shadowMidBoost;
-      ob += t.b * localContrast * highlightFade * shadowMidBoost;
+      oa += bandFactor * t.a * localContrast * highlightFade * shadowMidBoost;
+      ob += bandFactor * t.b * localContrast * highlightFade * shadowMidBoost;
       oa += tint * 0.35;
       ob += warmth * 0.35;
     } else {
@@ -754,6 +1445,55 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
     if (Math.abs(colorS - 1) > 1e-3) {
       oa = aSrc + colorS * (oa - aSrc);
       ob = bSrc + colorS * (ob - bSrc);
+    }
+
+    // Stage B3: apply manual per-band overrides (hue/sat/luma), if provided.
+    if (colorBandOverrides) {
+      const w = bandWeights(L);
+      let hueControl = 0;
+      let satControl = 0;
+      let lumaControl = 0;
+      for (let k = 0; k < bandCount; k++) {
+        const wk = w[k];
+        if (wk <= 0) continue;
+        hueControl += wk * bandValue(k, colorBandOverrides.hue);
+        // Saturation sliders are centred at 1; we aggregate their delta from 1.
+        const satVal = bandValue(k, colorBandOverrides.sat);
+        satControl += wk * (satVal - 1);
+        lumaControl += wk * bandValue(k, colorBandOverrides.luma);
+      }
+
+      // Hue: map [-1,1] → [-30°,30°] and rotate in a/b plane.
+      const maxHueRad = (Math.PI / 180) * 30;
+      const theta = Math.max(-1, Math.min(1, hueControl)) * maxHueRad;
+      if (Math.abs(theta) > 1e-4) {
+        const cosT = Math.cos(theta);
+        const sinT = Math.sin(theta);
+        const aRot = oa * cosT - ob * sinT;
+        const bRot = oa * sinT + ob * cosT;
+        oa = aRot;
+        ob = bRot;
+      }
+
+      // Saturation: aggregate delta from 1 and clamp to a sensible range.
+      const satMulRaw = 1 + satControl;
+      const satMul = Math.max(0.2, Math.min(2.5, satMulRaw));
+      const Cafter = chroma(oa, ob);
+      if (Cafter > 1e-6 && Math.abs(satMul - 1) > 1e-3) {
+        const s = satMul;
+        oa *= s;
+        ob *= s;
+      }
+
+      // Luma: aggregate offsets and clamp.
+      if (Math.abs(lumaControl) > 1e-4) {
+        const maxLumaOffset = 0.2;
+        const dL = Math.max(
+          -maxLumaOffset,
+          Math.min(maxLumaOffset, lumaControl)
+        );
+        L = Math.max(0, Math.min(1, L + dL));
+      }
     }
 
     const rgb = oklabToSrgb8(L, oa, ob);

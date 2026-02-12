@@ -15,3 +15,10 @@ export type {
   PipelineParams,
 } from "./types";
 export { allocPixelFrameF32 } from "./types";
+export {
+  computeImageStats,
+  type ImageStats,
+  type ExposureLevel,
+  type ChromaDistribution,
+  type ChromaBand,
+} from "./imageStats";
