@@ -29,8 +29,6 @@ export interface MatchContext {
   refColorBucket?: BucketName; // ref_color:*
 }
 
-type ParamKey = string;
-
 function clamp(value: number, min: number, max: number): number {
   if (value < min) return min;
   if (value > max) return max;
@@ -189,7 +187,7 @@ function buildExposureWeights(
     const center = centers[bucket];
     rawWeights.push(gaussianWeight(score, center, sigma));
   }
-  let sum = rawWeights.reduce((acc, w) => acc + w, 0);
+  const sum = rawWeights.reduce((acc, w) => acc + w, 0);
 
   // Extremely small sum → fall back to hard bucket, if we have one.
   if (!Number.isFinite(sum) || sum < 1e-6) {

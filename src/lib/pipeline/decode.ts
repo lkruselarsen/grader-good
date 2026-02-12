@@ -254,7 +254,7 @@ async function decodeDng(file: File): Promise<PixelFrameRGBA> {
     normalizeDngBaseline(frame, gainBias);
 
     return frame;
-  } catch (err) {
+  } catch {
     // Normalize any libraw/worker/WASM failures into a single decode error.
     throw new Error("The source image could not be decoded.");
   }

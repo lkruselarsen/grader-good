@@ -77,8 +77,6 @@ const NEUTRAL_CHROMA: ChromaDistribution = {
  */
 export function computeImageStats(image: ImageData): ImageStats {
   const d = image.data;
-  const w = image.width;
-  const h = image.height;
   const Ls: number[] = [];
   const oas: number[] = [];
   const obs: number[] = [];
@@ -112,7 +110,7 @@ export function computeImageStats(image: ImageData): ImageStats {
   const sumA = oas.reduce((s, x) => s + x, 0);
   const sumB = obs.reduce((s, x) => s + x, 0);
   const sumC = Cs.reduce((s, x) => s + x, 0);
-  const bands: ChromaBand[] = COLOR_BAND_ANCHORS.map((_, k) => ({
+  const bands: ChromaBand[] = COLOR_BAND_ANCHORS.map(() => ({
     meanA: 0,
     meanB: 0,
     meanC: 0,

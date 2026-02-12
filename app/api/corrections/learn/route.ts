@@ -181,7 +181,7 @@ export async function GET() {
     const bucketSummary: Record<
       BucketName,
       { meanDelta: number; count: number }
-    > = {} as any;
+    > = {};
     for (const [bucketName, agg] of Object.entries(buckets) as [
       BucketName,
       ParamDeltaAgg

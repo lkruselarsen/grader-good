@@ -7,7 +7,6 @@ import { oklabToSrgb8, srgb8ToOklab } from "./oklab";
 import {
   bucketForRefColor,
   bucketForRefExposure,
-  bucketForSourceExposure,
 } from "@/src/lib/pipeline/heuristicsBuckets";
 import { applyHeuristicsToMatch } from "@/src/lib/pipeline/heuristicsAdapter";
 import { LEARNED_HEURISTICS } from "@/src/config/learnedHeuristics";
