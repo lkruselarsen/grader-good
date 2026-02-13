@@ -44,32 +44,96 @@ export async function POST(request: Request) {
     Math.max(1, parseInt(limitParam ?? "5", 10) || 5)
   );
 
-  // Prefer semantic-first search
-  if (validateEmbedding(body.embeddingSemantic, SEMANTIC_EMBEDDING_DIM)) {
-    const embeddingSemantic = body.embeddingSemantic as number[];
-    const { data, error } = await supabaseAdmin.rpc(
-      "match_grading_samples_semantic",
-      {
-        query_embedding: embeddingSemantic,
-        match_limit: limit,
-      }
-    );
+  const hasSemantic = validateEmbedding(
+    body.embeddingSemantic,
+    SEMANTIC_EMBEDDING_DIM
+  );
+  const hasTonal = validateEmbedding(body.embedding, EMBEDDING_DIM);
 
-    if (error) {
+  // Prefer semantic-first search; when both embeddings are provided, we
+  // combine scores so colour/tonal distribution can break ties between
+  // semantically similar candidates.
+  if (hasSemantic) {
+    const embeddingSemantic = body.embeddingSemantic as number[];
+    const semanticLimit = hasTonal ? Math.min(20, limit * 4) : limit;
+
+    const { data: semanticData, error: semanticError } =
+      await supabaseAdmin.rpc("match_grading_samples_semantic", {
+        query_embedding: embeddingSemantic,
+        match_limit: semanticLimit,
+      });
+
+    if (semanticError) {
       return NextResponse.json(
         {
-          error: error.message,
+          error: semanticError.message,
           hint: "Run migration 00004_semantic_embeddings.sql",
         },
         { status: 500 }
       );
     }
 
-    return NextResponse.json({ matches: data ?? [] });
+    if (!hasTonal) {
+      return NextResponse.json({ matches: semanticData ?? [] });
+    }
+
+    const tonalEmbedding = body.embedding as number[];
+    const { data: tonalData, error: tonalError } =
+      await supabaseAdmin.rpc("match_grading_samples", {
+        query_embedding: tonalEmbedding,
+        match_limit: semanticLimit,
+      });
+
+    if (tonalError) {
+      return NextResponse.json(
+        {
+          error: tonalError.message,
+          hint: "Run migration 00003_match_grading_samples.sql",
+        },
+        { status: 500 }
+      );
+    }
+
+    // Re-rank by combined score when both semantic and tonal similarities are
+    // available. Expect both RPCs to return rows with at least { id, similarity }.
+    const tonalById = new Map<
+      string,
+      { similarity?: number; [key: string]: unknown }
+    >();
+    for (const row of tonalData ?? []) {
+      const id = String((row as { id?: unknown }).id ?? "");
+      tonalById.set(id, row as { similarity?: number });
+    }
+
+    const wSemantic = 0.7;
+    const wTonal = 0.3;
+
+    const scored = (semanticData ?? []).map((row) => {
+      const id = String((row as { id?: unknown }).id ?? "");
+      const semSim =
+        typeof (row as { similarity?: unknown }).similarity === "number"
+          ? ((row as { similarity: number }).similarity as number)
+          : 0;
+      const tonalRow = tonalById.get(id);
+      const tonSim =
+        tonalRow && typeof tonalRow.similarity === "number"
+          ? (tonalRow.similarity as number)
+          : 0;
+      const score = wSemantic * semSim + wTonal * tonSim;
+      return { ...row, _combined_score: score };
+    });
+
+    scored.sort(
+      (a, b) =>
+        (b as { _combined_score?: number })._combined_score! -
+        (a as { _combined_score?: number })._combined_score!
+    );
+
+    return NextResponse.json({ matches: scored.slice(0, limit) });
   }
 
-  // Fallback to tonal search
-  if (validateEmbedding(body.embedding, EMBEDDING_DIM)) {
+  // Fallback to tonal-only search when no semantic embedding is provided.
+  if (hasTonal) {
     const embedding = body.embedding as number[];
     const { data, error } = await supabaseAdmin.rpc("match_grading_samples", {
       query_embedding: embedding,

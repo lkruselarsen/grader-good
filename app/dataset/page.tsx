@@ -4,8 +4,7 @@ import { useCallback, useState } from "react";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { decode } from "@/src/lib/pipeline/decode";
-import { frameToImageData } from "@/src/lib/pipeline/exportStage";
+import { decode, frameToImageData, computeImageStats } from "@/src/lib/pipeline";
 import { fitLookParamsFromReference } from "@/src/lib/pipeline/stages/match";
 import { imageToEmbedding } from "@/src/lib/embeddings";
 import { imageToSemanticEmbedding } from "@/src/lib/semanticEmbeddings";
@@ -40,12 +39,15 @@ export default function DatasetPage() {
         const lookParams = fitLookParamsFromReference(imageData);
         const embedding = imageToEmbedding(imageData);
         const embeddingSemantic = await imageToSemanticEmbedding(file);
+        const refStats = computeImageStats(imageData);
 
         const formData = new FormData();
         formData.append("file", file);
         formData.append("lookParams", JSON.stringify(lookParams));
         formData.append("embedding", JSON.stringify(embedding));
         formData.append("embeddingSemantic", JSON.stringify(embeddingSemantic));
+        formData.append("reference_exposure", JSON.stringify(refStats.exposureLevel));
+        formData.append("reference_chroma_distribution", JSON.stringify(refStats.chromaDistribution));
 
         const res = await fetch("/api/dataset/upload", {
           method: "POST",

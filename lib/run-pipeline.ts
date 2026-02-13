@@ -14,6 +14,8 @@ import {
   exportToCanvas,
   frameToImageData,
   decode,
+  computeImageStats,
+  type ImageStats,
 } from "@/src/lib/pipeline";
 import { fitLookParamsFromReference } from "@/src/lib/pipeline/stages/match";
 
@@ -65,6 +67,43 @@ export async function previewSource(
 export interface RunPipelineResult {
   /** When reference was used, the fitted grading params for the UI to store. */
   fittedGrading?: LookParams["grading"];
+  /** Source image exposure and chroma stats (for correction context / bias). */
+  sourceStats?: ImageStats;
+  /** Reference image stats when reference file was used. */
+  refStats?: ImageStats;
+}
+
+/**
+ * Utility for debugging: export the baseline render (after decode + baseline
+ * normalization, before any matching) as a PNG Blob. Useful for A/B against
+ * Lightroom exports and for verifying matcher input consistency.
+ */
+export async function exportBaselinePngBlob(
+  sourceFile: File
+): Promise<Blob> {
+  const frame = await decode(sourceFile);
+  const imageData = frameToImageData(frame);
+  const canvas = document.createElement("canvas");
+  canvas.width = frame.width;
+  canvas.height = frame.height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    throw new Error("Could not get 2D context for baseline export");
+  }
+  ctx.putImageData(imageData, 0, 0);
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) {
+          reject(new Error("Failed to encode baseline PNG"));
+          return;
+        }
+        resolve(blob);
+      },
+      "image/png",
+      0.95
+    );
+  });
 }
 
 /**
@@ -84,16 +123,42 @@ export async function runPipeline(
   const colorStrength = params?.match?.colorStrength ?? 1;
   const colorDensity = params?.match?.colorDensity ?? 1;
   const exposureStrength = params?.match?.exposureStrength ?? 1;
+  const bandLowerShadow = params?.match?.bandLowerShadow ?? 1;
+  const bandUpperShadow = params?.match?.bandUpperShadow ?? 1;
+  const bandMid = params?.match?.bandMid ?? 1;
+  const bandLowerHigh = params?.match?.bandLowerHigh ?? 1;
+  const bandUpperHigh = params?.match?.bandUpperHigh ?? 1;
+  const bandLowerShadowHue = params?.match?.bandLowerShadowHue ?? 0;
+  const bandUpperShadowHue = params?.match?.bandUpperShadowHue ?? 0;
+  const bandMidHue = params?.match?.bandMidHue ?? 0;
+  const bandLowerHighHue = params?.match?.bandLowerHighHue ?? 0;
+  const bandUpperHighHue = params?.match?.bandUpperHighHue ?? 0;
+  const bandLowerShadowSat = params?.match?.bandLowerShadowSat ?? 1;
+  const bandUpperShadowSat = params?.match?.bandUpperShadowSat ?? 1;
+  const bandMidSat = params?.match?.bandMidSat ?? 1;
+  const bandLowerHighSat = params?.match?.bandLowerHighSat ?? 1;
+  const bandUpperHighSat = params?.match?.bandUpperHighSat ?? 1;
+  const bandLowerShadowLuma = params?.match?.bandLowerShadowLuma ?? 0;
+  const bandUpperShadowLuma = params?.match?.bandUpperShadowLuma ?? 0;
+  const bandMidLuma = params?.match?.bandMidLuma ?? 0;
+  const bandLowerHighLuma = params?.match?.bandLowerHighLuma ?? 0;
+  const bandUpperHighLuma = params?.match?.bandUpperHighLuma ?? 0;
+
+  const decodedSource = await decode(sourceFile);
+  const sourceStats = computeImageStats(frameToImageData(decodedSource));
+  const decodedRef = referenceFile ? await decode(referenceFile) : null;
+  const refStats = decodedRef
+    ? computeImageStats(frameToImageData(decodedRef))
+    : undefined;
 
   let finalGrading: LookParamsGrading;
   let fittedGrading: LookParams["grading"] | undefined;
 
-  if (referenceFile) {
-    const refFrame = await decode(referenceFile);
+  if (decodedRef) {
     const refImageData = new ImageData(
-      new Uint8ClampedArray(refFrame.data),
-      refFrame.width,
-      refFrame.height
+      new Uint8ClampedArray(decodedRef.data),
+      decodedRef.width,
+      decodedRef.height
     );
     const engineParams = fitLookParamsFromReference(refImageData);
     fittedGrading = engineToGrading(engineParams);
@@ -108,19 +173,100 @@ export async function runPipeline(
     lumaStrength?: number;
     colorStrength?: number;
     exposureStrength?: number;
+    refBlackL?: number;
+    blackStrength?: number;
+    blackRange?: number;
+    colorBandStrengths?: {
+      lowerShadow: number;
+      upperShadow: number;
+      mid: number;
+      lowerHigh: number;
+      upperHigh: number;
+    };
+    colorBandOverrides?: {
+      hue: {
+        lowerShadow: number;
+        upperShadow: number;
+        mid: number;
+        lowerHigh: number;
+        upperHigh: number;
+      };
+      sat: {
+        lowerShadow: number;
+        upperShadow: number;
+        mid: number;
+        lowerHigh: number;
+        upperHigh: number;
+      };
+      luma: {
+        lowerShadow: number;
+        upperShadow: number;
+        mid: number;
+        lowerHigh: number;
+        upperHigh: number;
+      };
+    };
+    highlightFill?: { strength: number; warmth?: number };
   };
   engineWithMatch.colorDensity = colorDensity;
-  // Luma/color strengths are UI-only controls; pass them into engine params without
-  // affecting stored grading/embeddings (they default to 1 when omitted).
   engineWithMatch.lumaStrength = lumaStrength;
   engineWithMatch.colorStrength = colorStrength;
   engineWithMatch.exposureStrength = exposureStrength;
-  const result = await processOne(sourceFile, referenceFile, {
+  // Black point: UI override takes precedence over fitted refBlackL.
+  const blackPoint =
+    params?.match?.blackPoint ?? finalGrading?.refBlackL ?? 0.05;
+  engineWithMatch.refBlackL = blackPoint;
+  // Black match controls (A: strength, B: range into midtones).
+  if (typeof params?.match?.blackStrength === "number") {
+    engineWithMatch.blackStrength = params.match.blackStrength;
+  }
+  if (typeof params?.match?.blackRange === "number") {
+    engineWithMatch.blackRange = params.match.blackRange;
+  }
+  engineWithMatch.colorBandStrengths = {
+    lowerShadow: bandLowerShadow,
+    upperShadow: bandUpperShadow,
+    mid: bandMid,
+    lowerHigh: bandLowerHigh,
+    upperHigh: bandUpperHigh,
+  };
+  engineWithMatch.colorBandOverrides = {
+    hue: {
+      lowerShadow: bandLowerShadowHue,
+      upperShadow: bandUpperShadowHue,
+      mid: bandMidHue,
+      lowerHigh: bandLowerHighHue,
+      upperHigh: bandUpperHighHue,
+    },
+    sat: {
+      lowerShadow: bandLowerShadowSat,
+      upperShadow: bandUpperShadowSat,
+      mid: bandMidSat,
+      lowerHigh: bandLowerHighSat,
+      upperHigh: bandUpperHighSat,
+    },
+    luma: {
+      lowerShadow: bandLowerShadowLuma,
+      upperShadow: bandUpperShadowLuma,
+      mid: bandMidLuma,
+      lowerHigh: bandLowerHighLuma,
+      upperHigh: bandUpperHighLuma,
+    },
+  };
+  engineWithMatch.highlightFill = {
+    strength: params?.match?.highlightFillStrength ?? 0,
+    warmth: params?.match?.highlightFillWarmth ?? 0,
+  };
+  const result = await processOne(decodedSource, decodedRef, {
     strength: 1,
     grading: engine,
   });
 
-  const ret: RunPipelineResult = referenceFile ? { fittedGrading } : {};
+  const ret: RunPipelineResult = {
+    ...(fittedGrading && { fittedGrading }),
+    sourceStats,
+    ...(refStats && { refStats }),
+  };
 
   const { width, height } = result;
   const scale = Math.min(1, MAX_PREVIEW_EDGE / Math.max(width, height));
