@@ -192,6 +192,34 @@ export async function POST(request: Request) {
     );
   }
 
+  const sampleId = row.id as string;
+  const tileEmbeddingsStr = formData.get("tileEmbeddings") as string | null;
+  if (tileEmbeddingsStr) {
+    try {
+      const tileEmbeddings = JSON.parse(tileEmbeddingsStr) as Array<{
+        tile_index: number;
+        embedding_colclip: number[];
+        embedding_tonal?: number[];
+      }>;
+      if (Array.isArray(tileEmbeddings) && tileEmbeddings.length > 0) {
+        const rows = tileEmbeddings.map((t) => ({
+          sample_id: sampleId,
+          tile_index: t.tile_index,
+          embedding_colclip: t.embedding_colclip,
+          embedding_tonal: t.embedding_tonal ?? null,
+        }));
+        const { error: tilesErr } = await supabaseAdmin
+          .from("grading_tiles")
+          .insert(rows);
+        if (tilesErr) {
+          console.warn("grading_tiles insert failed:", tilesErr.message);
+        }
+      }
+    } catch {
+      // Optional; ignore invalid tile payload
+    }
+  }
+
   return NextResponse.json({
     id: row.id,
     created_at: row.created_at,

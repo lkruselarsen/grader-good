@@ -27,7 +27,8 @@ export type BucketName =
   | "ref_color:foliage"
   | "ref_color:brick"
   | "ref_color:unknown"
-  | `source_type:${string}`;
+  | `source_type:${string}`
+  | `camera_type:${string}`;
 
 export interface LearnedHeuristicsBucket {
   meanDelta: number;

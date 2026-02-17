@@ -150,7 +150,35 @@ export interface LookParams {
    * from reference; driven from match UI and corrections.
    */
   highlightFill?: { strength: number; warmth?: number };
+  /** Refraction: shadow wheel. Six nodes { hue: 0..1, sat: 0..1 } order: red, yellow, green, teal, blue, purple. */
+  refractionShadow?: RefractionWheelEngine;
+  /** Refraction: highlight wheel. Same. */
+  refractionHighlight?: RefractionWheelEngine;
+  /** Refraction: L split (0..1). Below = shadow wheel, above = highlight wheel; smooth blend at split. */
+  refractionSplitL?: number;
+  /** 7-handle exposure curve. Applied after exposure delta in Stage A0. */
+  exposureCurve?: { L_in: number[]; L_out: number[] };
+  /** 7-handle color density curve. Per-L chroma scale in Stage B. */
+  colorDensityCurve?: { L_anchors: number[]; scale: number[] };
+  /** Actuance strength (0..2, 0 = off). Local contrast after A5. */
+  actuanceStrength?: number;
+  /** Actuance radius (pixels or 0..1 relative). */
+  actuanceRadius?: number;
 }
+
+/** Six nodes: red, yellow, green, teal, blue, purple. hue 0..1, sat 0..1. */
+export interface RefractionNodeEngine {
+  hue: number;
+  sat: number;
+}
+export type RefractionWheelEngine = [
+  RefractionNodeEngine,
+  RefractionNodeEngine,
+  RefractionNodeEngine,
+  RefractionNodeEngine,
+  RefractionNodeEngine,
+  RefractionNodeEngine,
+];
 
 /** Identity / neutral params (no change). */
 export function defaultLookParams(): LookParams {
@@ -190,6 +218,32 @@ export function defaultLookParams(): LookParams {
 /** Chroma in OKLab: C = sqrt(a^2 + b^2). */
 function chroma(a: number, b: number): number {
   return Math.sqrt(a * a + b * b);
+}
+
+/** Apply one refraction wheel to (a, b): remap hue/sat via 6 nodes. Returns new a, b. */
+function applyRefractionWheel(
+  a: number,
+  b: number,
+  wheel: RefractionWheelEngine
+): { a: number; b: number } {
+  const C = chroma(a, b);
+  if (C < 1e-6) return { a, b };
+  const hueRad = Math.atan2(b, a);
+  const hue01 = (hueRad + Math.PI) / (2 * Math.PI);
+  const seg = hue01 * 6;
+  const i0 = Math.floor(seg) % 6;
+  const i1 = (i0 + 1) % 6;
+  const t = seg - Math.floor(seg);
+  const n0 = wheel[i0];
+  const n1 = wheel[i1];
+  const targetHue01 = n0.hue * (1 - t) + n1.hue * t;
+  const targetSatScale = n0.sat * (1 - t) + n1.sat * t;
+  const Cnew = C * Math.max(0, Math.min(2, targetSatScale));
+  const newHueRad = targetHue01 * 2 * Math.PI - Math.PI;
+  return {
+    a: Cnew * Math.cos(newHueRad),
+    b: Cnew * Math.sin(newHueRad),
+  };
 }
 
 /** Piecewise linear interpolation: map L to curve(L) using L_in/L_out anchors. */
@@ -242,6 +296,25 @@ function interpolateTintByL(
 /** Interpolate saturation scale from saturationByL at given L. */
 function interpolateSaturationByL(L: number, sat: SaturationByLParams): number {
   const { L_anchors, scale } = sat;
+  const n = L_anchors.length;
+  if (n === 0) return 1;
+  if (L <= L_anchors[0]) return scale[0];
+  if (L >= L_anchors[n - 1]) return scale[n - 1];
+  for (let i = 0; i < n - 1; i++) {
+    if (L >= L_anchors[i] && L <= L_anchors[i + 1]) {
+      const t = (L - L_anchors[i]) / (L_anchors[i + 1] - L_anchors[i]);
+      return scale[i] + t * (scale[i + 1] - scale[i]);
+    }
+  }
+  return scale[n - 1];
+}
+
+/** Interpolate scale from 7-handle color density curve at given L. */
+function interpolateColorDensityCurve(
+  L: number,
+  curve: { L_anchors: number[]; scale: number[] }
+): number {
+  const { L_anchors, scale } = curve;
   const n = L_anchors.length;
   if (n === 0) return 1;
   if (L <= L_anchors[0]) return scale[0];
@@ -938,7 +1011,14 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
     colorBandStrengths,
     colorMatchBands,
     colorBandOverrides,
+    refractionShadow,
+    refractionHighlight,
+    refractionSplitL = 0.5,
+    exposureCurve,
+    colorDensityCurve,
+    actuanceStrength = 0,
   } = params;
+  // params.actuanceRadius reserved for variable-radius actuance (future)
   const { lift, gamma, gain } = tone;
   const {
     shadowRolloff,
@@ -1016,6 +1096,10 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
     let L_exposed = L + exposureDelta;
     if (L_exposed < 0) L_exposed = 0;
     else if (L_exposed > 1) L_exposed = 1;
+    if (exposureCurve && exposureCurve.L_in.length > 0 && exposureCurve.L_out.length > 0) {
+      L_exposed = piecewiseLinear(L_exposed, exposureCurve.L_in, exposureCurve.L_out);
+      L_exposed = Math.max(0, Math.min(1, L_exposed));
+    }
     const L0 = L_exposed;
 
     if (useToneCurve) {
@@ -1159,6 +1243,22 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
   } else {
     for (let idx = 0; idx < nPix; idx++) {
       L_final[idx] = L_luma[idx];
+    }
+  }
+
+  // Optional actuance pass: local contrast with strength and radius (uses same blur as microcontrast).
+  const actuanceS = Math.max(0, Math.min(3, actuanceStrength)); // clamp 0..3 so UI can push further
+  const ACTUANCE_AMP = 1.8; // amplify dL so same slider value looks noticeably stronger
+  if (actuanceS > 1e-3) {
+    const blurredAct = gaussianBlurFilm(L_final, width, height);
+    for (let idx = 0; idx < nPix; idx++) {
+      if (!mask[idx]) continue;
+      const base = blurredAct[idx];
+      const dL = L_final[idx] - base;
+      let L = base + actuanceS * ACTUANCE_AMP * dL;
+      if (L < 0) L = 0;
+      else if (L > 1) L = 1;
+      L_final[idx] = L;
     }
   }
 
@@ -1325,6 +1425,9 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
     const s = satScale(L, shadowRolloff, highlightRolloff);
     const dScale = colorDensityScale(L, shadowColorDensity, highlightColorDensity);
     let bandScale = useSaturationByL ? interpolateSaturationByL(L, saturationByL!) : 1;
+    if (colorDensityCurve && colorDensityCurve.L_anchors.length > 0 && colorDensityCurve.scale.length > 0) {
+      bandScale *= interpolateColorDensityCurve(L, colorDensityCurve);
+    }
     if (overallSat < 1 && bandScale > 1) bandScale = 1; // desaturated ref: don't boost any band
     const scale =
       C > 1e-8
@@ -1493,6 +1596,24 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
         );
         L = Math.max(0, Math.min(1, L + dL));
       }
+    }
+
+    // Refraction: per-pixel hue/sat remap from shadow and highlight wheels.
+    if (refractionShadow && refractionHighlight) {
+      const split = Math.max(0, Math.min(1, refractionSplitL));
+      const weightShadow = Math.max(0, Math.min(1, 1 - (L - split) * 5));
+      const s = applyRefractionWheel(oa, ob, refractionShadow);
+      const h = applyRefractionWheel(oa, ob, refractionHighlight);
+      oa = weightShadow * s.a + (1 - weightShadow) * h.a;
+      ob = weightShadow * s.b + (1 - weightShadow) * h.b;
+    } else if (refractionShadow) {
+      const r = applyRefractionWheel(oa, ob, refractionShadow);
+      oa = r.a;
+      ob = r.b;
+    } else if (refractionHighlight) {
+      const r = applyRefractionWheel(oa, ob, refractionHighlight);
+      oa = r.a;
+      ob = r.b;
     }
 
     const rgb = oklabToSrgb8(L, oa, ob);

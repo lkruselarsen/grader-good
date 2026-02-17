@@ -84,6 +84,10 @@ function clampMatchParam(key: string, value: number): number {
       return clamp(value, 0, 1);
     case "highlightFillWarmth":
       return clamp(value, -1, 1);
+    case "actuanceStrength":
+      return clamp(value, 0, 2);
+    case "actuanceRadius":
+      return clamp(value, 0.5, 5);
     default:
       // Unknown numeric slider – leave as-is.
       return value;

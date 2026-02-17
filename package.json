@@ -3,23 +3,26 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --webpack",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "learn:heuristics": "node scripts/update-heuristics.mjs"
+    "learn:heuristics": "node scripts/update-heuristics.mjs",
+    "postinstall": "node scripts/patch-dcraw.js"
   },
   "dependencies": {
     "@huggingface/transformers": "^3.8.1",
     "@supabase/supabase-js": "^2.95.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "dcraw": "^1.0.3",
     "libraw-wasm": "^1.1.2",
     "lucide-react": "^0.563.0",
     "next": "16.1.6",
     "radix-ui": "^1.4.3",
     "react": "19.2.3",
     "react-dom": "19.2.3",
+    "sharp": "^0.34.5",
     "tailwind-merge": "^3.4.0"
   },
   "devDependencies": {
