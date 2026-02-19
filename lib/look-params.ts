@@ -10,22 +10,24 @@ import type {
  * Single object used by all lab sliders; shape is future-proof for new stages.
  */
 
-/** Six colour nodes in hue/sat space. Order: red, yellow, green, teal, blue, purple. */
+/** Six colour nodes. Order: red, yellow, green, teal, blue, purple. */
 export interface RefractionNode {
-  hue: number; // 0..1 (or 0..360 in UI)
-  sat: number; // 0..1 (1 = 100%)
+  /** Hue in degrees (0–360). Where this colour is remapped to. Red=0, Yellow=60, Green=120, Teal=180, Blue=240, Purple=300. */
+  hue: number;
+  /** Saturation multiplier: 0 = no saturation, 1 = normal, 3 = 3× saturation. */
+  sat: number;
 }
 export type RefractionWheel = [RefractionNode, RefractionNode, RefractionNode, RefractionNode, RefractionNode, RefractionNode];
 
-/** Default refraction wheel: 6 hues evenly spaced (0, 1/6, …, 5/6), sat 1. */
+/** Default refraction wheel: canonical positions (0°, 60°, …, 300°), sat 1. */
 export function defaultRefractionWheel(): RefractionWheel {
   return [
-    { hue: 0 / 6, sat: 1 },
-    { hue: 1 / 6, sat: 1 },
-    { hue: 2 / 6, sat: 1 },
-    { hue: 3 / 6, sat: 1 },
-    { hue: 4 / 6, sat: 1 },
-    { hue: 5 / 6, sat: 1 },
+    { hue: 0, sat: 1 },
+    { hue: 60, sat: 1 },
+    { hue: 120, sat: 1 },
+    { hue: 180, sat: 1 },
+    { hue: 240, sat: 1 },
+    { hue: 300, sat: 1 },
   ];
 }
 
@@ -35,10 +37,34 @@ export function default7HandleIdentity(): { L_in: number[]; L_out: number[] } {
   return { L_in: [...L], L_out: [...L] };
 }
 
+/**
+ * Default 7-handle exposure curve:
+ * - L_in: fixed tonal anchors [0, 1/6, 2/6, 3/6, 4/6, 5/6, 1]
+ * - L_out: per-handle exposure multipliers, all 1 (neutral).
+ */
+export function defaultExposureCurve(): { L_in: number[]; L_out: number[] } {
+  const anchors = [0, 1 / 6, 2 / 6, 3 / 6, 4 / 6, 5 / 6, 1];
+  return {
+    L_in: [...anchors],
+    // Exposure multipliers (0..2), 1 = neutral per handle.
+    L_out: [1, 1, 1, 1, 1, 1, 1],
+  };
+}
+
 /** Default 7-handle color density: same L anchors, scale all 1. */
 export function defaultColorDensityCurve(): { L_anchors: number[]; scale: number[] } {
   const L = [0, 1 / 6, 2 / 6, 3 / 6, 4 / 6, 5 / 6, 1];
   return { L_anchors: [...L], scale: [1, 1, 1, 1, 1, 1, 1] };
+}
+
+/**
+ * Default 7-handle filmic contrast curve (unedited = no change).
+ * L_anchors: [0, 1/6, ..., 1]; values: H1..H7 in [-5, +5].
+ */
+export function defaultContrastCurve(): { L_anchors: number[]; values: number[] } {
+  const L_anchors = [0, 1 / 6, 2 / 6, 3 / 6, 4 / 6, 5 / 6, 1];
+  const values = [-5, -3.5, -1.75, 0, 1.75, 3.5, 5];
+  return { L_anchors: [...L_anchors], values: [...values] };
 }
 
 export interface LookParamsMatch {
@@ -100,7 +126,7 @@ export interface LookParamsMatch {
   highlightFillStrength: number;
   /** Optional highlight fill warmth (-1..1). Small warm tint in affected highlights. */
   highlightFillWarmth?: number;
-  /** Refraction: shadow wheel (6 nodes: red, yellow, green, teal, blue, purple). Each node { hue: 0..1, sat: 0..1 }. */
+  /** Refraction: shadow wheel (6 nodes: red, yellow, green, teal, blue, purple). Each node { hue: 0..360°, sat: 0..3 }. */
   refractionShadow?: RefractionWheel;
   /** Refraction: highlight wheel. Same shape. */
   refractionHighlight?: RefractionWheel;
@@ -110,10 +136,22 @@ export interface LookParamsMatch {
   exposureCurve?: { L_in: number[]; L_out: number[] };
   /** 7-handle color density curve: L_anchors[], scale[] (optional). */
   colorDensityCurve?: { L_anchors: number[]; scale: number[] };
+  /** 7-handle filmic contrast curve: L_anchors[], values[] (-5..+5 per handle). Default = no change. */
+  contrastCurve?: { L_anchors: number[]; values: number[] };
   /** Actuance (local contrast) strength (0..2, 0 = off). */
   actuanceStrength?: number;
   /** Actuance radius (relative or pixels). */
   actuanceRadius?: number;
+  /**
+   * Per-band colour temperature (cold ↔ warm) controls (-1..1, 0 = neutral).
+   * Negative values push the band cooler (towards blue/cyan), positive values
+   * push warmer (towards yellow/orange) along the OKLab b-axis.
+   */
+  bandLowerShadowTemp?: number;
+  bandUpperShadowTemp?: number;
+  bandMidTemp?: number;
+  bandLowerHighTemp?: number;
+  bandUpperHighTemp?: number;
 }
 
 /** Flat grading params for UI; converted to EngineLookParams for pipeline. */
@@ -190,8 +228,11 @@ export const DEFAULT_LOOK_PARAMS: LookParams = {
     colorStrength: 0.35,
     colorDensity: 1,
     exposureStrength: 1.11,
-    blackStrength: 1,
+    // Film-like defaults: slightly lifted but deep blacks so training and
+    // heuristics start closer to typical references.
+    blackStrength: 5.5,
     blackRange: 0.6,
+    blackPoint: 0.01,
     bandLowerShadow: 1,
     bandUpperShadow: 1,
     bandMid: 1,
@@ -214,8 +255,14 @@ export const DEFAULT_LOOK_PARAMS: LookParams = {
     bandUpperHighLuma: 0,
     highlightFillStrength: 0,
     highlightFillWarmth: 0,
-    actuanceStrength: 0,
+    // Default actuance is slightly on so local contrast is visible by default.
+    actuanceStrength: 1,
     actuanceRadius: 2,
+    bandLowerShadowTemp: 0,
+    bandUpperShadowTemp: 0,
+    bandMidTemp: 0,
+    bandLowerHighTemp: 0,
+    bandUpperHighTemp: 0,
   },
   grading: defaultGrading(),
 };

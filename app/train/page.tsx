@@ -35,6 +35,9 @@ export default function TrainPage() {
   const [status, setStatus] = useState<"idle" | "training" | "done" | "error">("idle");
   const [message, setMessage] = useState<string>("");
   const [finalImageBase64, setFinalImageBase64] = useState<string | null>(null);
+  const [runId, setRunId] = useState<string | null>(null);
+  const [currentIteration, setCurrentIteration] = useState<number>(0);
+  const [maxIterations, setMaxIterations] = useState<number>(0);
 
   // Native DOM click listeners so file dialog opens even if React/Radix events are broken (e.g. libraw-wasm circular dependency)
   useEffect(() => {
@@ -63,11 +66,59 @@ export default function TrainPage() {
     status !== "training" &&
     (cameraType !== "Other" || cameraTypeOther.trim().length > 0);
 
+  // Poll training status while a run is active.
+  useEffect(() => {
+    if (!runId || status !== "training") return;
+
+    let cancelled = false;
+    const interval = setInterval(async () => {
+      if (cancelled) return;
+      try {
+        const res = await fetch(`/api/train/status?run_id=${encodeURIComponent(runId)}`);
+        const data = await res.json();
+        if (!res.ok) {
+          setStatus("error");
+          setMessage(data.error ?? "Failed to read training status");
+          clearInterval(interval);
+          return;
+        }
+
+        setCurrentIteration(data.current_iteration ?? 0);
+        setMaxIterations(data.max_iterations ?? 0);
+
+        if (data.status === "done") {
+          setStatus("done");
+          setMessage("Done. Correction posted.");
+          if (typeof data.final_image_base64 === "string" && data.final_image_base64.length > 0) {
+            setFinalImageBase64(data.final_image_base64);
+          }
+          clearInterval(interval);
+        } else if (data.status === "error") {
+          setStatus("error");
+          setMessage(data.error ?? "Training failed");
+          clearInterval(interval);
+        }
+      } catch (err) {
+        setStatus("error");
+        setMessage(err instanceof Error ? err.message : String(err));
+        clearInterval(interval);
+      }
+    }, 3000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [runId, status]);
+
   const handleStart = async () => {
     if (!sourceFile || !referenceFile) return;
     setStatus("training");
     setMessage("");
     setFinalImageBase64(null);
+    setRunId(null);
+    setCurrentIteration(0);
+    setMaxIterations(0);
 
     try {
       const [sourceBase64, referenceBase64] = await Promise.all([
@@ -93,18 +144,14 @@ export default function TrainPage() {
         return;
       }
 
-      const first = data.results?.[0];
-      if (first?.error) {
+      // Background job has been started; store run_id and let the status
+      // polling effect update progress and final image.
+      if (typeof data.run_id === "string") {
+        setRunId(data.run_id);
+        setMaxIterations(data.max_iterations ?? iterations);
+      } else {
         setStatus("error");
-        setMessage(first.error);
-        return;
-      }
-
-      setStatus("done");
-      setMessage(first?.correctionPosted ? "Done. Correction posted." : "Done.");
-      const base64 = first?.final_image_base64;
-      if (typeof base64 === "string" && base64.length > 0) {
-        setFinalImageBase64(base64);
+        setMessage("Training run did not return a run_id");
       }
     } catch (err) {
       setStatus("error");
@@ -219,6 +266,25 @@ export default function TrainPage() {
         >
           {status === "training" ? "Training…" : "Start training"}
         </Button>
+
+        {status === "training" && maxIterations > 0 && (
+          <div className="space-y-1">
+            <div className="h-1.5 w-full max-w-[280px] rounded-full bg-muted overflow-hidden">
+              <div
+                className="h-full bg-primary transition-all duration-300"
+                style={{
+                  width: `${Math.max(
+                    0,
+                    Math.min(100, (100 * currentIteration) / maxIterations)
+                  ).toFixed(1)}%`,
+                }}
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Processing iteration {currentIteration} of {maxIterations}
+            </p>
+          </div>
+        )}
 
         {status === "done" && (
           <>

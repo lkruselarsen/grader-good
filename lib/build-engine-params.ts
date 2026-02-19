@@ -4,7 +4,13 @@
  */
 
 import type { LookParams, LookParamsGrading } from "./look-params";
-import { gradingToEngine, DEFAULT_LOOK_PARAMS } from "./look-params";
+import {
+  gradingToEngine,
+  DEFAULT_LOOK_PARAMS,
+  defaultExposureCurve,
+  defaultRefractionWheel,
+  defaultContrastCurve,
+} from "./look-params";
 import type { GradingParams } from "@/src/lib/pipeline/types";
 
 export function buildEngineParamsFromLookParams(
@@ -49,16 +55,25 @@ export function buildEngineParamsFromLookParams(
       lowerHigh: m.bandLowerHighLuma ?? 0,
       upperHigh: m.bandUpperHighLuma ?? 0,
     },
+    // Per-band colour temperature (cold ↔ warm) overrides; mapped to OKLab b-axis.
+    temp: {
+      lowerShadow: m.bandLowerShadowTemp ?? 0,
+      upperShadow: m.bandUpperShadowTemp ?? 0,
+      mid: m.bandMidTemp ?? 0,
+      lowerHigh: m.bandLowerHighTemp ?? 0,
+      upperHigh: m.bandUpperHighTemp ?? 0,
+    },
   };
   engine.highlightFill = {
     strength: m.highlightFillStrength ?? 0,
     warmth: m.highlightFillWarmth ?? 0,
   };
-  if (m.refractionShadow != null) engine.refractionShadow = m.refractionShadow as typeof engine.refractionShadow;
-  if (m.refractionHighlight != null) engine.refractionHighlight = m.refractionHighlight as typeof engine.refractionHighlight;
-  if (m.refractionSplitL != null) engine.refractionSplitL = m.refractionSplitL;
-  if (m.exposureCurve != null) engine.exposureCurve = m.exposureCurve;
+  engine.refractionShadow = (m.refractionShadow ?? defaultRefractionWheel()) as typeof engine.refractionShadow;
+  engine.refractionHighlight = (m.refractionHighlight ?? defaultRefractionWheel()) as typeof engine.refractionHighlight;
+  engine.refractionSplitL = m.refractionSplitL ?? 0.5;
+  engine.exposureCurve = m.exposureCurve ?? defaultExposureCurve();
   if (m.colorDensityCurve != null) engine.colorDensityCurve = m.colorDensityCurve;
+  engine.contrastCurve = m.contrastCurve ?? defaultContrastCurve();
   if (m.actuanceStrength != null) engine.actuanceStrength = m.actuanceStrength;
   if (m.actuanceRadius != null) engine.actuanceRadius = m.actuanceRadius;
   return engine;

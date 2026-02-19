@@ -44,6 +44,10 @@ function clamp(value: number, min: number, max: number): number {
 function clampMatchParam(key: string, value: number): number {
   switch (key) {
     case "lumaStrength":
+      // Heuristics and AI can easily overcook luma on underexposed RAWs.
+      // Keep their influence in a conservative range; the UI slider itself
+      // can still expose a wider span if needed.
+      return clamp(value, 0, 0.5);
     case "colorStrength":
     case "exposureStrength":
       return clamp(value, 0, 2);
@@ -54,8 +58,9 @@ function clampMatchParam(key: string, value: number): number {
     case "blackRange":
       return clamp(value, 0, 1);
     case "blackPoint":
-      // UI slider currently allows up to ~0.6; keep heuristics consistent.
-      return clamp(value, 0, 0.6);
+      // Heuristics and AI should not push blackPoint into extreme, milky
+      // territory; cap at a conservative upper bound.
+      return clamp(value, 0, 0.3);
     case "bandLowerShadow":
     case "bandUpperShadow":
     case "bandMid":
