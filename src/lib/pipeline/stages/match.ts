@@ -57,6 +57,12 @@ export interface ColorBandOverrides {
   sat: ColorBandStrengths;
   /** Per-band luma offset (-0.2..0.2, 0 = neutral). */
   luma: ColorBandStrengths;
+  /**
+   * Optional per-band colour temperature control (-1..1, 0 = neutral).
+   * Negative values push the band cooler (towards blue/cyan), positive values
+   * push warmer (towards yellow/orange) along the OKLab b-axis.
+   */
+  temp?: ColorBandStrengths;
 }
 
 /**
@@ -150,7 +156,37 @@ export interface LookParams {
    * from reference; driven from match UI and corrections.
    */
   highlightFill?: { strength: number; warmth?: number };
+  /** Refraction: shadow wheel. Six nodes { hue: 0..360°, sat: 0..3 } order: red, yellow, green, teal, blue, purple. */
+  refractionShadow?: RefractionWheelEngine;
+  /** Refraction: highlight wheel. Same. */
+  refractionHighlight?: RefractionWheelEngine;
+  /** Refraction: L split (0..1). Below = shadow wheel, above = highlight wheel; smooth blend at split. */
+  refractionSplitL?: number;
+  /** 7-handle exposure curve. Applied after exposure delta in Stage A0. */
+  exposureCurve?: { L_in: number[]; L_out: number[] };
+  /** 7-handle color density curve. Per-L chroma scale in Stage B. */
+  colorDensityCurve?: { L_anchors: number[]; scale: number[] };
+  /** 7-handle filmic contrast curve. values in [-5, +5]; default = no change. */
+  contrastCurve?: { L_anchors: number[]; values: number[] };
+  /** Actuance strength (0..2, 0 = off). Local contrast after A5. */
+  actuanceStrength?: number;
+  /** Actuance radius (pixels or 0..1 relative). */
+  actuanceRadius?: number;
 }
+
+/** Six nodes: red, yellow, green, teal, blue, purple. hue 0..360 (degrees), sat 0..3 (multiplier, 1=normal). */
+export interface RefractionNodeEngine {
+  hue: number;
+  sat: number;
+}
+export type RefractionWheelEngine = [
+  RefractionNodeEngine,
+  RefractionNodeEngine,
+  RefractionNodeEngine,
+  RefractionNodeEngine,
+  RefractionNodeEngine,
+  RefractionNodeEngine,
+];
 
 /** Identity / neutral params (no change). */
 export function defaultLookParams(): LookParams {
@@ -192,6 +228,51 @@ function chroma(a: number, b: number): number {
   return Math.sqrt(a * a + b * b);
 }
 
+/** Canonical default hues (degrees): Red=0, Yellow=60, Green=120, Teal=180, Blue=240, Purple=300. */
+const DEFAULT_WHEEL_HUES = [0, 60, 120, 180, 240, 300];
+
+function isIdentityRefractionWheel(wheel: RefractionWheelEngine): boolean {
+  for (let i = 0; i < 6; i++) {
+    const n = wheel[i];
+    const h = n.hue <= 1 ? n.hue * 360 : n.hue;
+    if (Math.abs(h - DEFAULT_WHEEL_HUES[i]) > 0.5) return false;
+    if (Math.abs(n.sat - 1) > 0.01) return false;
+  }
+  return true;
+}
+
+/** Apply one refraction wheel to (a, b): remap hue (0–360°) and sat (0–3) via 6 nodes. Accepts legacy hue 0..1 and normalizes to degrees. */
+function applyRefractionWheel(
+  a: number,
+  b: number,
+  wheel: RefractionWheelEngine
+): { a: number; b: number } {
+  const C = chroma(a, b);
+  if (C < 1e-6) return { a, b };
+  const hueRad = Math.atan2(b, a);
+  const hueDeg = ((hueRad + Math.PI) / (2 * Math.PI)) * 360;
+  // Align OKLab hue with wheel: 0°=Red, 120°=Green, 240°=Blue (rotate by 180°).
+  const hueDegForSeg = (hueDeg + 180) % 360;
+  const seg = hueDegForSeg / 60;
+  const i0 = Math.floor(seg) % 6;
+  const i1 = (i0 + 1) % 6;
+  const t = seg - Math.floor(seg);
+  const n0 = wheel[i0];
+  const n1 = wheel[i1];
+  const h0 = n0.hue <= 1 ? n0.hue * 360 : n0.hue;
+  const h1 = n1.hue <= 1 ? n1.hue * 360 : n1.hue;
+  const targetHueDeg = h0 * (1 - t) + h1 * t;
+  const targetSatScale = n0.sat * (1 - t) + n1.sat * t;
+  const Cnew = C * Math.max(0, Math.min(3, targetSatScale));
+  // Convert from wheel space (0=Red, 120=Green, …) back to OKLab hue so default wheel = identity.
+  const outputHueDeg = (targetHueDeg + 180) % 360;
+  const newHueRad = (outputHueDeg / 360) * 2 * Math.PI - Math.PI;
+  return {
+    a: Cnew * Math.cos(newHueRad),
+    b: Cnew * Math.sin(newHueRad),
+  };
+}
+
 /** Piecewise linear interpolation: map L to curve(L) using L_in/L_out anchors. */
 function piecewiseLinear(L: number, L_in: number[], L_out: number[]): number {
   const n = L_in.length;
@@ -205,6 +286,31 @@ function piecewiseLinear(L: number, L_in: number[], L_out: number[]): number {
     }
   }
   return L_out[n - 1];
+}
+
+/**
+ * Exposure curve helper: map L to an exposure multiplier using 7 handles.
+ * L_in: tonal anchors (0..1 from shadows to highlights).
+ * L_out: per-handle exposure multipliers (0..2, 1 = neutral).
+ */
+function exposureScaleFromCurve(
+  L: number,
+  curve: { L_in: number[]; L_out: number[] }
+): number {
+  const { L_in, L_out } = curve;
+  const n = Math.min(L_in.length, L_out.length);
+  if (n === 0) return 1;
+  if (L <= L_in[0]) return L_out[0] ?? 1;
+  if (L >= L_in[n - 1]) return L_out[n - 1] ?? 1;
+  for (let i = 0; i < n - 1; i++) {
+    if (L >= L_in[i] && L <= L_in[i + 1]) {
+      const t = (L - L_in[i]) / (L_in[i + 1] - L_in[i]);
+      const a = L_out[i] ?? 1;
+      const b = L_out[i + 1] ?? 1;
+      return a + t * (b - a);
+    }
+  }
+  return L_out[n - 1] ?? 1;
 }
 
 /**
@@ -253,6 +359,65 @@ function interpolateSaturationByL(L: number, sat: SaturationByLParams): number {
     }
   }
   return scale[n - 1];
+}
+
+/** Interpolate scale from 7-handle color density curve at given L. */
+function interpolateColorDensityCurve(
+  L: number,
+  curve: { L_anchors: number[]; scale: number[] }
+): number {
+  const { L_anchors, scale } = curve;
+  const n = L_anchors.length;
+  if (n === 0) return 1;
+  if (L <= L_anchors[0]) return scale[0];
+  if (L >= L_anchors[n - 1]) return scale[n - 1];
+  for (let i = 0; i < n - 1; i++) {
+    if (L >= L_anchors[i] && L <= L_anchors[i + 1]) {
+      const t = (L - L_anchors[i]) / (L_anchors[i + 1] - L_anchors[i]);
+      return scale[i] + t * (scale[i + 1] - scale[i]);
+    }
+  }
+  return scale[n - 1];
+}
+
+/** Default 7-handle contrast curve values (unedited = no change). Same L_anchors as exposure. */
+const DEFAULT_CONTRAST_L_ANCHORS = [0, 1 / 6, 2 / 6, 3 / 6, 4 / 6, 5 / 6, 1];
+const DEFAULT_CONTRAST_VALUES = [-5, -3.5, -1.75, 0, 1.75, 3.5, 5];
+
+/** Piecewise linear interpolation of value at L from (L_anchors, values). */
+function interpolateContrastValue(
+  L: number,
+  L_anchors: number[],
+  values: number[]
+): number {
+  const n = Math.min(L_anchors.length, values.length);
+  if (n === 0) return 0;
+  if (L <= L_anchors[0]) return values[0];
+  if (L >= L_anchors[n - 1]) return values[n - 1];
+  for (let i = 0; i < n - 1; i++) {
+    if (L >= L_anchors[i] && L <= L_anchors[i + 1]) {
+      const t = (L - L_anchors[i]) / (L_anchors[i + 1] - L_anchors[i]);
+      return values[i] + t * (values[i + 1] - values[i]);
+    }
+  }
+  return values[n - 1];
+}
+
+/**
+ * Filmic contrast curve: returns L offset (delta) for given L.
+ * When curve equals default (H1:-5 ... H7:+5), delta = 0.
+ * Positive handle delta = brighten (bleach), negative = darken (density).
+ * Scale factor keeps the effect moderate.
+ */
+function contrastDeltaFromCurve(
+  L: number,
+  curve: { L_anchors: number[]; values: number[] }
+): number {
+  const current = interpolateContrastValue(L, curve.L_anchors, curve.values);
+  const defaultVal = interpolateContrastValue(L, DEFAULT_CONTRAST_L_ANCHORS, DEFAULT_CONTRAST_VALUES);
+  const delta = current - defaultVal;
+  const k = 0.012;
+  return k * delta;
 }
 
 /** Saturation rolloff scale as function of L. */
@@ -938,7 +1103,15 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
     colorBandStrengths,
     colorMatchBands,
     colorBandOverrides,
+    refractionShadow,
+    refractionHighlight,
+    refractionSplitL = 0.5,
+    exposureCurve,
+    colorDensityCurve,
+    contrastCurve,
+    actuanceStrength = 0,
   } = params;
+  // params.actuanceRadius reserved for variable-radius actuance (future)
   const { lift, gamma, gain } = tone;
   const {
     shadowRolloff,
@@ -1012,8 +1185,25 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
     const oa = lab.a;
     const ob = lab.b;
 
-    // Stage A0: global exposure match (shift L towards reference mid-L before tone curve / LGG).
-    let L_exposed = L + exposureDelta;
+    // Stage A0: global exposure match (shift L towards reference mid-L before tone curve / LGG),
+    // optionally modulated per-tonal zone by the 7-handle exposure curve.
+    const baseL = L;
+    let exposureScale = 1;
+    if (
+      exposureCurve &&
+      exposureCurve.L_in.length > 0 &&
+      exposureCurve.L_out.length > 0
+    ) {
+      exposureScale = exposureScaleFromCurve(baseL, exposureCurve);
+      // Clamp to a safe range so extreme UI values can't explode exposure.
+      if (!Number.isFinite(exposureScale)) {
+        exposureScale = 1;
+      } else {
+        if (exposureScale < 0) exposureScale = 0;
+        else if (exposureScale > 2) exposureScale = 2;
+      }
+    }
+    let L_exposed = baseL + exposureScale * exposureDelta;
     if (L_exposed < 0) L_exposed = 0;
     else if (L_exposed > 1) L_exposed = 1;
     const L0 = L_exposed;
@@ -1120,6 +1310,23 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
     }
   }
 
+  // Stage A4b: 7-handle filmic contrast curve. Modulates L by zone; default curve = no change.
+  const curveToUse =
+    contrastCurve &&
+    contrastCurve.L_anchors.length >= 7 &&
+    contrastCurve.values.length >= 7
+      ? contrastCurve
+      : { L_anchors: DEFAULT_CONTRAST_L_ANCHORS, values: DEFAULT_CONTRAST_VALUES };
+  for (let idx = 0; idx < nPix; idx++) {
+    if (!mask[idx]) continue;
+    let L = L_luma[idx];
+    const delta = contrastDeltaFromCurve(L, curveToUse);
+    L += delta;
+    if (L < 0) L = 0;
+    else if (L > 1) L = 1;
+    L_luma[idx] = L;
+  }
+
   // Stage A5: actuance / microcontrast on the *final* luma (after exposure,
   // tone curve, luma-strength blend, and black alignment). This keeps local
   // contrast tied to the final tone structure instead of fighting later
@@ -1159,6 +1366,22 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
   } else {
     for (let idx = 0; idx < nPix; idx++) {
       L_final[idx] = L_luma[idx];
+    }
+  }
+
+  // Optional actuance pass: local contrast with strength and radius (uses same blur as microcontrast).
+  const actuanceS = Math.max(0, Math.min(3, actuanceStrength)); // clamp 0..3 so UI can push further
+  const ACTUANCE_AMP = 1.8; // amplify dL so same slider value looks noticeably stronger
+  if (actuanceS > 1e-3) {
+    const blurredAct = gaussianBlurFilm(L_final, width, height);
+    for (let idx = 0; idx < nPix; idx++) {
+      if (!mask[idx]) continue;
+      const base = blurredAct[idx];
+      const dL = L_final[idx] - base;
+      let L = base + actuanceS * ACTUANCE_AMP * dL;
+      if (L < 0) L = 0;
+      else if (L > 1) L = 1;
+      L_final[idx] = L;
     }
   }
 
@@ -1279,17 +1502,8 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
     }
   }
   // Helpers to read per-band override values safely.
-  function bandValue(
-    id: number,
-    values:
-      | ColorBandStrengths
-      | undefined
-  ): number {
-    if (!values) return id === 0 || id === 1 || id === 2 || id === 3 || id === 4
-      ? (id === 0
-          ? 0
-          : 0)
-      : 0;
+  function bandValue(id: number, values: ColorBandStrengths | undefined): number {
+    if (!values) return 0;
     switch (id) {
       case 0:
         return values.lowerShadow;
@@ -1325,6 +1539,9 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
     const s = satScale(L, shadowRolloff, highlightRolloff);
     const dScale = colorDensityScale(L, shadowColorDensity, highlightColorDensity);
     let bandScale = useSaturationByL ? interpolateSaturationByL(L, saturationByL!) : 1;
+    if (colorDensityCurve && colorDensityCurve.L_anchors.length > 0 && colorDensityCurve.scale.length > 0) {
+      bandScale *= interpolateColorDensityCurve(L, colorDensityCurve);
+    }
     if (overallSat < 1 && bandScale > 1) bandScale = 1; // desaturated ref: don't boost any band
     const scale =
       C > 1e-8
@@ -1452,6 +1669,7 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
       let hueControl = 0;
       let satControl = 0;
       let lumaControl = 0;
+      let tempControl = 0;
       for (let k = 0; k < bandCount; k++) {
         const wk = w[k];
         if (wk <= 0) continue;
@@ -1460,6 +1678,9 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
         const satVal = bandValue(k, colorBandOverrides.sat);
         satControl += wk * (satVal - 1);
         lumaControl += wk * bandValue(k, colorBandOverrides.luma);
+        if (colorBandOverrides.temp) {
+          tempControl += wk * bandValue(k, colorBandOverrides.temp);
+        }
       }
 
       // Hue: map [-1,1] → [-30°,30°] and rotate in a/b plane.
@@ -1493,6 +1714,33 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
         );
         L = Math.max(0, Math.min(1, L + dL));
       }
+
+      // Colour temperature: map [-1,1] → a modest shift on OKLab b-axis.
+      if (Math.abs(tempControl) > 1e-4) {
+        const maxTempShift = 0.18;
+        const dB = Math.max(-1, Math.min(1, tempControl)) * maxTempShift;
+        ob += dB;
+      }
+    }
+
+    // Refraction: per-pixel hue/sat remap from shadow and highlight wheels. Skip when both wheels are identity.
+    const shadowId = refractionShadow && isIdentityRefractionWheel(refractionShadow);
+    const highlightId = refractionHighlight && isIdentityRefractionWheel(refractionHighlight);
+    if (refractionShadow && refractionHighlight && !shadowId && !highlightId) {
+      const split = Math.max(0, Math.min(1, refractionSplitL));
+      const weightShadow = Math.max(0, Math.min(1, 1 - (L - split) * 5));
+      const s = applyRefractionWheel(oa, ob, refractionShadow);
+      const h = applyRefractionWheel(oa, ob, refractionHighlight);
+      oa = weightShadow * s.a + (1 - weightShadow) * h.a;
+      ob = weightShadow * s.b + (1 - weightShadow) * h.b;
+    } else if (refractionShadow && !shadowId) {
+      const r = applyRefractionWheel(oa, ob, refractionShadow);
+      oa = r.a;
+      ob = r.b;
+    } else if (refractionHighlight && !highlightId) {
+      const r = applyRefractionWheel(oa, ob, refractionHighlight);
+      oa = r.a;
+      ob = r.b;
     }
 
     const rgb = oklabToSrgb8(L, oa, ob);

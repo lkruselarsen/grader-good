@@ -11,8 +11,14 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import {
   type LookParams,
+  type RefractionWheel,
   DEFAULT_LOOK_PARAMS,
   engineToGrading,
+  defaultRefractionWheel,
+  default7HandleIdentity,
+  defaultExposureCurve,
+  defaultColorDensityCurve,
+  defaultContrastCurve,
 } from "@/lib/look-params";
 import {
   runPipeline as runPipelineFn,
@@ -20,6 +26,7 @@ import {
   exportBaselinePngBlob,
 } from "@/lib/run-pipeline";
 import { imageToSemanticEmbedding } from "@/src/lib/semanticEmbeddings";
+import { imageToColClipTileEmbeddings } from "@/src/lib/colclipEmbeddings";
 import {
   decode,
   frameToImageData,
@@ -205,6 +212,20 @@ const PARAM_SECTIONS: Array<{
         max: 1,
         step: 0.05,
       },
+      {
+        key: "actuanceStrength",
+        label: "Actuance strength",
+        min: 0.75,
+        max: 2,
+        step: 0.05,
+      },
+      {
+        key: "actuanceRadius",
+        label: "Actuance radius",
+        min: 0.5,
+        max: 5,
+        step: 0.5,
+      },
     ],
   },
 ];
@@ -225,6 +246,15 @@ export default function LabPage() {
   const [lastSourceStats, setLastSourceStats] = useState<ImageStats | null>(null);
   const [lastRefStats, setLastRefStats] = useState<ImageStats | null>(null);
   const [sourceType, setSourceType] = useState<"raw" | "png" | null>(null);
+  const [useTileSearch, setUseTileSearch] = useState(false);
+  /** Progress during "Use embeddings": phase label and optional tile count (e.g. "5 of 100 tiles"). */
+  const [embeddingProgress, setEmbeddingProgress] = useState<{
+    phase: string;
+    current?: number;
+    total?: number;
+  } | null>(null);
+  /** Phase text during "Apply" pipeline (e.g. "Decoding…", "Applying grade…"). */
+  const [applyProgress, setApplyProgress] = useState<string | null>(null);
 
   const previewAbortRef = useRef<AbortController | null>(null);
   const autoParamsRef = useRef<LookParams | null>(null);
@@ -252,13 +282,15 @@ export default function LabPage() {
       return;
     }
     setIsApplying(true);
+    setApplyProgress(null);
     try {
       // Use original source so we grade the source image, not whatever is on the canvas.
       const result = await runPipelineFn(
         source.file,
         activeRef?.file ?? null,
         lookParams,
-        canvas
+        canvas,
+        { onProgress: (phase) => setApplyProgress(phase) }
       );
       if (result.sourceStats) {
         setLastSourceStats(result.sourceStats);
@@ -294,6 +326,7 @@ export default function LabPage() {
       setApplyError(message);
     } finally {
       setIsApplying(false);
+      setApplyProgress(null);
     }
   }, [source, activeRef?.file, lookParams]);
 
@@ -312,13 +345,34 @@ export default function LabPage() {
     }
     setIsUsingEmbeddings(true);
     setHasAppliedHeuristics(false);
+    setEmbeddingProgress(null);
     try {
-      const processingFile = await sourceFileForProcessing(source.file, canvas);
-      const embeddingSemantic = await imageToSemanticEmbedding(processingFile);
+      let body: { embeddingSemantic?: number[]; tileEmbeddings?: Array<{ tile_index: number; embedding: number[] }> };
+      if (useTileSearch) {
+        setEmbeddingProgress({ phase: "Decoding…" });
+        const sourceFrame = await decode(source.file);
+        const imageData = frameToImageData(sourceFrame);
+        setEmbeddingProgress({ phase: "Tiles", current: 0, total: 100 });
+        const tileEmbeddings = await imageToColClipTileEmbeddings(
+          imageData,
+          10,
+          10,
+          (current, total) => setEmbeddingProgress({ phase: "Tiles", current, total })
+        );
+        body = {
+          tileEmbeddings: tileEmbeddings.map((vec, i) => ({ tile_index: i, embedding: vec })),
+        };
+      } else {
+        setEmbeddingProgress({ phase: "Computing embedding…" });
+        const processingFile = await sourceFileForProcessing(source.file, canvas);
+        const embeddingSemantic = await imageToSemanticEmbedding(processingFile);
+        body = { embeddingSemantic };
+      }
+      setEmbeddingProgress({ phase: "Searching…" });
       const res = await fetch("/api/dataset/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ embeddingSemantic }),
+        body: JSON.stringify(body),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -379,11 +433,13 @@ export default function LabPage() {
       };
       setLookParams(nextParams);
       autoParamsRef.current = nextParams;
+      setEmbeddingProgress({ phase: "Applying grade…" });
       const pipelineResult = await runPipelineFn(
         source.file,
         null,
         nextParams,
-        canvas
+        canvas,
+        { onProgress: (phase) => setEmbeddingProgress({ phase }) }
       );
       if (pipelineResult.sourceStats) {
         setLastSourceStats(pipelineResult.sourceStats);
@@ -396,8 +452,9 @@ export default function LabPage() {
       setApplyError(message);
     } finally {
       setIsUsingEmbeddings(false);
+      setEmbeddingProgress(null);
     }
-  }, [source, lookParams]);
+  }, [source, lookParams, useTileSearch]);
 
   // Show raw source preview when source is uploaded (no grading applied)
   useEffect(() => {
@@ -621,14 +678,51 @@ export default function LabPage() {
                   accept="image/png,image/jpeg,image/dng,image/x-adobe-dng,.dng"
                   onChange={(e) => onPickRefs(e.target.files)}
                 />
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => void runEmbeddingSearch()}
-                  disabled={!source || isApplying || isUsingEmbeddings}
-                >
-                  {isUsingEmbeddings ? "Searching…" : "Use embeddings"}
-                </Button>
+                <div className="space-y-1">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void runEmbeddingSearch()}
+                    disabled={!source || isApplying || isUsingEmbeddings}
+                  >
+                    {isUsingEmbeddings ? "Searching…" : "Use embeddings"}
+                  </Button>
+                  {isUsingEmbeddings && embeddingProgress && (
+                    <>
+                      <div className="h-1.5 w-full max-w-[200px] rounded-full bg-muted overflow-hidden">
+                        <div
+                          className={`h-full bg-primary transition-all duration-300 ${
+                            embeddingProgress.total == null || embeddingProgress.total <= 0
+                              ? "w-full animate-pulse"
+                              : ""
+                          }`}
+                          style={
+                            embeddingProgress.total != null && embeddingProgress.total > 0
+                              ? {
+                                  width: `${(100 * (embeddingProgress.current ?? 0)) / embeddingProgress.total}%`,
+                                }
+                              : { width: "100%" }
+                          }
+                        />
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        {embeddingProgress.phase}
+                        {embeddingProgress.total != null &&
+                          embeddingProgress.total > 0 &&
+                          ` — ${embeddingProgress.current ?? 0} of ${embeddingProgress.total} tiles`}
+                      </p>
+                    </>
+                  )}
+                </div>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={useTileSearch}
+                    onChange={(e) => setUseTileSearch(e.target.checked)}
+                    disabled={isUsingEmbeddings}
+                  />
+                  Use tile search (10×10, slower)
+                </label>
 
                 {refs.length > 0 && (
                   <Tabs
@@ -814,6 +908,10 @@ export default function LabPage() {
                               const hueVal = matchSection[hueKey] ?? 0;
                               const satVal = matchSection[satKey] ?? 1;
                               const lumaVal = matchSection[lumaKey] ?? 0;
+                              const tempKey = `band${
+                                band.id[0].toUpperCase() + band.id.slice(1)
+                              }Temp`;
+                              const tempVal = matchSection[tempKey] ?? 0;
                               return (
                                 <div
                                   key={band.id}
@@ -889,10 +987,201 @@ export default function LabPage() {
                                       }
                                     />
                                   </div>
+                                  <div className="space-y-1.5">
+                                    <div className="flex items-center justify-between gap-2">
+                                      <Label className="text-[10px]">
+                                        Temp (cold ↔ warm)
+                                      </Label>
+                                      <span className="text-[10px] tabular-nums text-muted-foreground">
+                                        {tempVal.toFixed(2)}
+                                      </span>
+                                    </div>
+                                    <Slider
+                                      value={[tempVal]}
+                                      min={-1}
+                                      max={1}
+                                      step={0.01}
+                                      onValueChange={(v) =>
+                                        setParam(
+                                          "match",
+                                          tempKey,
+                                          v[0] ?? 0
+                                        )
+                                      }
+                                    />
+                                  </div>
                                 </div>
                               );
                             })}
                           </div>
+
+                          {/* Refraction: shadow/highlight wheels + split */}
+                          <details className="mt-3 border-t pt-2">
+                            <summary className="text-[11px] font-medium text-muted-foreground/80 cursor-pointer">
+                              Refraction (shadow / highlight wheels)
+                            </summary>
+                            <p className="text-[10px] text-muted-foreground mt-1">
+                              H = hue in degrees (0–360). Red=0, Yellow=60, Green=120, Teal=180, Blue=240, Purple=300. S = saturation multiplier (0–3, 1 = normal).
+                            </p>
+                            <div className="mt-2 space-y-2">
+                              <div className="text-[10px] font-medium">Shadow wheel</div>
+                              {(lookParams.match.refractionShadow ?? defaultRefractionWheel()).map((node, i) => (
+                                <div key={`shadow-${i}`} className="flex gap-2 items-center flex-wrap">
+                                  <span className="text-[10px] w-14">{["R", "Y", "G", "T", "B", "P"][i]}</span>
+                                  <Label className="text-[10px] w-6">H</Label>
+                                  <Input type="number" className="w-14 h-7 text-xs" min={0} max={360} step={1} value={node.hue} onChange={(e) => {
+                                    const v = parseFloat(e.target.value); if (!Number.isNaN(v)) { setLookParams(prev => { const w = prev.match.refractionShadow ?? defaultRefractionWheel(); const next = [...w] as RefractionWheel; next[i] = { ...next[i], hue: Math.max(0, Math.min(360, v)) }; return { ...prev, match: { ...prev.match, refractionShadow: next } }; }); }
+                                  }} />
+                                  <Label className="text-[10px] w-6">S</Label>
+                                  <Input type="number" className="w-14 h-7 text-xs" min={0} max={3} step={0.1} value={node.sat} onChange={(e) => {
+                                    const v = parseFloat(e.target.value); if (!Number.isNaN(v)) { setLookParams(prev => { const w = prev.match.refractionShadow ?? defaultRefractionWheel(); const next = [...w] as RefractionWheel; next[i] = { ...next[i], sat: Math.max(0, Math.min(3, v)) }; return { ...prev, match: { ...prev.match, refractionShadow: next } }; }); }
+                                  }} />
+                                </div>
+                              ))}
+                              <div className="text-[10px] font-medium mt-2">Highlight wheel</div>
+                              {(lookParams.match.refractionHighlight ?? defaultRefractionWheel()).map((node, i) => (
+                                <div key={`high-${i}`} className="flex gap-2 items-center flex-wrap">
+                                  <span className="text-[10px] w-14">{["R", "Y", "G", "T", "B", "P"][i]}</span>
+                                  <Label className="text-[10px] w-6">H</Label>
+                                  <Input type="number" className="w-14 h-7 text-xs" min={0} max={360} step={1} value={node.hue} onChange={(e) => {
+                                    const v = parseFloat(e.target.value); if (!Number.isNaN(v)) { setLookParams(prev => { const w = prev.match.refractionHighlight ?? defaultRefractionWheel(); const next = [...w] as RefractionWheel; next[i] = { ...next[i], hue: Math.max(0, Math.min(360, v)) }; return { ...prev, match: { ...prev.match, refractionHighlight: next } }; }); }
+                                  }} />
+                                  <Label className="text-[10px] w-6">S</Label>
+                                  <Input type="number" className="w-14 h-7 text-xs" min={0} max={3} step={0.1} value={node.sat} onChange={(e) => {
+                                    const v = parseFloat(e.target.value); if (!Number.isNaN(v)) { setLookParams(prev => { const w = prev.match.refractionHighlight ?? defaultRefractionWheel(); const next = [...w] as RefractionWheel; next[i] = { ...next[i], sat: Math.max(0, Math.min(3, v)) }; return { ...prev, match: { ...prev.match, refractionHighlight: next } }; }); }
+                                  }} />
+                                </div>
+                              ))}
+                              <div className="flex items-center gap-2 mt-2">
+                                <Label className="text-[10px]">Split L</Label>
+                                <Slider className="w-24" value={[lookParams.match.refractionSplitL ?? 0.5]} min={0} max={1} step={0.05} onValueChange={(v) => setParam("match", "refractionSplitL", v[0] ?? 0.5)} />
+                                <span className="text-[10px] tabular-nums">{(lookParams.match.refractionSplitL ?? 0.5).toFixed(2)}</span>
+                              </div>
+                            </div>
+                          </details>
+
+                          {/* Exposure curve (7-handle) */}
+                          <details className="mt-3 border-t pt-2">
+                            <summary className="text-[11px] font-medium text-muted-foreground/80 cursor-pointer">
+                              Exposure curve (7-handle)
+                            </summary>
+                            <p className="text-[10px] text-muted-foreground mt-1">
+                              Per-band exposure multiplier. 1 = neutral; 0..2 scales exposure
+                              match by tonal zone from deepest shadows (0) to brightest
+                              highlights (6).
+                            </p>
+                            <div className="mt-2 space-y-1">
+                              {(lookParams.match.exposureCurve ?? defaultExposureCurve()).L_out.map((_, idx) => {
+                                const curve = lookParams.match.exposureCurve ?? defaultExposureCurve();
+                                const exposure = curve.L_out[idx] ?? 1;
+                                return (
+                                  <div key={idx} className="flex gap-2 items-center text-[10px]">
+                                    <span className="w-4">{idx}</span>
+                                    <Label className="text-[10px] w-14">Exposure</Label>
+                                    <Input
+                                      type="number"
+                                      className="w-16 h-6 text-xs"
+                                      min={0}
+                                      max={2}
+                                      step={0.05}
+                                      value={exposure}
+                                      onChange={(e) => {
+                                        const v = parseFloat(e.target.value);
+                                        if (Number.isNaN(v)) return;
+                                        const def = defaultExposureCurve();
+                                        const base = lookParams.match.exposureCurve ?? def;
+                                        const L_in = base.L_in.length
+                                          ? [...base.L_in]
+                                          : [...def.L_in];
+                                        const L_out = [...(base.L_out.length ? base.L_out : def.L_out)];
+                                        L_out[idx] = Math.max(0, Math.min(2, v));
+                                        setLookParams((prev) => ({
+                                          ...prev,
+                                          match: {
+                                            ...prev.match,
+                                            exposureCurve: { L_in, L_out },
+                                          },
+                                        }));
+                                      }}
+                                    />
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </details>
+
+                          {/* Contrast curve (7-handle) */}
+                          <details className="mt-3 border-t pt-2">
+                            <summary className="text-[11px] font-medium text-muted-foreground/80 cursor-pointer">
+                              Contrast curve (7-handle)
+                            </summary>
+                            <p className="text-[10px] text-muted-foreground mt-1">
+                              Filmic contrast by zone. Defaults (H1:-5 … H7:+5) = no change. Bezier interpolated between handles.
+                            </p>
+                            <div className="mt-2 space-y-1">
+                              {(lookParams.match.contrastCurve ?? defaultContrastCurve()).values.map((_, idx) => {
+                                const cur = lookParams.match.contrastCurve ?? defaultContrastCurve();
+                                const value = cur.values[idx] ?? 0;
+                                const labels = ["H1 (shadow)", "H2", "H3", "H4 (mid)", "H5", "H6", "H7 (highlight)"];
+                                return (
+                                  <div key={idx} className="flex gap-2 items-center text-[10px]">
+                                    <span className="w-20">{labels[idx]}</span>
+                                    <Label className="text-[10px] w-8">Val</Label>
+                                    <Input
+                                      type="number"
+                                      className="w-16 h-6 text-xs"
+                                      min={-5}
+                                      max={5}
+                                      step={0.25}
+                                      value={value}
+                                      onChange={(e) => {
+                                        const v = parseFloat(e.target.value);
+                                        if (Number.isNaN(v)) return;
+                                        const def = defaultContrastCurve();
+                                        const base = lookParams.match.contrastCurve ?? def;
+                                        const L_anchors = base.L_anchors?.length ? [...base.L_anchors] : [...def.L_anchors];
+                                        const values = [...(base.values?.length ? base.values : def.values)];
+                                        values[idx] = Math.max(-5, Math.min(5, v));
+                                        setLookParams((prev) => ({
+                                          ...prev,
+                                          match: {
+                                            ...prev.match,
+                                            contrastCurve: { L_anchors, values },
+                                          },
+                                        }));
+                                      }}
+                                    />
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </details>
+
+                          {/* Color density curve (7-handle) */}
+                          <details className="mt-3 border-t pt-2">
+                            <summary className="text-[11px] font-medium text-muted-foreground/80 cursor-pointer">
+                              Color density curve (7-handle)
+                            </summary>
+                            <p className="text-[10px] text-muted-foreground mt-1">L_anchors and scale per anchor.</p>
+                            <div className="mt-2 space-y-1">
+                              {(lookParams.match.colorDensityCurve ?? defaultColorDensityCurve()).L_anchors.map((_, idx) => {
+                                const cur = lookParams.match.colorDensityCurve ?? defaultColorDensityCurve();
+                                const L = cur.L_anchors[idx] ?? 0;
+                                const scale = cur.scale[idx] ?? 1;
+                                return (
+                                  <div key={idx} className="flex gap-2 items-center text-[10px]">
+                                    <span className="w-4">{idx}</span>
+                                    <Input type="number" className="w-14 h-6 text-xs" min={0} max={1} step={0.05} value={L} onChange={(e) => {
+                                      const v = parseFloat(e.target.value); if (Number.isNaN(v)) return; const def = defaultColorDensityCurve(); const L_anchors = [...(lookParams.match.colorDensityCurve?.L_anchors ?? def.L_anchors)]; L_anchors[idx] = Math.max(0, Math.min(1, v)); setLookParams(prev => ({ ...prev, match: { ...prev.match, colorDensityCurve: { L_anchors, scale: prev.match.colorDensityCurve?.scale ?? def.scale } } }));
+                                    }} />
+                                    <Input type="number" className="w-14 h-6 text-xs" min={0} max={2} step={0.1} value={scale} onChange={(e) => {
+                                      const v = parseFloat(e.target.value); if (Number.isNaN(v)) return; const def = defaultColorDensityCurve(); const scale = [...(lookParams.match.colorDensityCurve?.scale ?? def.scale)]; scale[idx] = Math.max(0, Math.min(2, v)); setLookParams(prev => ({ ...prev, match: { ...prev.match, colorDensityCurve: { L_anchors: prev.match.colorDensityCurve?.L_anchors ?? def.L_anchors, scale } } }));
+                                    }} />
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </details>
                         </>
                       )}
                     </div>
@@ -900,16 +1189,55 @@ export default function LabPage() {
                 })}
               </section>
 
+              {/* Tone curve (grading): 7-handle */}
+              <details className="border rounded-md p-2">
+                <summary className="text-[11px] font-medium text-muted-foreground/80 cursor-pointer">
+                  Tone curve (grading, 7-handle)
+                </summary>
+                <p className="text-[10px] text-muted-foreground mt-1">L_in → L_out. Affects grading tone curve.</p>
+                <div className="mt-2 space-y-1">
+                  {(lookParams.grading.toneCurve ?? default7HandleIdentity()).L_in.map((_, idx) => {
+                    const curve = lookParams.grading.toneCurve ?? default7HandleIdentity();
+                    const L_in = curve.L_in[idx] ?? 0;
+                    const L_out = curve.L_out[idx] ?? 0;
+                    return (
+                      <div key={idx} className="flex gap-2 items-center text-[10px]">
+                        <span className="w-4">{idx}</span>
+                        <Input type="number" className="w-14 h-6 text-xs" min={0} max={1} step={0.05} value={L_in} onChange={(e) => {
+                          const v = parseFloat(e.target.value); if (Number.isNaN(v)) return; const def = default7HandleIdentity(); const L_in = [...(lookParams.grading.toneCurve?.L_in ?? def.L_in)]; L_in[idx] = Math.max(0, Math.min(1, v)); setLookParams(prev => ({ ...prev, grading: { ...prev.grading, toneCurve: { L_in, L_out: prev.grading.toneCurve?.L_out ?? def.L_out } } }));
+                        }} />
+                        <span>→</span>
+                        <Input type="number" className="w-14 h-6 text-xs" min={0} max={1} step={0.05} value={L_out} onChange={(e) => {
+                          const v = parseFloat(e.target.value); if (Number.isNaN(v)) return; const def = default7HandleIdentity(); const L_out = [...(lookParams.grading.toneCurve?.L_out ?? def.L_out)]; L_out[idx] = Math.max(0, Math.min(1, v)); setLookParams(prev => ({ ...prev, grading: { ...prev.grading, toneCurve: { L_in: prev.grading.toneCurve?.L_in ?? def.L_in, L_out } } }));
+                        }} />
+                      </div>
+                    );
+                  })}
+                </div>
+              </details>
+
               <Separator />
 
               <section className="flex gap-2 flex-wrap items-center">
-                <Button
-                  onClick={() => void applyPipeline()}
-                  disabled={!source || isApplying || isUsingEmbeddings}
-                  size="sm"
-                >
-                  {isApplying ? "Processing…" : "Apply"}
-                </Button>
+                <div className="flex flex-col gap-1 min-w-0">
+                  <Button
+                    onClick={() => void applyPipeline()}
+                    disabled={!source || isApplying || isUsingEmbeddings}
+                    size="sm"
+                  >
+                    {isApplying ? "Processing…" : "Apply"}
+                  </Button>
+                  {isApplying && (
+                    <>
+                      <div className="h-1.5 w-full max-w-[200px] rounded-full bg-muted overflow-hidden">
+                        <div className="h-full w-full min-w-[30%] bg-primary animate-pulse" />
+                      </div>
+                      {applyProgress && (
+                        <p className="text-xs text-muted-foreground">{applyProgress}</p>
+                      )}
+                    </>
+                  )}
+                </div>
                 <Button
                   variant="outline"
                   onClick={() => onApplyHeuristics()}

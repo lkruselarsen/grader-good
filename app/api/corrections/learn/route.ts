@@ -27,6 +27,7 @@ interface CorrectionRow {
   reference_exposure: ExposureLevel | null;
   reference_chroma_distribution: ChromaDistribution | null;
   source_type: string | null;
+  camera_type: string | null;
 }
 
 const MIN_BUCKET_COUNT = 1;
@@ -115,7 +116,7 @@ export async function GET() {
   const { data, error } = await supabaseAdmin
     .from("grading_corrections")
     .select(
-      "auto_params, corrected_params, source_exposure, reference_exposure, reference_chroma_distribution, source_type"
+      "auto_params, corrected_params, source_exposure, reference_exposure, reference_chroma_distribution, source_type, camera_type"
     )
     .returns<CorrectionRow[]>();
 
@@ -142,6 +143,9 @@ export async function GET() {
     const sourceTypeBucket: BucketName | null = row.source_type
       ? (`source_type:${row.source_type}` as BucketName)
       : null;
+    const cameraTypeBucket: BucketName | null = row.camera_type
+      ? (`camera_type:${row.camera_type}` as BucketName)
+      : null;
 
     for (const [key, autoVal] of Object.entries(autoMatch)) {
       const correctedVal = (correctedMatch as Record<string, unknown>)[key];
@@ -163,6 +167,9 @@ export async function GET() {
       addDelta(paramStats, key, refColorBucketName, delta);
       if (sourceTypeBucket) {
         addDelta(paramStats, key, sourceTypeBucket, delta);
+      }
+      if (cameraTypeBucket) {
+        addDelta(paramStats, key, cameraTypeBucket, delta);
       }
     }
   }

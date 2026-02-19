@@ -8,6 +8,7 @@ import { decode, frameToImageData, computeImageStats } from "@/src/lib/pipeline"
 import { fitLookParamsFromReference } from "@/src/lib/pipeline/stages/match";
 import { imageToEmbedding } from "@/src/lib/embeddings";
 import { imageToSemanticEmbedding } from "@/src/lib/semanticEmbeddings";
+import { imageToColClipTileEmbeddings, imageToTonalTileEmbeddings } from "@/src/lib/colclipEmbeddings";
 import Link from "next/link";
 
 type UploadResult = {
@@ -16,15 +17,29 @@ type UploadResult = {
   message?: string;
 };
 
+const GRID_COLS = 10;
+const GRID_ROWS = 10;
+
+type UploadProgress = {
+  fileIndex: number;
+  fileTotal: number;
+  phase: string;
+  tileCurrent?: number;
+  tileTotal?: number;
+};
+
 export default function DatasetPage() {
   const [results, setResults] = useState<UploadResult[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [includeTiles, setIncludeTiles] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
 
   const handleFiles = useCallback(async (files: FileList | null) => {
     if (!files?.length) return;
     const list = Array.from(files);
     setResults(list.map((f) => ({ file: f.name, status: "pending" as const })));
     setIsProcessing(true);
+    const fileTotal = list.length;
 
     for (let i = 0; i < list.length; i++) {
       const file = list[i];
@@ -33,9 +48,19 @@ export default function DatasetPage() {
           j === i ? { ...r, status: "uploading" as const } : r
         )
       );
+      setUploadProgress({
+        fileIndex: i + 1,
+        fileTotal,
+        phase: "Decoding…",
+      });
       try {
         const frame = await decode(file);
         const imageData = frameToImageData(frame);
+        setUploadProgress({
+          fileIndex: i + 1,
+          fileTotal,
+          phase: "Fitting & embedding…",
+        });
         const lookParams = fitLookParamsFromReference(imageData);
         const embedding = imageToEmbedding(imageData);
         const embeddingSemantic = await imageToSemanticEmbedding(file);
@@ -49,6 +74,42 @@ export default function DatasetPage() {
         formData.append("reference_exposure", JSON.stringify(refStats.exposureLevel));
         formData.append("reference_chroma_distribution", JSON.stringify(refStats.chromaDistribution));
 
+        if (includeTiles) {
+          const totalTiles = GRID_COLS * GRID_ROWS;
+          setUploadProgress({
+            fileIndex: i + 1,
+            fileTotal,
+            phase: "Tiles",
+            tileCurrent: 0,
+            tileTotal: totalTiles,
+          });
+          const colclipTiles = await imageToColClipTileEmbeddings(
+            imageData,
+            GRID_COLS,
+            GRID_ROWS,
+            (current, total) =>
+              setUploadProgress({
+                fileIndex: i + 1,
+                fileTotal,
+                phase: "Tiles",
+                tileCurrent: current,
+                tileTotal: total,
+              })
+          );
+          const tonalTiles = imageToTonalTileEmbeddings(imageData, GRID_COLS, GRID_ROWS);
+          const tileEmbeddings = colclipTiles.map((vec, idx) => ({
+            tile_index: idx,
+            embedding_colclip: vec,
+            embedding_tonal: tonalTiles[idx],
+          }));
+          formData.append("tileEmbeddings", JSON.stringify(tileEmbeddings));
+        }
+
+        setUploadProgress({
+          fileIndex: i + 1,
+          fileTotal,
+          phase: "Uploading…",
+        });
         const res = await fetch("/api/dataset/upload", {
           method: "POST",
           body: formData,
@@ -75,7 +136,8 @@ export default function DatasetPage() {
       }
     }
     setIsProcessing(false);
-  }, []);
+    setUploadProgress(null);
+  }, [includeTiles]);
 
   return (
     <div className="p-4 md:p-6 max-w-2xl">
@@ -106,6 +168,18 @@ export default function DatasetPage() {
             disabled={isProcessing}
             onChange={(e) => handleFiles(e.target.files)}
           />
+        </div>
+        <div className="flex items-center gap-2">
+          <input
+            id="include-tiles"
+            type="checkbox"
+            checked={includeTiles}
+            onChange={(e) => setIncludeTiles(e.target.checked)}
+            disabled={isProcessing}
+          />
+          <Label htmlFor="include-tiles" className="text-sm">
+            Include tile embeddings (10×10, slower; for fine-grained search)
+          </Label>
         </div>
 
         {results.length > 0 && (
@@ -138,11 +212,39 @@ export default function DatasetPage() {
           </ul>
         )}
 
-        {isProcessing && (
-          <p className="text-xs text-muted-foreground">
-            Processing… (decode → fit LookParams → tonal + semantic embed →
-            upload)
-          </p>
+        {isProcessing && uploadProgress && (
+          <div className="space-y-1">
+            <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+              <div
+                className={`h-full bg-primary transition-all duration-300 ${
+                  uploadProgress.fileTotal <= 0 ||
+                  (uploadProgress.tileTotal != null && uploadProgress.tileTotal > 0)
+                    ? ""
+                    : "animate-pulse"
+                }`}
+                style={
+                  uploadProgress.fileTotal > 0
+                    ? {
+                        width: `${(100 *
+                          (uploadProgress.fileIndex -
+                            1 +
+                            (uploadProgress.tileTotal != null && uploadProgress.tileTotal > 0
+                              ? (uploadProgress.tileCurrent ?? 0) / uploadProgress.tileTotal
+                              : 1))) /
+                          uploadProgress.fileTotal}%`,
+                      }
+                    : undefined
+                }
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              File {uploadProgress.fileIndex} of {uploadProgress.fileTotal}
+              {uploadProgress.tileTotal != null &&
+                uploadProgress.tileTotal > 0 &&
+                ` — ${uploadProgress.tileCurrent ?? 0} of ${uploadProgress.tileTotal} tiles`}
+              {uploadProgress.tileTotal == null && ` — ${uploadProgress.phase}`}
+            </p>
+          </div>
         )}
       </Card>
 

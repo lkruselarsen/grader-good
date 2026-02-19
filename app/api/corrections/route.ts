@@ -15,6 +15,7 @@ interface CorrectionPayload {
   reference_exposure?: ExposureLevel | null;
   reference_chroma_distribution?: ChromaDistribution | null;
   source_type?: string | null;
+  camera_type?: string | null;
 }
 
 export async function POST(request: Request) {
@@ -47,6 +48,7 @@ export async function POST(request: Request) {
     reference_exposure,
     reference_chroma_distribution,
     source_type,
+    camera_type,
   } = body as CorrectionPayload;
 
   if (!sourceId || typeof sourceId !== "string") {
@@ -71,6 +73,7 @@ export async function POST(request: Request) {
         reference_exposure: reference_exposure ?? null,
         reference_chroma_distribution: reference_chroma_distribution ?? null,
         source_type: source_type ?? null,
+        camera_type: camera_type ?? null,
       })
       .single();
 

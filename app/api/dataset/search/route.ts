@@ -1,12 +1,13 @@
 /**
  * POST /api/dataset/search
  * Find grading samples closest to a given embedding (cosine distance).
- * Body: { embedding?: number[], embeddingSemantic?: number[] }
- * - If embeddingSemantic is provided: semantic-first search (preferred)
+ * Body: { embedding?: number[], embeddingSemantic?: number[], tileEmbeddings?: Array<{tile_index, embedding}> }
+ * - If tileEmbeddings is provided: tile-aggregate search (Phase 2)
+ * - Else if embeddingSemantic is provided: semantic-first search (preferred)
  * - Else if embedding provided: fallback to tonal search
  * Query: ?limit=5 (default 5)
  *
- * Requires migration 00003 (tonal) and 00004 (semantic).
+ * Requires migration 00003 (tonal), 00004 (semantic), 00007 (tiles).
  */
 
 import { NextResponse } from "next/server";
@@ -19,6 +20,19 @@ function validateEmbedding(arr: unknown, dim: number): arr is number[] {
   return arr.every((x) => typeof x === "number");
 }
 
+function validateTileEmbeddings(
+  payload: unknown
+): payload is Array<{ tile_index: number; embedding: number[] }> {
+  if (!Array.isArray(payload) || payload.length === 0) return false;
+  return payload.every(
+    (t) =>
+      typeof t === "object" &&
+      t !== null &&
+      typeof (t as { tile_index?: unknown }).tile_index === "number" &&
+      validateEmbedding((t as { embedding?: unknown }).embedding, SEMANTIC_EMBEDDING_DIM)
+  );
+}
+
 export async function POST(request: Request) {
   if (!supabaseAdmin) {
     return NextResponse.json(
@@ -27,7 +41,11 @@ export async function POST(request: Request) {
     );
   }
 
-  let body: { embedding?: unknown; embeddingSemantic?: unknown };
+  let body: {
+    embedding?: unknown;
+    embeddingSemantic?: unknown;
+    tileEmbeddings?: unknown;
+  };
   try {
     body = await request.json();
   } catch {
@@ -43,6 +61,52 @@ export async function POST(request: Request) {
     20,
     Math.max(1, parseInt(limitParam ?? "5", 10) || 5)
   );
+
+  // Tile-based search (Phase 2): when tile embeddings provided, use RPC and fetch full rows
+  // Pass array directly so Postgres receives jsonb array; stringifying would send a scalar string and break jsonb_array_elements.
+  if (validateTileEmbeddings(body.tileEmbeddings)) {
+    const queryTiles = (
+      body.tileEmbeddings as Array<{ tile_index: number; embedding: number[] }>
+    ).map((t) => ({ tile_index: t.tile_index, embedding: t.embedding }));
+    const { data: tileData, error: tileError } = await supabaseAdmin.rpc(
+      "match_grading_samples_by_tiles",
+      { query_tiles_json: queryTiles, match_limit: limit }
+    );
+    if (tileError) {
+      return NextResponse.json(
+        { error: tileError.message, hint: "Run migration 00007_grading_tiles.sql" },
+        { status: 500 }
+      );
+    }
+    const sampleIds = (tileData ?? []).map(
+      (r: { sample_id?: string }) => r.sample_id as string
+    ).filter(Boolean);
+    if (sampleIds.length === 0) {
+      return NextResponse.json({ matches: [] });
+    }
+    const { data: samples, error: samplesError } = await supabaseAdmin
+      .from("grading_samples")
+      .select("id, name, image_url, look_params, created_at, reference_exposure, reference_chroma_distribution")
+      .in("id", sampleIds);
+    if (samplesError) {
+      return NextResponse.json(
+        { error: samplesError.message },
+        { status: 500 }
+      );
+    }
+    const simById = new Map(
+      (tileData ?? []).map((r: { sample_id?: string; similarity?: number }) => [
+        r.sample_id,
+        r.similarity,
+      ])
+    );
+    const matches = (samples ?? []).map((s) => ({
+      ...s,
+      similarity: simById.get(s.id) ?? 0,
+    }));
+    matches.sort((a, b) => (b.similarity ?? 0) - (a.similarity ?? 0));
+    return NextResponse.json({ matches });
+  }
 
   const hasSemantic = validateEmbedding(
     body.embeddingSemantic,

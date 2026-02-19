@@ -7,11 +7,11 @@
 import { oklabToSrgb8, srgb8ToOklab } from "./stages/oklab";
 import type { PixelFrameRGBA, PipelineParams } from "./types";
 
-const HIGHLIGHT_PERCENTILE = 0.95;
-const LIFT_AMOUNT = 0.04;
-const SAT_COLLAPSE = 0.4;
-const WARMTH_A = 0.02;
-const WARMTH_B = 0.025;
+const HIGHLIGHT_PERCENTILE = 0.9; // 0.95 → 0.90 so more pixels get the effect
+const LIFT_AMOUNT = 0.14; // stronger lift at max strength
+const SAT_COLLAPSE = 1.0; // full collapse at max (chroma kept non-negative below)
+const WARMTH_A = 0.08; // stronger warm tint at max strength
+const WARMTH_B = 0.1;
 const DOWNSCALE_FACTOR = 4;
 const MIN_DOWNSCALE_DIM = 64;
 const VARIANCE_KERNEL = 3; // 3x3
@@ -193,7 +193,7 @@ export function halation(
     if (maskDown[i]) opaque.push(LDown[i]);
   }
   const p95 = percentileFromSorted(opaque, HIGHLIGHT_PERCENTILE);
-  const L_hi = Math.max(0.85, p95);
+  const L_hi = Math.max(0.75, p95);
 
   const varianceDown = localVariance(LDown, maskDown, sw, sh, VARIANCE_KERNEL);
   let maxVar = 0;
@@ -242,7 +242,7 @@ export function halation(
 
     const C = Math.sqrt(ap * ap + bp * bp);
     if (C > 1e-6) {
-      const Cnew = C * (1 - effectW * SAT_COLLAPSE);
+      const Cnew = Math.max(0, C * (1 - effectW * Math.min(1, SAT_COLLAPSE)));
       const ratio = Cnew / C;
       ap *= ratio;
       bp *= ratio;

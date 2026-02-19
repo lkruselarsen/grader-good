@@ -4,11 +4,8 @@
  */
 
 import type { LookParams, LookParamsGrading } from "./look-params";
-import {
-  gradingToEngine,
-  engineToGrading,
-  DEFAULT_LOOK_PARAMS,
-} from "./look-params";
+import { engineToGrading, DEFAULT_LOOK_PARAMS } from "./look-params";
+import { buildEngineParamsFromLookParams } from "./build-engine-params";
 import {
   processOne,
   exportToCanvas,
@@ -106,6 +103,11 @@ export async function exportBaselinePngBlob(
   });
 }
 
+export interface RunPipelineOptions {
+  /** Called at each phase so the UI can show progress (e.g. "Decoding…", "Applying grade…"). */
+  onProgress?: (phase: string) => void;
+}
+
 /**
  * Run the pipeline and draw the graded result to the canvas.
  * Uses source and reference Files; drives luma/color match + density from LookParams.match.
@@ -117,33 +119,12 @@ export async function runPipeline(
   sourceFile: File,
   referenceFile: File | null,
   params: LookParams,
-  canvas: HTMLCanvasElement
+  canvas: HTMLCanvasElement,
+  options?: RunPipelineOptions
 ): Promise<RunPipelineResult> {
-  const lumaStrength = params?.match?.lumaStrength ?? 1;
-  const colorStrength = params?.match?.colorStrength ?? 1;
-  const colorDensity = params?.match?.colorDensity ?? 1;
-  const exposureStrength = params?.match?.exposureStrength ?? 1;
-  const bandLowerShadow = params?.match?.bandLowerShadow ?? 1;
-  const bandUpperShadow = params?.match?.bandUpperShadow ?? 1;
-  const bandMid = params?.match?.bandMid ?? 1;
-  const bandLowerHigh = params?.match?.bandLowerHigh ?? 1;
-  const bandUpperHigh = params?.match?.bandUpperHigh ?? 1;
-  const bandLowerShadowHue = params?.match?.bandLowerShadowHue ?? 0;
-  const bandUpperShadowHue = params?.match?.bandUpperShadowHue ?? 0;
-  const bandMidHue = params?.match?.bandMidHue ?? 0;
-  const bandLowerHighHue = params?.match?.bandLowerHighHue ?? 0;
-  const bandUpperHighHue = params?.match?.bandUpperHighHue ?? 0;
-  const bandLowerShadowSat = params?.match?.bandLowerShadowSat ?? 1;
-  const bandUpperShadowSat = params?.match?.bandUpperShadowSat ?? 1;
-  const bandMidSat = params?.match?.bandMidSat ?? 1;
-  const bandLowerHighSat = params?.match?.bandLowerHighSat ?? 1;
-  const bandUpperHighSat = params?.match?.bandUpperHighSat ?? 1;
-  const bandLowerShadowLuma = params?.match?.bandLowerShadowLuma ?? 0;
-  const bandUpperShadowLuma = params?.match?.bandUpperShadowLuma ?? 0;
-  const bandMidLuma = params?.match?.bandMidLuma ?? 0;
-  const bandLowerHighLuma = params?.match?.bandLowerHighLuma ?? 0;
-  const bandUpperHighLuma = params?.match?.bandUpperHighLuma ?? 0;
+  const onProgress = options?.onProgress;
 
+  onProgress?.("Decoding…");
   const decodedSource = await decode(sourceFile);
   const sourceStats = computeImageStats(frameToImageData(decodedSource));
   const decodedRef = referenceFile ? await decode(referenceFile) : null;
@@ -167,99 +148,11 @@ export async function runPipeline(
     finalGrading = params?.grading ?? DEFAULT_LOOK_PARAMS.grading;
   }
 
-  const engine = gradingToEngine(finalGrading);
-  const engineWithMatch = engine as typeof engine & {
-    colorDensity?: number;
-    lumaStrength?: number;
-    colorStrength?: number;
-    exposureStrength?: number;
-    refBlackL?: number;
-    blackStrength?: number;
-    blackRange?: number;
-    colorBandStrengths?: {
-      lowerShadow: number;
-      upperShadow: number;
-      mid: number;
-      lowerHigh: number;
-      upperHigh: number;
-    };
-    colorBandOverrides?: {
-      hue: {
-        lowerShadow: number;
-        upperShadow: number;
-        mid: number;
-        lowerHigh: number;
-        upperHigh: number;
-      };
-      sat: {
-        lowerShadow: number;
-        upperShadow: number;
-        mid: number;
-        lowerHigh: number;
-        upperHigh: number;
-      };
-      luma: {
-        lowerShadow: number;
-        upperShadow: number;
-        mid: number;
-        lowerHigh: number;
-        upperHigh: number;
-      };
-    };
-    highlightFill?: { strength: number; warmth?: number };
-  };
-  engineWithMatch.colorDensity = colorDensity;
-  engineWithMatch.lumaStrength = lumaStrength;
-  engineWithMatch.colorStrength = colorStrength;
-  engineWithMatch.exposureStrength = exposureStrength;
-  // Black point: UI override takes precedence over fitted refBlackL.
-  const blackPoint =
-    params?.match?.blackPoint ?? finalGrading?.refBlackL ?? 0.05;
-  engineWithMatch.refBlackL = blackPoint;
-  // Black match controls (A: strength, B: range into midtones).
-  if (typeof params?.match?.blackStrength === "number") {
-    engineWithMatch.blackStrength = params.match.blackStrength;
-  }
-  if (typeof params?.match?.blackRange === "number") {
-    engineWithMatch.blackRange = params.match.blackRange;
-  }
-  engineWithMatch.colorBandStrengths = {
-    lowerShadow: bandLowerShadow,
-    upperShadow: bandUpperShadow,
-    mid: bandMid,
-    lowerHigh: bandLowerHigh,
-    upperHigh: bandUpperHigh,
-  };
-  engineWithMatch.colorBandOverrides = {
-    hue: {
-      lowerShadow: bandLowerShadowHue,
-      upperShadow: bandUpperShadowHue,
-      mid: bandMidHue,
-      lowerHigh: bandLowerHighHue,
-      upperHigh: bandUpperHighHue,
-    },
-    sat: {
-      lowerShadow: bandLowerShadowSat,
-      upperShadow: bandUpperShadowSat,
-      mid: bandMidSat,
-      lowerHigh: bandLowerHighSat,
-      upperHigh: bandUpperHighSat,
-    },
-    luma: {
-      lowerShadow: bandLowerShadowLuma,
-      upperShadow: bandUpperShadowLuma,
-      mid: bandMidLuma,
-      lowerHigh: bandLowerHighLuma,
-      upperHigh: bandUpperHighLuma,
-    },
-  };
-  engineWithMatch.highlightFill = {
-    strength: params?.match?.highlightFillStrength ?? 0,
-    warmth: params?.match?.highlightFillWarmth ?? 0,
-  };
+  onProgress?.("Applying grade…");
+  const engineWithMatch = buildEngineParamsFromLookParams(params, finalGrading);
   const result = await processOne(decodedSource, decodedRef, {
     strength: 1,
-    grading: engine,
+    grading: engineWithMatch,
   });
 
   const ret: RunPipelineResult = {
@@ -268,6 +161,7 @@ export async function runPipeline(
     ...(refStats && { refStats }),
   };
 
+  onProgress?.("Drawing…");
   const { width, height } = result;
   const scale = Math.min(1, MAX_PREVIEW_EDGE / Math.max(width, height));
   const w = Math.max(1, Math.round(width * scale));
