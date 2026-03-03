@@ -1,0 +1,19 @@
+{"location":"openai-loop/route.ts:runTrainingJob","message":"runTrainingJob started","data":{"runId":"8d3e5a83-7670-4fb8-9e21-b56f35f78173","pairCount":1,"maxIterations":33},"timestamp":1772040787265,"hypothesisId":"H1"}
+{"location":"decodeNode:decodeBuffer:beforeFirstSharp","message":"before first decodeWithSharp","data":{"bufLen":27405684,"skipSharpProbe":true},"timestamp":1772040787919,"hypothesisId":"DB1"}
+{"location":"decodeNode:decodeBuffer:beforeDcraw","message":"before runDcraw","data":{},"timestamp":1772040787920,"hypothesisId":"DB3"}
+{"location":"decodeNode:decodeBuffer:afterDcraw","message":"after runDcraw","data":{"tiffBufLen":0},"timestamp":1772040902050,"hypothesisId":"DB4"}
+{"location":"decodeNode:decodeBuffer:beforeTiffSharp","message":"before decodeWithSharp(tiffBuffer)","data":{"tiffLen":71666236},"timestamp":1772040902052,"hypothesisId":"DB5"}
+{"location":"decodeNode:decodeBuffer:beforeResizeTiff","message":"before resizeTiffBufferToMaxEdge","data":{},"timestamp":1772040902318,"hypothesisId":"DB6"}
+{"location":"decodeNode:decodeBuffer:afterResizeTiff","message":"after resizeTiffBufferToMaxEdge","data":{"resizedLen":2881150},"timestamp":1772040902988,"hypothesisId":"DB7"}
+{"location":"decodeNode:decodeBuffer:beforeFirstSharp","message":"before first decodeWithSharp","data":{"bufLen":19007692,"skipSharpProbe":true},"timestamp":1772040903039,"hypothesisId":"DB1"}
+{"location":"decodeNode:decodeBuffer:beforeDcraw","message":"before runDcraw","data":{},"timestamp":1772040903040,"hypothesisId":"DB3"}
+{"location":"openai-loop/route.ts:runTrainingJob","message":"runTrainingJob started","data":{"runId":"d2a539e0-e10f-4017-9464-f3907682a82d","pairCount":1,"maxIterations":20},"timestamp":1772041177750,"hypothesisId":"H1"}
+{"location":"decodeNode:decodeBuffer:beforeFirstSharp","message":"before first decodeWithSharp","data":{"bufLen":22960128,"skipSharpProbe":true},"timestamp":1772041178092,"hypothesisId":"DB1"}
+{"location":"decodeNode:decodeBuffer:beforeDcraw","message":"before runDcraw","data":{},"timestamp":1772041178092,"hypothesisId":"DB3"}
+{"location":"decodeNode:decodeBuffer:afterDcraw","message":"after runDcraw","data":{"tiffBufLen":0},"timestamp":1772041298990,"hypothesisId":"DB4"}
+{"location":"decodeNode:decodeBuffer:beforeTiffSharp","message":"before decodeWithSharp(tiffBuffer)","data":{"tiffLen":71666236},"timestamp":1772041298992,"hypothesisId":"DB5"}
+{"location":"decodeNode:decodeBuffer:beforeResizeTiff","message":"before resizeTiffBufferToMaxEdge","data":{},"timestamp":1772041299009,"hypothesisId":"DB6"}
+{"location":"decodeNode:decodeBuffer:afterResizeTiff","message":"after resizeTiffBufferToMaxEdge","data":{"resizedLen":2881150},"timestamp":1772041299590,"hypothesisId":"DB7"}
+{"location":"decodeNode:decodeBuffer:beforeFirstSharp","message":"before first decodeWithSharp","data":{"bufLen":9216608,"skipSharpProbe":false},"timestamp":1772041299634,"hypothesisId":"DB1"}
+{"location":"decodeNode:decodeBuffer:beforeResizeImage","message":"before resizeImageBufferToMaxEdge","data":{},"timestamp":1772041299656,"hypothesisId":"DB2a"}
+{"location":"decodeNode:decodeBuffer:afterResizeImage","message":"after resizeImageBufferToMaxEdge","data":{"resizedLen":1866078},"timestamp":1772041300232,"hypothesisId":"DB2b"}

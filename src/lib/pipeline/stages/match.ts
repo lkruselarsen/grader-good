@@ -155,7 +155,17 @@ export interface LookParams {
    * Optional highlight fill (bloom/density) for the halation stage. Not fitted
    * from reference; driven from match UI and corrections.
    */
-  highlightFill?: { strength: number; warmth?: number };
+  highlightFill?: {
+    strength: number;
+    warmth?: number;
+    tailGamma?: number;
+    contrastGate?: number;
+    rimStrength?: number;
+    bloomStrength?: number;
+    rimRadius?: number;
+    bloomRadius?: number;
+    interiorGuard?: number;
+  };
   /** Refraction: shadow wheel. Six nodes { hue: 0..360°, sat: 0..3 } order: red, yellow, green, teal, blue, purple. */
   refractionShadow?: RefractionWheelEngine;
   /** Refraction: highlight wheel. Same. */
@@ -468,14 +478,16 @@ function applyLGG(
  */
 export function fitLookParamsFromReference(ref: ImageData): LookParams {
   const { data: d, width, height } = ref;
-  const Ls: number[] = [];
-  const Cs: number[] = [];
-  const oas: number[] = [];
-  const bs: number[] = [];
   // Full-resolution L grid + mask so we can measure reference micro-contrast in midtones.
   const nPix = width * height;
   const Lgrid = new Float32Array(nPix);
   const mask = new Uint8Array(nPix);
+  // Typed arrays avoid V8 OOM from converting large Smi arrays to FixedDoubleArray.
+  const Ls = new Float32Array(nPix);
+  const Cs = new Float32Array(nPix);
+  const oas = new Float32Array(nPix);
+  const bs = new Float32Array(nPix);
+  let m = 0;
 
   for (let i = 0; i < d.length; i += 4) {
     const pix = i >> 2;
@@ -485,19 +497,21 @@ export function fitLookParamsFromReference(ref: ImageData): LookParams {
       mask[pix] = 0;
       continue;
     }
-    const { L, a: oa, b } = srgb8ToOklab(d[i], d[i + 1], d[i + 2]);
-    Ls.push(L);
-    Cs.push(chroma(oa, b));
-    oas.push(oa);
-    bs.push(b);
+    const { L, a: oa, b } = srgb8ToOklab(d[i]!, d[i + 1]!, d[i + 2]!);
+    Ls[m] = L;
+    Cs[m] = chroma(oa, b);
+    oas[m] = oa;
+    bs[m] = b;
+    m++;
     Lgrid[pix] = L;
     mask[pix] = 1;
   }
 
-  const m = Ls.length;
   if (m === 0) return defaultLookParams();
 
-  const Lsorted = [...Ls].sort((a, b) => a - b);
+  const LsortedBuf = new Float32Array(Ls.subarray(0, m));
+  LsortedBuf.sort();
+  const Lsorted = LsortedBuf;
   const p25 = Lsorted[Math.floor(m * 0.25)] ?? 0.25;
   const p75 = Lsorted[Math.floor(m * 0.75)] ?? 0.75;
   const p95 = Lsorted[Math.floor(m * 0.95)] ?? 0.95;
@@ -507,8 +521,11 @@ export function fitLookParamsFromReference(ref: ImageData): LookParams {
   const p05 = Lsorted[Math.floor(m * 0.05)] ?? 0.05;
   const refBlackL = Math.min(p02, p05);
 
-  const meanA = oas.reduce((s, x) => s + x, 0) / oas.length;
-  const meanB = bs.reduce((s, x) => s + x, 0) / bs.length;
+  let sumOa = 0;
+  let sumBs = 0;
+  for (let i = 0; i < m; i++) { sumOa += oas[i]!; sumBs += bs[i]!; }
+  const meanA = sumOa / m;
+  const meanB = sumBs / m;
   const warmth = Math.max(-0.35, Math.min(0.35, meanB * 1.1));
   const tint = Math.max(-0.2, Math.min(0.2, meanA * 0.7));
 
@@ -688,25 +705,25 @@ export function fitLookParamsFromReference(ref: ImageData): LookParams {
   const refSumB = new Array<number>(bandCount).fill(0);
   const refSumC = new Array<number>(bandCount).fill(0);
   const refSumW = new Array<number>(bandCount).fill(0);
+  // Pre-allocated reusable buffer avoids per-pixel array allocation inside bandWeights.
+  const _wBuf2 = new Float32Array(bandCount);
 
-  function bandWeights(L: number): number[] {
-    const w: number[] = new Array(bandCount).fill(0);
+  function bandWeights(L: number): Float32Array {
     const anchors = COLOR_BAND_ANCHORS;
-    // Triangular kernels around each anchor, with soft overlap.
     for (let k = 0; k < bandCount; k++) {
       const center = anchors[k];
       const left = k === 0 ? 0 : anchors[k - 1];
       const right = k === bandCount - 1 ? 1 : anchors[k + 1];
       const width = Math.max(1e-3, Math.max(center - left, right - center));
       const t = 1 - Math.abs(L - center) / width;
-      w[k] = t > 0 ? t : 0;
+      _wBuf2[k] = t > 0 ? t : 0;
     }
     let sum = 0;
-    for (let k = 0; k < bandCount; k++) sum += w[k];
+    for (let k = 0; k < bandCount; k++) sum += _wBuf2[k];
     if (sum > 1e-6) {
-      for (let k = 0; k < bandCount; k++) w[k] /= sum;
+      for (let k = 0; k < bandCount; k++) _wBuf2[k] /= sum;
     }
-    return w;
+    return _wBuf2;
   }
 
   for (let i = 0; i < m; i++) {
@@ -784,8 +801,9 @@ export function fitLookParamsFromReference(ref: ImageData): LookParams {
   // Overall reference saturation: use median chroma so a few saturated spots don't pull the mean up.
   // Higher NEUTRAL (0.10) so desaturated film reliably gets scale < 1; saturated refs get > 1.
   const NEUTRAL_CHROMA = 0.10;
-  const CsSorted = Cs.length > 0 ? [...Cs].sort((a, b) => a - b) : [NEUTRAL_CHROMA];
-  const refMedianC = CsSorted[Math.floor(CsSorted.length * 0.5)] ?? NEUTRAL_CHROMA;
+  const CsSortedBuf = new Float32Array(Cs.subarray(0, m));
+  CsSortedBuf.sort();
+  const refMedianC = m > 0 ? (CsSortedBuf[Math.floor(m * 0.5)] ?? NEUTRAL_CHROMA) : NEUTRAL_CHROMA;
   const refSaturation =
     refMedianC <= 1e-6 ? 1 : Math.max(0.1, Math.min(2.5, refMedianC / NEUTRAL_CHROMA));
 
@@ -876,8 +894,8 @@ export function fitLookParamsFromReference(ref: ImageData): LookParams {
     const refColorBucket = bucketForRefColor({
       meanA: meanA,
       meanB: meanB,
-      meanC: Cs.length
-        ? Cs.reduce((s, c) => s + c, 0) / Cs.length
+      meanC: m > 0
+        ? (() => { let s = 0; for (let i = 0; i < m; i++) s += Cs[i]!; return s / m; })()
         : 0,
       bands: [],
     });
@@ -935,30 +953,32 @@ export function fitLookParamsFromReference(ref: ImageData): LookParams {
 
 /** Median source L over opaque pixels (used for exposure matching). */
 function sourceMidL(d: Uint8ClampedArray): number {
-  const Ls: number[] = [];
+  const buf = new Float32Array(d.length >> 2);
+  let count = 0;
   for (let i = 0; i < d.length; i += 4) {
-    if (d[i + 3] < 128) continue;
-    const { L } = srgb8ToOklab(d[i], d[i + 1], d[i + 2]);
-    Ls.push(L);
+    if (d[i + 3]! < 128) continue;
+    const { L } = srgb8ToOklab(d[i]!, d[i + 1]!, d[i + 2]!);
+    buf[count++] = L;
   }
-  if (Ls.length === 0) return 0.5;
-  const sorted = [...Ls].sort((a, b) => a - b);
-  const m = sorted.length;
-  return sorted[Math.floor(m * 0.5)] ?? 0.5;
+  if (count === 0) return 0.5;
+  const sorted = buf.subarray(0, count);
+  sorted.sort();
+  return sorted[Math.floor(count * 0.5)] ?? 0.5;
 }
 
 /** Approximate "black" level of source: low-percentile L over opaque pixels (e.g. 5th percentile). */
 function sourceBlackL(d: Uint8ClampedArray): number {
-  const Ls: number[] = [];
+  const buf = new Float32Array(d.length >> 2);
+  let count = 0;
   for (let i = 0; i < d.length; i += 4) {
-    if (d[i + 3] < 128) continue;
-    const { L } = srgb8ToOklab(d[i], d[i + 1], d[i + 2]);
-    Ls.push(L);
+    if (d[i + 3]! < 128) continue;
+    const { L } = srgb8ToOklab(d[i]!, d[i + 1]!, d[i + 2]!);
+    buf[count++] = L;
   }
-  if (Ls.length === 0) return 0.05;
-  const sorted = [...Ls].sort((a, b) => a - b);
-  const m = sorted.length;
-  return sorted[Math.floor(m * 0.05)] ?? 0.05;
+  if (count === 0) return 0.05;
+  const sorted = buf.subarray(0, count);
+  sorted.sort();
+  return sorted[Math.floor(count * 0.05)] ?? 0.05;
 }
 
 /** Percentile of L from a grid, restricted to opaque pixels by mask. */
@@ -967,16 +987,18 @@ function percentileFromLGrid(
   mask: Uint8Array,
   p: number
 ): number {
-  const vals: number[] = [];
   const n = Lgrid.length;
+  const buf = new Float32Array(n);
+  let count = 0;
   for (let i = 0; i < n; i++) {
     if (!mask[i]) continue;
-    vals.push(Lgrid[i]);
+    buf[count++] = Lgrid[i]!;
   }
-  if (vals.length === 0) return 0;
-  vals.sort((a, b) => a - b);
-  const idx = Math.floor(Math.max(0, Math.min(1, p)) * (vals.length - 1));
-  return vals[idx] ?? 0;
+  if (count === 0) return 0;
+  const sorted = buf.subarray(0, count);
+  sorted.sort();
+  const idx = Math.floor(Math.max(0, Math.min(1, p)) * (count - 1));
+  return sorted[idx] ?? 0;
 }
 
 /** Simple separable 5-tap Gaussian blur (approx σ≈1) on a luminance grid. */
@@ -1402,9 +1424,10 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
 
   const COLOR_BAND_ANCHORS = [0.08, 0.25, 0.5, 0.7, 0.9];
   const bandCount = COLOR_BAND_ANCHORS.length;
+  // Pre-allocated reusable buffer avoids per-pixel array allocation inside bandWeights.
+  const _wBuf = new Float32Array(bandCount);
 
-  function bandWeights(L: number): number[] {
-    const w = new Array<number>(bandCount).fill(0);
+  function bandWeights(L: number): Float32Array {
     const anchors = COLOR_BAND_ANCHORS;
     for (let k = 0; k < bandCount; k++) {
       const center = anchors[k];
@@ -1412,14 +1435,14 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
       const right = k === bandCount - 1 ? 1 : anchors[k + 1];
       const width = Math.max(1e-3, Math.max(center - left, right - center));
       const tL = 1 - Math.abs(L - center) / width;
-      w[k] = tL > 0 ? tL : 0;
+      _wBuf[k] = tL > 0 ? tL : 0;
     }
     let sum = 0;
-    for (let k = 0; k < bandCount; k++) sum += w[k];
+    for (let k = 0; k < bandCount; k++) sum += _wBuf[k];
     if (sum > 1e-6) {
-      for (let k = 0; k < bandCount; k++) w[k] /= sum;
+      for (let k = 0; k < bandCount; k++) _wBuf[k] /= sum;
     }
-    return w;
+    return _wBuf;
   }
 
   const srcSumA = new Array<number>(bandCount).fill(0);

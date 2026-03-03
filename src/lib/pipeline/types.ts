@@ -41,9 +41,19 @@ export type DecodeInput = File | PixelFrameRGBA;
 import type { LookParams as GradingParams } from "./stages/match";
 export type { GradingParams };
 
+/** Optional context about match-stage exposure changes (for dampening halation in lifted regions). */
+export interface MatchExposureContext {
+  exposureStrength?: number;
+  exposureCurve?: { L_in: number[]; L_out: number[] };
+}
+
 export interface PipelineParams {
   strength?: number;
   /** Optional grading params from UI; when present, used instead of fitting from reference. */
   grading?: GradingParams;
+  /** Optional exposure map from RAW linear decode. Used exclusively for halation boundaries. */
+  exposureMap?: import("./exposureMap").ExposureMap; // avoid circular import
+  /** Optional match exposure context for dampening halation in lifted regions. */
+  matchExposureContext?: MatchExposureContext;
   // Extensible; no UI-specific fields.
 }

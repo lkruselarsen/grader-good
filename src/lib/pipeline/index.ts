@@ -3,8 +3,16 @@
  */
 
 export { processOne } from "./processOne";
+export { processFrames } from "./processFrames";
 export { exportToCanvas, frameToImageData } from "./exportStage";
-export { decode } from "./decode";
+// decode and decodeDngLinear are browser-only (libraw-wasm) — import directly
+// from "@/src/lib/pipeline/decode" in client components; never from this barrel
+// so that server API routes don't accidentally pull libraw-wasm into the Node bundle.
+export {
+  buildExposureMapFromSrgb,
+  buildExposureMapFromLinearRgb,
+  type ExposureMap,
+} from "./exposureMap";
 export { match } from "./match";
 export { halation } from "./halation";
 export { grain } from "./grain";

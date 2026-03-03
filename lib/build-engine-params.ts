@@ -67,6 +67,13 @@ export function buildEngineParamsFromLookParams(
   engine.highlightFill = {
     strength: m.highlightFillStrength ?? 0,
     warmth: m.highlightFillWarmth ?? 0,
+    tailGamma: m.halationTailGamma ?? 4,
+    contrastGate: m.halationContrastGate ?? 1,
+    rimStrength: m.halationRimStrength ?? 0.6,
+    bloomStrength: m.halationBloomStrength ?? 0.8,
+    rimRadius: m.halationRimRadius ?? 0.1,
+    bloomRadius: m.halationBloomRadius ?? 1.0,
+    interiorGuard: m.halationInteriorGuard ?? 0.5,
   };
   engine.refractionShadow = (m.refractionShadow ?? defaultRefractionWheel()) as typeof engine.refractionShadow;
   engine.refractionHighlight = (m.refractionHighlight ?? defaultRefractionWheel()) as typeof engine.refractionHighlight;

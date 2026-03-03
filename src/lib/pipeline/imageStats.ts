@@ -77,22 +77,25 @@ const NEUTRAL_CHROMA: ChromaDistribution = {
  */
 export function computeImageStats(image: ImageData): ImageStats {
   const d = image.data;
-  const Ls: number[] = [];
-  const oas: number[] = [];
-  const obs: number[] = [];
-  const Cs: number[] = [];
+  const nPix = d.length >> 2;
+  // Typed arrays avoid V8 OOM from per-pixel push to plain number[].
+  const Ls = new Float32Array(nPix);
+  const oas = new Float32Array(nPix);
+  const obs = new Float32Array(nPix);
+  const Cs = new Float32Array(nPix);
+  let n = 0;
 
   for (let i = 0; i < d.length; i += 4) {
-    if (d[i + 3] < 128) continue;
-    const { L, a, b } = srgb8ToOklab(d[i], d[i + 1], d[i + 2]);
+    if (d[i + 3]! < 128) continue;
+    const { L, a, b } = srgb8ToOklab(d[i]!, d[i + 1]!, d[i + 2]!);
     const c = chroma(a, b);
-    Ls.push(L);
-    oas.push(a);
-    obs.push(b);
-    Cs.push(c);
+    Ls[n] = L;
+    oas[n] = a;
+    obs[n] = b;
+    Cs[n] = c;
+    n++;
   }
 
-  const n = Ls.length;
   if (n === 0) {
     return {
       exposureLevel: NEUTRAL_EXPOSURE,
@@ -100,16 +103,16 @@ export function computeImageStats(image: ImageData): ImageStats {
     };
   }
 
-  const Lsorted = [...Ls].sort((a, b) => a - b);
+  const LsortedBuf = new Float32Array(Ls.subarray(0, n));
+  LsortedBuf.sort();
   const exposureLevel: ExposureLevel = {
-    medianL: Lsorted[Math.floor(n * 0.5)] ?? 0.5,
-    p05L: Lsorted[Math.floor(n * 0.05)] ?? 0.05,
-    p95L: Lsorted[Math.floor(n * 0.95)] ?? 0.95,
+    medianL: LsortedBuf[Math.floor(n * 0.5)] ?? 0.5,
+    p05L: LsortedBuf[Math.floor(n * 0.05)] ?? 0.05,
+    p95L: LsortedBuf[Math.floor(n * 0.95)] ?? 0.95,
   };
 
-  const sumA = oas.reduce((s, x) => s + x, 0);
-  const sumB = obs.reduce((s, x) => s + x, 0);
-  const sumC = Cs.reduce((s, x) => s + x, 0);
+  let sumA = 0, sumB = 0, sumC = 0;
+  for (let i = 0; i < n; i++) { sumA += oas[i]!; sumB += obs[i]!; sumC += Cs[i]!; }
   const bands: ChromaBand[] = COLOR_BAND_ANCHORS.map(() => ({
     meanA: 0,
     meanB: 0,
@@ -118,14 +121,15 @@ export function computeImageStats(image: ImageData): ImageStats {
   }));
 
   for (let i = 0; i < n; i++) {
-    const L = Ls[i];
-    const a = oas[i];
-    const b = obs[i];
-    const c = Cs[i];
-    const weights = COLOR_BAND_ANCHORS.map((_, k) => bandWeight(L, k));
-    const totalW = weights.reduce((s, x) => s + x, 0) || 1;
+    const L = Ls[i]!;
+    const a = oas[i]!;
+    const b = obs[i]!;
+    const c = Cs[i]!;
+    let totalW = 0;
+    for (let k = 0; k < BAND_COUNT; k++) totalW += bandWeight(L, k);
+    if (totalW < 1e-9) totalW = 1;
     for (let k = 0; k < BAND_COUNT; k++) {
-      const wk = weights[k] / totalW;
+      const wk = bandWeight(L, k) / totalW;
       bands[k].meanA += a * wk;
       bands[k].meanB += b * wk;
       bands[k].meanC += c * wk;

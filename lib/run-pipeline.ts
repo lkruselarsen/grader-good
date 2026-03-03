@@ -10,10 +10,12 @@ import {
   processOne,
   exportToCanvas,
   frameToImageData,
-  decode,
+  buildExposureMapFromSrgb,
+  buildExposureMapFromLinearRgb,
   computeImageStats,
   type ImageStats,
 } from "@/src/lib/pipeline";
+import { decode, decodeDngLinear } from "@/src/lib/pipeline/decode";
 import { fitLookParamsFromReference } from "@/src/lib/pipeline/stages/match";
 
 const MAX_PREVIEW_EDGE = 1600;
@@ -103,6 +105,75 @@ export async function exportBaselinePngBlob(
   });
 }
 
+/**
+ * Run the full pipeline at the source's native resolution (no MAX_PREVIEW_EDGE cap)
+ * and return the graded result as a PNG Blob. Use for the Export button.
+ */
+export async function exportGradedPngBlob(
+  sourceFile: File,
+  referenceFile: File | null,
+  params: LookParams,
+  options?: RunPipelineOptions
+): Promise<Blob> {
+  const onProgress = options?.onProgress;
+
+  onProgress?.("Decoding…");
+  const decodedSource = await decode(sourceFile);
+  const decodedRef = referenceFile ? await decode(referenceFile) : null;
+
+  const linearSource = await decodeDngLinear(sourceFile);
+  const exposureMap =
+    linearSource != null
+      ? buildExposureMapFromLinearRgb(
+          linearSource.width,
+          linearSource.height,
+          new Uint8Array(linearSource.data),
+          4
+        )
+      : buildExposureMapFromSrgb(decodedSource);
+
+  let finalGrading: LookParamsGrading;
+  if (decodedRef) {
+    const refImageData = new ImageData(
+      new Uint8ClampedArray(decodedRef.data),
+      decodedRef.width,
+      decodedRef.height
+    );
+    finalGrading = engineToGrading(fitLookParamsFromReference(refImageData));
+  } else {
+    finalGrading = params?.grading ?? DEFAULT_LOOK_PARAMS.grading;
+  }
+
+  onProgress?.("Applying grade…");
+  const engineWithMatch = buildEngineParamsFromLookParams(params, finalGrading);
+  const result = await processOne(decodedSource, decodedRef, {
+    strength: 1,
+    grading: engineWithMatch,
+    exposureMap,
+  });
+
+  onProgress?.("Encoding PNG…");
+  const canvas = document.createElement("canvas");
+  canvas.width = result.width;
+  canvas.height = result.height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Could not get 2D context for export");
+  ctx.putImageData(frameToImageData(result), 0, 0);
+
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) {
+          reject(new Error("Failed to encode graded PNG"));
+          return;
+        }
+        resolve(blob);
+      },
+      "image/png"
+    );
+  });
+}
+
 export interface RunPipelineOptions {
   /** Called at each phase so the UI can show progress (e.g. "Decoding…", "Applying grade…"). */
   onProgress?: (phase: string) => void;
@@ -132,6 +203,17 @@ export async function runPipeline(
     ? computeImageStats(frameToImageData(decodedRef))
     : undefined;
 
+  const linearSource = await decodeDngLinear(sourceFile);
+  const exposureMap =
+    linearSource != null
+      ? buildExposureMapFromLinearRgb(
+          linearSource.width,
+          linearSource.height,
+          new Uint8Array(linearSource.data),
+          4
+        )
+      : buildExposureMapFromSrgb(decodedSource);
+
   let finalGrading: LookParamsGrading;
   let fittedGrading: LookParams["grading"] | undefined;
 
@@ -153,6 +235,7 @@ export async function runPipeline(
   const result = await processOne(decodedSource, decodedRef, {
     strength: 1,
     grading: engineWithMatch,
+    exposureMap,
   });
 
   const ret: RunPipelineResult = {
