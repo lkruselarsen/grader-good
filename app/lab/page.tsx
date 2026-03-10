@@ -132,7 +132,7 @@ const PARAM_SECTIONS: Array<{
         key: "exposureStrength",
         label: "Exposure match",
         min: 0,
-        max: 2,
+        max: 1.5,
         step: 0.01,
       },
       {
@@ -265,14 +265,14 @@ const PARAM_SECTIONS: Array<{
         key: "halationRimRadius",
         label: "Rim radius (% short edge)",
         min: 0,
-        max: 2,
+        max: 0.75,
         step: 0.05,
       },
       {
         key: "halationBloomRadius",
         label: "Bloom radius (% short edge)",
         min: 0,
-        max: 10,
+        max: 2.5,
         step: 0.1,
       },
     ],
@@ -306,6 +306,15 @@ export default function LabPage() {
   const [applyProgress, setApplyProgress] = useState<string | null>(null);
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState<string | null>(null);
+
+  const [compareWasmUrl, setCompareWasmUrl] = useState<string | null>(null);
+  const [compareServerUrl, setCompareServerUrl] = useState<string | null>(null);
+  const [compareLoading, setCompareLoading] = useState(false);
+  const [compareError, setCompareError] = useState<string | null>(null);
+  const compareInputRef = useRef<HTMLInputElement | null>(null);
+
+  const [importJsonText, setImportJsonText] = useState("");
+  const [importError, setImportError] = useState<string | null>(null);
 
   const previewAbortRef = useRef<AbortController | null>(null);
   const autoParamsRef = useRef<LookParams | null>(null);
@@ -380,6 +389,118 @@ export default function LabPage() {
       setApplyProgress(null);
     }
   }, [source, activeRef?.file, lookParams]);
+
+  function onLoadParams() {
+    setImportError(null);
+    const trimmed = importJsonText.trim();
+    if (!trimmed) {
+      setImportError("Paste JSON first");
+      return;
+    }
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (typeof parsed !== "object" || parsed === null) {
+        setImportError("JSON must be an object");
+        return;
+      }
+      const obj = parsed as Record<string, unknown>;
+      if (
+        !obj.match ||
+        typeof obj.match !== "object" ||
+        obj.match === null ||
+        !obj.grading ||
+        typeof obj.grading !== "object" ||
+        obj.grading === null
+      ) {
+        setImportError("JSON must have 'match' and 'grading' objects");
+        return;
+      }
+      const merged: LookParams = {
+        match: { ...DEFAULT_LOOK_PARAMS.match, ...(obj.match as object) },
+        grading: { ...DEFAULT_LOOK_PARAMS.grading, ...(obj.grading as object) },
+      };
+      if (obj.halation && typeof obj.halation === "object") {
+        merged.halation = { ...merged.halation, ...(obj.halation as object) };
+      }
+      if (obj.grain && typeof obj.grain === "object") {
+        merged.grain = { ...merged.grain, ...(obj.grain as object) };
+      }
+      setLookParams(merged);
+      autoParamsRef.current = merged;
+    } catch (err) {
+      setImportError(err instanceof SyntaxError ? "Invalid JSON" : err instanceof Error ? err.message : "Parse failed");
+    }
+  }
+
+  const importJsonValid = useMemo(() => {
+    const t = importJsonText.trim();
+    if (!t) return false;
+    try {
+      const p = JSON.parse(t) as unknown;
+      if (typeof p !== "object" || p === null) return false;
+      const o = p as Record<string, unknown>;
+      return (
+        o.match != null &&
+        typeof o.match === "object" &&
+        o.grading != null &&
+        typeof o.grading === "object"
+      );
+    } catch {
+      return false;
+    }
+  }, [importJsonText]);
+
+  const onCompareDecodersPick = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0] ?? null;
+      e.target.value = "";
+      if (!file) return;
+      if (!isDngFile(file)) {
+        setCompareError("Select a DNG file");
+        return;
+      }
+      setCompareLoading(true);
+      setCompareError(null);
+      setCompareWasmUrl(null);
+      setCompareServerUrl(null);
+      try {
+        const [wasmFrame, serverRes] = await Promise.all([
+          decode(file),
+          (async () => {
+            const form = new FormData();
+            form.append("file", file);
+            return fetch("/api/decode/raw", {
+              method: "POST",
+              body: form,
+            });
+          })(),
+        ]);
+        const canvas = document.createElement("canvas");
+        canvas.width = wasmFrame.width;
+        canvas.height = wasmFrame.height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) throw new Error("Canvas 2D context");
+        ctx.putImageData(frameToImageData(wasmFrame), 0, 0);
+        const wasmDataUrl = canvas.toDataURL("image/png");
+        setCompareWasmUrl(wasmDataUrl);
+
+        if (!serverRes.ok) {
+          const err = (await serverRes.json()) as { error?: string };
+          throw new Error(err.error ?? "Server decode failed");
+        }
+        const data = (await serverRes.json()) as { png_base64?: string };
+        const serverDataUrl = data.png_base64
+          ? `data:image/png;base64,${data.png_base64}`
+          : null;
+        setCompareServerUrl(serverDataUrl);
+      } catch (err) {
+        setCompareError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setCompareLoading(false);
+      }
+    },
+    []
+  );
 
   const runEmbeddingSearch = useCallback(async () => {
     previewAbortRef.current?.abort();
@@ -1441,6 +1562,97 @@ export default function LabPage() {
                     );
                   })}
                 </div>
+              </details>
+
+              {/* Import JSON (corrected params from Supabase) */}
+              <details className="border rounded-md p-2">
+                <summary className="text-[11px] font-medium text-muted-foreground/80 cursor-pointer">
+                  Import JSON (corrected params from Supabase)
+                </summary>
+                <p className="text-[10px] text-muted-foreground mt-1">
+                  Paste the content of a "corrected params" cell from Supabase.
+                </p>
+                <textarea
+                  className="mt-2 w-full min-h-[100px] rounded-md border border-input bg-background px-3 py-2 text-xs font-mono"
+                  placeholder='{ "match": { ... }, "grading": { ... } }'
+                  value={importJsonText}
+                  onChange={(e) => {
+                    setImportJsonText(e.target.value);
+                    setImportError(null);
+                  }}
+                  rows={5}
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="mt-2"
+                  disabled={!importJsonValid}
+                  onClick={onLoadParams}
+                >
+                  Load Params
+                </Button>
+                {importError && (
+                  <p className="text-xs text-destructive mt-1">{importError}</p>
+                )}
+              </details>
+
+              <details className="border rounded-md p-2">
+                <summary className="text-[11px] font-medium text-muted-foreground/80 cursor-pointer">
+                  Compare decoders
+                </summary>
+                <p className="text-[10px] text-muted-foreground mt-1">
+                  Load a DNG to compare libraw-wasm (client) vs server LibRaw side-by-side.
+                </p>
+                <input
+                  ref={compareInputRef}
+                  type="file"
+                  accept=".dng,image/x-adobe-dng,image/dng"
+                  onChange={onCompareDecodersPick}
+                  className="hidden"
+                  aria-hidden
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="mt-2"
+                  onClick={() => compareInputRef.current?.click()}
+                  disabled={compareLoading}
+                >
+                  {compareLoading ? "Decoding…" : "Load DNG to compare"}
+                </Button>
+                {compareError && (
+                  <p className="text-xs text-destructive mt-1">{compareError}</p>
+                )}
+                {(compareWasmUrl || compareServerUrl) && !compareLoading && (
+                  <div className="grid grid-cols-2 gap-2 mt-2">
+                    <div className="space-y-1">
+                      <p className="text-[10px] font-medium text-muted-foreground">
+                        libraw-wasm
+                      </p>
+                      {compareWasmUrl && (
+                        /* eslint-disable-next-line @next/next/no-img-element */
+                        <img
+                          src={compareWasmUrl}
+                          alt="libraw-wasm decode"
+                          className="w-full max-h-32 object-contain rounded border"
+                        />
+                      )}
+                    </div>
+                    <div className="space-y-1">
+                      <p className="text-[10px] font-medium text-muted-foreground">
+                        Server (LibRaw)
+                      </p>
+                      {compareServerUrl && (
+                        /* eslint-disable-next-line @next/next/no-img-element */
+                        <img
+                          src={compareServerUrl}
+                          alt="Server LibRaw decode"
+                          className="w-full max-h-32 object-contain rounded border"
+                        />
+                      )}
+                    </div>
+                  </div>
+                )}
               </details>
 
               <Separator />

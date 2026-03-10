@@ -244,8 +244,8 @@ export const DEFAULT_LOOK_PARAMS: LookParams = {
     exposureStrength: 1.11,
     // Film-like defaults: slightly lifted but deep blacks so training and
     // heuristics start closer to typical references.
-    blackStrength: 5.5,
-    blackRange: 0.6,
+    blackStrength: 6.3,
+    blackRange: 0.7,
     blackPoint: 0.01,
     bandLowerShadow: 1,
     bandUpperShadow: 1,
@@ -267,8 +267,8 @@ export const DEFAULT_LOOK_PARAMS: LookParams = {
     bandMidLuma: 0,
     bandLowerHighLuma: 0,
     bandUpperHighLuma: 0,
-    highlightFillStrength: 0.5,
-    highlightFillWarmth: 0,
+    highlightFillStrength: 1.6,
+    highlightFillWarmth: 0.6,
     halationTailGamma: 4,
     halationContrastGate: 1,
     halationRimStrength: 0.6,

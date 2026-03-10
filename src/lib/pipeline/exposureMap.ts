@@ -4,7 +4,7 @@
  * Used exclusively for halation boundaries — never from post-match luminance.
  */
 
-import type { PixelFrameRGBA } from "./types";
+import type { PixelFrameF32, PixelFrameRGBA } from "./types";
 
 export interface ExposureMap {
   width: number;
@@ -125,6 +125,18 @@ export function buildExposureMapFromLinearRgb(
   const D = computeDarkNeighborMap(Y, width, height);
 
   return { width, height, Y, p98, p99_9, p99_99, D };
+}
+
+/**
+ * Build ExposureMap from linear float PixelFrameF32.
+ */
+export function buildExposureMapFromFloat(frame: PixelFrameF32): ExposureMap {
+  return buildExposureMapFromLinearRgb(
+    frame.width,
+    frame.height,
+    frame.data,
+    4
+  );
 }
 
 /**

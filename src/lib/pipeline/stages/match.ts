@@ -3,7 +3,8 @@
  * Pure math, deterministic, OKLab-based. No LUT, ML, or external libs.
  */
 
-import { oklabToSrgb8, srgb8ToOklab } from "./oklab";
+import { allocPixelFrameF32, type PixelFrameF32 } from "../types";
+import { linearRgbToOklab, oklabToLinearRgb, oklabToSrgb8, srgb8ToOklab } from "./oklab";
 import {
   bucketForRefColor,
   bucketForRefExposure,
@@ -139,6 +140,12 @@ export interface LookParams {
    * 1 = use fitted reference grade as-is, 0 = disable band, >1 exaggerates.
    */
   colorBandStrengths?: ColorBandStrengths;
+  /**
+   * Optional 5-band L anchors [lowerShadow, upperShadow, mid, lowerHigh, upperHigh].
+   * When present, used instead of fixed [0.08, 0.25, 0.5, 0.7, 0.9] for band weights.
+   * Set from post-exposure result in phased training.
+   */
+  colorBandAnchors?: number[];
   /**
    * Optional per-band reference colour stats for true 5-band matching.
    * When present, used together with source band stats to compute Δa/Δb
@@ -472,32 +479,42 @@ function applyLGG(
   return Math.pow(v, gamma);
 }
 
-/**
- * Derive grading parameters from a reference image.
- * Simple V1: histograms, percentiles, mean chroma by L.
- */
-export function fitLookParamsFromReference(ref: ImageData): LookParams {
+/** Shared fitting logic: fill Ls/Cs/oas/bs/Lgrid/mask from ref pixels. */
+function fitLookParamsCore(
+  ref: ImageData | { width: number; height: number; data: Float32Array },
+  nPix: number
+): {
+  Ls: Float32Array;
+  Cs: Float32Array;
+  oas: Float32Array;
+  bs: Float32Array;
+  Lgrid: Float32Array;
+  mask: Uint8Array;
+  m: number;
+} {
   const { data: d, width, height } = ref;
-  // Full-resolution L grid + mask so we can measure reference micro-contrast in midtones.
-  const nPix = width * height;
   const Lgrid = new Float32Array(nPix);
   const mask = new Uint8Array(nPix);
-  // Typed arrays avoid V8 OOM from converting large Smi arrays to FixedDoubleArray.
   const Ls = new Float32Array(nPix);
   const Cs = new Float32Array(nPix);
   const oas = new Float32Array(nPix);
   const bs = new Float32Array(nPix);
   let m = 0;
+  const isFloat = d instanceof Float32Array;
+  const alphaThreshold = isFloat ? 0.5 : 128;
+  const toOklab = isFloat
+    ? (r: number, g: number, b: number) => linearRgbToOklab(r, g, b)
+    : (r: number, g: number, b: number) => srgb8ToOklab(r, g, b);
 
   for (let i = 0; i < d.length; i += 4) {
     const pix = i >> 2;
-    const alpha = d[i + 3];
-    if (alpha < 128) {
+    const alpha = d[i + 3] as number;
+    if (alpha < alphaThreshold) {
       Lgrid[pix] = 0;
       mask[pix] = 0;
       continue;
     }
-    const { L, a: oa, b } = srgb8ToOklab(d[i]!, d[i + 1]!, d[i + 2]!);
+    const { L, a: oa, b } = toOklab(d[i] as number, d[i + 1] as number, d[i + 2] as number);
     Ls[m] = L;
     Cs[m] = chroma(oa, b);
     oas[m] = oa;
@@ -506,6 +523,19 @@ export function fitLookParamsFromReference(ref: ImageData): LookParams {
     Lgrid[pix] = L;
     mask[pix] = 1;
   }
+  return { Ls, Cs, oas, bs, Lgrid, mask, m };
+}
+
+/**
+ * Derive grading parameters from a reference image.
+ * Accepts ImageData (sRGB 8-bit) or PixelFrameF32 (linear float).
+ */
+export function fitLookParamsFromReference(
+  ref: ImageData | { width: number; height: number; data: Float32Array }
+): LookParams {
+  const { width, height } = ref;
+  const nPix = width * height;
+  const { Ls, Cs, oas, bs, Lgrid, mask, m } = fitLookParamsCore(ref, nPix);
 
   if (m === 0) return defaultLookParams();
 
@@ -951,7 +981,7 @@ export function fitLookParamsFromReference(ref: ImageData): LookParams {
   return base;
 }
 
-/** Median source L over opaque pixels (used for exposure matching). */
+/** Median source L over opaque pixels (used for exposure matching). 8-bit sRGB. */
 function sourceMidL(d: Uint8ClampedArray): number {
   const buf = new Float32Array(d.length >> 2);
   let count = 0;
@@ -966,7 +996,37 @@ function sourceMidL(d: Uint8ClampedArray): number {
   return sorted[Math.floor(count * 0.5)] ?? 0.5;
 }
 
-/** Approximate "black" level of source: low-percentile L over opaque pixels (e.g. 5th percentile). */
+/** Median source L over opaque pixels. Linear float input. */
+function sourceMidLFloat(d: Float32Array): number {
+  const buf = new Float32Array(d.length >> 2);
+  let count = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    if ((d[i + 3] ?? 0) < 0.5) continue;
+    const { L } = linearRgbToOklab(d[i] ?? 0, d[i + 1] ?? 0, d[i + 2] ?? 0);
+    buf[count++] = L;
+  }
+  if (count === 0) return 0.5;
+  const sorted = buf.subarray(0, count);
+  sorted.sort();
+  return sorted[Math.floor(count * 0.5)] ?? 0.5;
+}
+
+/** Approximate "black" level of source. Linear float input. */
+function sourceBlackLFloat(d: Float32Array): number {
+  const buf = new Float32Array(d.length >> 2);
+  let count = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    if ((d[i + 3] ?? 0) < 0.5) continue;
+    const { L } = linearRgbToOklab(d[i] ?? 0, d[i + 1] ?? 0, d[i + 2] ?? 0);
+    buf[count++] = L;
+  }
+  if (count === 0) return 0.05;
+  const sorted = buf.subarray(0, count);
+  sorted.sort();
+  return sorted[Math.floor(count * 0.05)] ?? 0.05;
+}
+
+/** Approximate "black" level of source: low-percentile L over opaque pixels (e.g. 5th percentile). 8-bit sRGB. */
 function sourceBlackL(d: Uint8ClampedArray): number {
   const buf = new Float32Array(d.length >> 2);
   let count = 0;
@@ -1123,6 +1183,7 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
     blackStrength = 1,
     blackRange = 0.6,
     colorBandStrengths,
+    colorBandAnchors,
     colorMatchBands,
     colorBandOverrides,
     refractionShadow,
@@ -1152,7 +1213,7 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
   // Source mid-L for exposure matching (median over opaque pixels).
   const srcMidL = sourceMidL(d);
   const clampedRefMidL = Math.max(0, Math.min(1, refMidL));
-  const clampedExposureStrength = Math.max(0, Math.min(2, exposureStrength));
+  const clampedExposureStrength = Math.max(0, Math.min(1.5, exposureStrength));
   // Ideal delta to align medians, with a mild clamp so extremely different
   // pairs don't blow up. We treat exposureStrength in [0,1] as interpolation
   // between 0 and this ideal delta; >1 only extends it gently.
@@ -1422,7 +1483,10 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
     Array.isArray(colorMatchBands.refC) &&
     colorMatchBands.refC.length === 5;
 
-  const COLOR_BAND_ANCHORS = [0.08, 0.25, 0.5, 0.7, 0.9];
+  const COLOR_BAND_ANCHORS: number[] =
+    colorBandAnchors && colorBandAnchors.length === 5
+      ? colorBandAnchors
+      : [0.08, 0.25, 0.5, 0.7, 0.9];
   const bandCount = COLOR_BAND_ANCHORS.length;
   // Pre-allocated reusable buffer avoids per-pixel array allocation inside bandWeights.
   const _wBuf = new Float32Array(bandCount);
@@ -1770,6 +1834,497 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
     o[i] = rgb.r;
     o[i + 1] = rgb.g;
     o[i + 2] = rgb.b;
+    o[i + 3] = a;
+  }
+
+  return out;
+}
+
+/**
+ * Apply LookParams to a linear float source. Returns new PixelFrameF32.
+ * Same logic as applyLook but uses linearRgbToOklab / oklabToLinearRgb.
+ */
+export function applyLookFloat(source: PixelFrameF32, params: LookParams): PixelFrameF32 {
+  const out = allocPixelFrameF32(source.width, source.height);
+  const d = source.data;
+  const o = out.data;
+  const width = source.width;
+  const height = source.height;
+  const nPix = width * height;
+  const {
+    tone,
+    saturation,
+    warmth,
+    tint = 0,
+    shadowTint,
+    highlightTint,
+    shadowContrast,
+    toneCurve,
+    tintByL,
+    saturationByL,
+    refSaturation,
+    colorDensity = 1,
+    microContrastMid = 0,
+    lumaStrength = 1,
+    colorStrength = 1,
+    refMidL = 0.5,
+    refBlackL = 0.05,
+    exposureStrength = 1,
+    blackStrength = 1,
+    blackRange = 0.6,
+    colorBandStrengths,
+    colorBandAnchors,
+    colorMatchBands,
+    colorBandOverrides,
+    refractionShadow,
+    refractionHighlight,
+    refractionSplitL = 0.5,
+    exposureCurve,
+    colorDensityCurve,
+    contrastCurve,
+    actuanceStrength = 0,
+  } = params;
+  const { lift, gamma, gain } = tone;
+  const {
+    shadowRolloff,
+    highlightRolloff,
+    shadowColorDensity,
+    highlightColorDensity,
+  } = saturation;
+
+  const useToneCurve =
+    toneCurve && toneCurve.L_in.length > 0 && toneCurve.L_out.length > 0;
+  const useTintByL = tintByL && tintByL.L_anchors.length > 0;
+  const useSaturationByL =
+    saturationByL && saturationByL.L_anchors.length > 0 && saturationByL.scale.length > 0;
+  const overallSat = refSaturation ?? 1;
+
+  const srcMidL = sourceMidLFloat(d);
+  const clampedRefMidL = Math.max(0, Math.min(1, refMidL));
+  const clampedExposureStrength = Math.max(0, Math.min(1.5, exposureStrength));
+  const idealDeltaRaw = clampedRefMidL - srcMidL;
+  const idealDelta = Math.max(-0.6, Math.min(0.6, idealDeltaRaw));
+  let exposureDelta = 0;
+  if (clampedExposureStrength <= 1) {
+    exposureDelta = clampedExposureStrength * idealDelta;
+  } else {
+    const extra = clampedExposureStrength - 1;
+    const maxOvershoot = 0.3;
+    exposureDelta = idealDelta * (1 + maxOvershoot * extra);
+  }
+
+  const srcBlack = sourceBlackLFloat(d);
+  const clampedRefBlack = Math.max(0, Math.min(0.2, refBlackL));
+  const clampedBlackStrength = Math.max(0, Math.min(8, blackStrength));
+  const blackDelta = clampedBlackStrength * (clampedRefBlack - srcBlack);
+
+  const sceneDensityScale = 1;
+  const L_src = new Float32Array(nPix);
+  const L_tone = new Float32Array(nPix);
+  const L_luma = new Float32Array(nPix);
+  const aBuf = new Float32Array(nPix);
+  const bBuf = new Float32Array(nPix);
+  const alphaBuf = new Float32Array(nPix);
+  const mask = new Uint8Array(nPix);
+
+  for (let i = 0, pix = 0; i < d.length; i += 4, pix++) {
+    const r = d[i] ?? 0;
+    const g = d[i + 1] ?? 0;
+    const b = d[i + 2] ?? 0;
+    const a = d[i + 3] ?? 1;
+
+    alphaBuf[pix] = a;
+    if (a < 0.5) {
+      L_tone[pix] = 0;
+      L_src[pix] = 0;
+      aBuf[pix] = 0;
+      bBuf[pix] = 0;
+      mask[pix] = 0;
+      continue;
+    }
+
+    const lab = linearRgbToOklab(r, g, b);
+    let { L } = lab;
+    const oa = lab.a;
+    const ob = lab.b;
+
+    const baseL = L;
+    let exposureScale = 1;
+    if (exposureCurve?.L_in.length && exposureCurve?.L_out.length) {
+      exposureScale = exposureScaleFromCurve(baseL, exposureCurve);
+      if (!Number.isFinite(exposureScale)) exposureScale = 1;
+      else exposureScale = Math.max(0, Math.min(2, exposureScale));
+    }
+    let L_exposed = baseL + exposureScale * exposureDelta;
+    L_exposed = Math.max(0, Math.min(1, L_exposed));
+    const L0 = L_exposed;
+
+    if (useToneCurve && toneCurve) {
+      L = Math.max(0, Math.min(1, piecewiseLinear(L_exposed, toneCurve.L_in, toneCurve.L_out)));
+    } else {
+      L = applyShadowContrast(L_exposed, shadowContrast);
+      L = applyLGG(L, lift, gamma, gain);
+    }
+
+    L_tone[pix] = L;
+    L_src[pix] = L0;
+    aBuf[pix] = oa;
+    bBuf[pix] = ob;
+    mask[pix] = 1;
+  }
+
+  for (let idx = 0; idx < nPix; idx++) L_luma[idx] = L_tone[idx];
+
+  const lumaS = Math.max(0, Math.min(2, lumaStrength));
+  let lumaBlend = 0;
+  if (lumaS <= 1) lumaBlend = lumaS;
+  else lumaBlend = 1 + 0.3 * (lumaS - 1);
+  if (Math.abs(lumaBlend) > 1e-3) {
+    for (let idx = 0; idx < nPix; idx++) {
+      const Ls = L_src[idx];
+      const Lg = L_luma[idx];
+      let L = Ls + lumaBlend * (Lg - Ls);
+      L = Math.max(0, Math.min(1, L));
+      L_luma[idx] = L;
+    }
+  }
+
+  if (Math.abs(blackDelta) > 1e-3) {
+    const L_beforeBlack = new Float32Array(L_luma);
+    const baseShadowCeiling = Math.max(0.1, Math.min(0.95, blackRange));
+    const pullDown = blackDelta < 0;
+    const useWideRange = pullDown && clampedRefBlack < 0.02;
+    const shadowCeiling = useWideRange ? Math.min(0.95, baseShadowCeiling + 0.2) : baseShadowCeiling;
+    const linearWeight = useWideRange;
+    for (let idx = 0; idx < nPix; idx++) {
+      if (!mask[idx]) continue;
+      let L = L_luma[idx];
+      if (L <= shadowCeiling) {
+        const tShadow = L / shadowCeiling;
+        const weight = linearWeight ? 1 - tShadow : (1 - tShadow) * (1 - tShadow);
+        L += blackDelta * weight;
+        L = Math.max(0, Math.min(1, L));
+        L_luma[idx] = L;
+      }
+    }
+    const p5Ref = clampedRefBlack;
+    const p5Before = percentileFromLGrid(L_beforeBlack, mask, 0.05);
+    const p5After = percentileFromLGrid(L_luma, mask, 0.05);
+    const minAllowed = Math.max(0, p5Ref - 0.03);
+    if (p5After < minAllowed && p5Before > minAllowed) {
+      const denom = p5After - p5Before;
+      if (Math.abs(denom) > 1e-5) {
+        let alpha = (minAllowed - p5Before) / denom;
+        alpha = Math.max(0, Math.min(1, alpha));
+        for (let idx = 0; idx < nPix; idx++) {
+          if (!mask[idx]) continue;
+          const L0 = L_beforeBlack[idx];
+          let L = L0 + alpha * (L_luma[idx] - L0);
+          L = Math.max(0, Math.min(1, L));
+          L_luma[idx] = L;
+        }
+      }
+    }
+  }
+
+  const curveToUse =
+    contrastCurve && contrastCurve.L_anchors.length >= 7 && contrastCurve.values.length >= 7
+      ? contrastCurve
+      : { L_anchors: DEFAULT_CONTRAST_L_ANCHORS, values: DEFAULT_CONTRAST_VALUES };
+  for (let idx = 0; idx < nPix; idx++) {
+    if (!mask[idx]) continue;
+    let L = L_luma[idx];
+    L += contrastDeltaFromCurve(L, curveToUse);
+    L = Math.max(0, Math.min(1, L));
+    L_luma[idx] = L;
+  }
+
+  const L_final = new Float32Array(nPix);
+  if (microContrastMid > 0) {
+    const blurred = gaussianBlurFilm(L_luma, width, height);
+    let sumSq = 0;
+    let count = 0;
+    for (let idx = 0; idx < nPix; idx++) {
+      if (!mask[idx]) continue;
+      const L = L_luma[idx];
+      if (L < 0.25 || L > 0.75) continue;
+      const dL = L - blurred[idx];
+      sumSq += dL * dL;
+      count++;
+    }
+    const srcRms = count > 0 ? Math.sqrt(sumSq / count) : 0;
+    let gain = srcRms > 1e-6 ? Math.max(0.5, Math.min(2, microContrastMid / srcRms)) : 1;
+    for (let idx = 0; idx < nPix; idx++) {
+      if (!mask[idx]) {
+        L_final[idx] = 0;
+        continue;
+      }
+      const base = blurred[idx];
+      const dL = L_luma[idx] - base;
+      L_final[idx] = Math.max(0, Math.min(1, base + gain * dL));
+    }
+  } else {
+    for (let idx = 0; idx < nPix; idx++) L_final[idx] = L_luma[idx];
+  }
+
+  const actuanceS = Math.max(0, Math.min(3, actuanceStrength));
+  const ACTUANCE_AMP = 1.8;
+  if (actuanceS > 1e-3) {
+    const blurredAct = gaussianBlurFilm(L_final, width, height);
+    for (let idx = 0; idx < nPix; idx++) {
+      if (!mask[idx]) continue;
+      const base = blurredAct[idx];
+      const dL = L_final[idx] - base;
+      L_final[idx] = Math.max(0, Math.min(1, base + actuanceS * ACTUANCE_AMP * dL));
+    }
+  }
+
+  const colorS = Math.max(0, Math.min(2, colorStrength));
+  const bands = colorBandStrengths;
+  const useColorBands =
+    !!colorMatchBands &&
+    Array.isArray(colorMatchBands.refA) && colorMatchBands.refA.length === 5 &&
+    Array.isArray(colorMatchBands.refB) && colorMatchBands.refB.length === 5 &&
+    Array.isArray(colorMatchBands.refC) && colorMatchBands.refC.length === 5;
+  const COLOR_BAND_ANCHORS: number[] =
+    colorBandAnchors && colorBandAnchors.length === 5 ? colorBandAnchors : [0.08, 0.25, 0.5, 0.7, 0.9];
+  const bandCount = COLOR_BAND_ANCHORS.length;
+  const _wBuf = new Float32Array(bandCount);
+  function bandWeights(L: number): Float32Array {
+    const anchors = COLOR_BAND_ANCHORS;
+    for (let k = 0; k < bandCount; k++) {
+      const center = anchors[k];
+      const left = k === 0 ? 0 : anchors[k - 1];
+      const right = k === bandCount - 1 ? 1 : anchors[k + 1];
+      const wd = Math.max(1e-3, Math.max(center - left, right - center));
+      const tL = 1 - Math.abs(L - center) / wd;
+      _wBuf[k] = tL > 0 ? tL : 0;
+    }
+    let sum = 0;
+    for (let k = 0; k < bandCount; k++) sum += _wBuf[k];
+    if (sum > 1e-6) for (let k = 0; k < bandCount; k++) _wBuf[k] /= sum;
+    return _wBuf;
+  }
+
+  const srcSumA = new Array<number>(bandCount).fill(0);
+  const srcSumB = new Array<number>(bandCount).fill(0);
+  const srcSumC = new Array<number>(bandCount).fill(0);
+  const srcSumW = new Array<number>(bandCount).fill(0);
+  if (useColorBands) {
+    for (let idx = 0; idx < nPix; idx++) {
+      if (!mask[idx]) continue;
+      const L = L_final[idx];
+      const aVal = aBuf[idx];
+      const bVal = bBuf[idx];
+      const C = chroma(aVal, bVal);
+      const w = bandWeights(L);
+      for (let k = 0; k < bandCount; k++) {
+        const wk = w[k];
+        if (wk <= 0) continue;
+        srcSumA[k] += wk * aVal;
+        srcSumB[k] += wk * bVal;
+        srcSumC[k] += wk * C;
+        srcSumW[k] += wk;
+      }
+    }
+  }
+
+  const bandDeltaA = new Array<number>(bandCount).fill(0);
+  const bandDeltaB = new Array<number>(bandCount).fill(0);
+  const bandScaleC = new Array<number>(bandCount).fill(1);
+  if (useColorBands && colorMatchBands) {
+    const refA = colorMatchBands.refA;
+    const refB = colorMatchBands.refB;
+    const refC = colorMatchBands.refC;
+    for (let k = 0; k < bandCount; k++) {
+      const w = srcSumW[k];
+      if (w <= 1e-4) continue;
+      const aSrc = srcSumA[k] / w;
+      const bSrc = srcSumB[k] / w;
+      const cSrc = srcSumC[k] / w;
+      let dA = refA[k] - aSrc;
+      let dB = refB[k] - bSrc;
+      const len = Math.hypot(dA, dB);
+      if (len > 0.16 && len > 1e-6) {
+        const s = 0.16 / len;
+        dA *= s;
+        dB *= s;
+      }
+      if (aSrc > -0.02 && bSrc > 0.02 && refA[k] > -0.02 && refB[k] > 0.02 && dB < 0) dB *= 0.4;
+      bandDeltaA[k] = dA;
+      bandDeltaB[k] = dB;
+      if (cSrc > 1e-4 && refC[k] > 1e-4) bandScaleC[k] = Math.max(0.5, Math.min(1.8, refC[k] / cSrc));
+    }
+  }
+
+  function bandValue(id: number, values: ColorBandStrengths | undefined): number {
+    if (!values) return 0;
+    switch (id) {
+      case 0: return values.lowerShadow;
+      case 1: return values.upperShadow;
+      case 2: return values.mid;
+      case 3: return values.lowerHigh;
+      default: return values.upperHigh;
+    }
+  }
+
+  for (let pix = 0, i = 0; pix < nPix; pix++, i += 4) {
+    const a = alphaBuf[pix];
+    if (a < 0.5) {
+      o[i] = 0;
+      o[i + 1] = 0;
+      o[i + 2] = 0;
+      o[i + 3] = a;
+      continue;
+    }
+
+    let L = L_final[pix];
+    let oa = aBuf[pix];
+    let ob = bBuf[pix];
+
+    const C = chroma(oa, ob);
+    const s = satScale(L, shadowRolloff, highlightRolloff);
+    const dScale = colorDensityScale(L, shadowColorDensity, highlightColorDensity);
+    let bandScale = useSaturationByL && saturationByL ? interpolateSaturationByL(L, saturationByL) : 1;
+    if (colorDensityCurve?.L_anchors.length && colorDensityCurve?.scale.length)
+      bandScale *= interpolateColorDensityCurve(L, colorDensityCurve);
+    if (overallSat < 1 && bandScale > 1) bandScale = 1;
+    const scale = C > 1e-8
+      ? s * dScale * colorDensity * sceneDensityScale * bandScale * overallSat
+      : 0;
+    oa *= scale;
+    ob *= scale;
+
+    if (useColorBands && colorMatchBands) {
+      const w = bandWeights(L);
+      let numA = 0, numB = 0, numCScale = 0, den = 0;
+      for (let k = 0; k < bandCount; k++) {
+        let wk = w[k];
+        if (wk <= 0) continue;
+        if (bands) {
+          const strength = k === 0 ? bands.lowerShadow : k === 1 ? bands.upperShadow : k === 2 ? bands.mid : k === 3 ? bands.lowerHigh : bands.upperHigh;
+          wk *= strength;
+        }
+        numA += wk * bandDeltaA[k];
+        numB += wk * bandDeltaB[k];
+        numCScale += wk * bandScaleC[k];
+        den += wk;
+      }
+      if (den > 1e-4) {
+        const baseA = aBuf[pix];
+        const baseB = bBuf[pix];
+        const dA = numA / den;
+        const dB = numB / den;
+        const kC = numCScale / den;
+        const baseC = chroma(baseA, baseB);
+        let aMatch = baseA + dA;
+        let bMatch = baseB + dB;
+        const cMatch = chroma(aMatch, bMatch);
+        if (cMatch > 1e-5 && baseC > 1e-5) {
+          const scaleToRef = (baseC * kC) / cMatch;
+          const clampScale = Math.max(0.4, Math.min(2.2, scaleToRef));
+          aMatch *= clampScale;
+          bMatch *= clampScale;
+        }
+        oa = aMatch;
+        ob = bMatch;
+      }
+      oa += tint * 0.25;
+      ob += warmth * 0.25;
+    } else if (useTintByL && tintByL) {
+      const t = interpolateTintByL(L, tintByL);
+      let bandFactor = 1;
+      if (bands) {
+        const ls = Math.max(0, Math.min(1, L));
+        const wLS = ls <= 0.3 ? (ls <= 0.15 ? 1 - ls / 0.15 : Math.max(0, (0.3 - ls) / 0.15)) : 0;
+        const wUS = ls >= 0.1 && ls <= 0.45 ? 1 - Math.abs(ls - 0.275) / 0.175 : 0;
+        const wMid = ls >= 0.3 && ls <= 0.7 ? 1 - Math.abs(ls - 0.5) / 0.2 : 0;
+        const wLH = ls >= 0.5 && ls <= 0.85 ? 1 - Math.abs(ls - 0.675) / 0.175 : 0;
+        const wUH = ls >= 0.7 ? (ls <= 0.85 ? (ls - 0.7) / 0.15 : Math.max(0, (1 - ls) / 0.15)) : 0;
+        const num = wLS * bands.lowerShadow + wUS * bands.upperShadow + wMid * bands.mid + wLH * bands.lowerHigh + wUH * bands.upperHigh;
+        const den = wLS + wUS + wMid + wLH + wUH;
+        bandFactor = den > 1e-3 ? num / den : 1;
+      }
+      const lc = 1 + 0.25 * Math.min(1, C / 0.08);
+      const hf = 1 - 0.15 * L * L;
+      const smb = 1 + 0.75 * (1 - L) ** 0.585;
+      oa += bandFactor * t.a * lc * hf * smb;
+      ob += bandFactor * t.b * lc * hf * smb;
+      oa += tint * 0.35;
+      ob += warmth * 0.35;
+    } else {
+      oa += tint;
+      ob += warmth;
+      const sw = (1 - L) ** 2;
+      const hw = L ** 2;
+      oa += shadowTint.a * sw + highlightTint.a * hw;
+      ob += shadowTint.b * sw + highlightTint.b * hw;
+    }
+
+    if (Math.abs(colorS - 1) > 1e-3) {
+      const aSrc = aBuf[pix];
+      const bSrc = bBuf[pix];
+      oa = aSrc + colorS * (oa - aSrc);
+      ob = bSrc + colorS * (ob - bSrc);
+    }
+
+    if (colorBandOverrides) {
+      const w = bandWeights(L);
+      let hueControl = 0, satControl = 0, lumaControl = 0, tempControl = 0;
+      for (let k = 0; k < bandCount; k++) {
+        const wk = w[k];
+        if (wk <= 0) continue;
+        hueControl += wk * bandValue(k, colorBandOverrides.hue);
+        satControl += wk * (bandValue(k, colorBandOverrides.sat) - 1);
+        lumaControl += wk * bandValue(k, colorBandOverrides.luma);
+        if (colorBandOverrides.temp) tempControl += wk * bandValue(k, colorBandOverrides.temp);
+      }
+      const maxHueRad = (Math.PI / 180) * 30;
+      const theta = Math.max(-1, Math.min(1, hueControl)) * maxHueRad;
+      if (Math.abs(theta) > 1e-4) {
+        const cosT = Math.cos(theta);
+        const sinT = Math.sin(theta);
+        const aRot = oa * cosT - ob * sinT;
+        const bRot = oa * sinT + ob * cosT;
+        oa = aRot;
+        ob = bRot;
+      }
+      const satMul = Math.max(0.2, Math.min(2.5, 1 + satControl));
+      const Cafter = chroma(oa, ob);
+      if (Cafter > 1e-6 && Math.abs(satMul - 1) > 1e-3) {
+        oa *= satMul;
+        ob *= satMul;
+      }
+      if (Math.abs(lumaControl) > 1e-4)
+        L = Math.max(0, Math.min(1, L + Math.max(-0.2, Math.min(0.2, lumaControl))));
+      if (Math.abs(tempControl) > 1e-4)
+        ob += Math.max(-1, Math.min(1, tempControl)) * 0.18;
+    }
+
+    const shadowId = refractionShadow && isIdentityRefractionWheel(refractionShadow);
+    const highlightId = refractionHighlight && isIdentityRefractionWheel(refractionHighlight);
+    if (refractionShadow && refractionHighlight && !shadowId && !highlightId) {
+      const split = Math.max(0, Math.min(1, refractionSplitL));
+      const weightShadow = Math.max(0, Math.min(1, 1 - (L - split) * 5));
+      const s = applyRefractionWheel(oa, ob, refractionShadow);
+      const h = applyRefractionWheel(oa, ob, refractionHighlight);
+      oa = weightShadow * s.a + (1 - weightShadow) * h.a;
+      ob = weightShadow * s.b + (1 - weightShadow) * h.b;
+    } else if (refractionShadow && !shadowId) {
+      const r = applyRefractionWheel(oa, ob, refractionShadow);
+      oa = r.a;
+      ob = r.b;
+    } else if (refractionHighlight && !highlightId) {
+      const r = applyRefractionWheel(oa, ob, refractionHighlight);
+      oa = r.a;
+      ob = r.b;
+    }
+
+    const rgb = oklabToLinearRgb(L, oa, ob);
+    const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
+    o[i] = clamp01(rgb.r);
+    o[i + 1] = clamp01(rgb.g);
+    o[i + 2] = clamp01(rgb.b);
     o[i + 3] = a;
   }
 

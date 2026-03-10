@@ -22,12 +22,13 @@ export async function GET(request: Request) {
   const { data, error } = await supabaseAdmin
     .from("training_runs")
     .select(
-      "id, status, current_iteration, max_iterations, camera_type, error, final_image_base64, current_pair, total_pairs, recovery_image_url, final_image_urls"
+      "id, status, current_iteration, max_iterations, camera_type, error, current_pair, total_pairs, recovery_image_url, final_image_urls"
     )
     .eq("id", runId)
     .maybeSingle();
 
   if (error) {
+    console.error("[train/status] Supabase error:", error);
     return NextResponse.json(
       { error: error.message },
       { status: 500 }
@@ -48,7 +49,6 @@ export async function GET(request: Request) {
     max_iterations: data.max_iterations,
     camera_type: data.camera_type,
     error: data.error,
-    final_image_base64: data.final_image_base64,
     current_pair: data.current_pair ?? 0,
     total_pairs: data.total_pairs ?? 0,
     recovery_image_url: data.recovery_image_url ?? null,

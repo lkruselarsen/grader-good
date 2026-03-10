@@ -3,6 +3,8 @@
  * Row-major RGBA, same layout as ImageData.data.
  */
 
+import { linearRgbToSrgb8 } from "./stages/oklab";
+
 export interface PixelFrameRGBA {
   width: number;
   height: number;
@@ -31,6 +33,30 @@ export function allocPixelFrameF32(
   };
 }
 
+/** Quantize PixelFrameF32 (linear float) to PixelFrameRGBA (sRGB 8-bit) for export/canvas. */
+export function pixelFrameF32ToPixelFrameRGBA(
+  frame: PixelFrameF32
+): PixelFrameRGBA {
+  const { width, height, data } = frame;
+  const rgba = new Uint8ClampedArray(width * height * 4);
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i] ?? 0;
+    const g = data[i + 1] ?? 0;
+    const b = data[i + 2] ?? 0;
+    const a = data[i + 3];
+    const rgb = linearRgbToSrgb8(
+      Math.max(0, Math.min(1, r)),
+      Math.max(0, Math.min(1, g)),
+      Math.max(0, Math.min(1, b))
+    );
+    rgba[i] = rgb.r;
+    rgba[i + 1] = rgb.g;
+    rgba[i + 2] = rgb.b;
+    rgba[i + 3] = Number.isFinite(a) ? Math.round(Math.max(0, Math.min(255, a * 255))) : 255;
+  }
+  return { width, height, data: rgba };
+}
+
 /**
  * Input to decode stage: either a File (JPG/PNG) or already-decoded frame.
  * Pass PixelFrameRGBA when re-running with new params to skip re-decode.
@@ -55,5 +81,11 @@ export interface PipelineParams {
   exposureMap?: import("./exposureMap").ExposureMap; // avoid circular import
   /** Optional match exposure context for dampening halation in lifted regions. */
   matchExposureContext?: MatchExposureContext;
+  /**
+   * Optional 5-band L anchors [lowerShadow, upperShadow, mid, lowerHigh, upperHigh].
+   * When present, used instead of fixed [0.08, 0.25, 0.5, 0.7, 0.9] for band weights.
+   * Set from post-exposure result percentiles in phased training.
+   */
+  colorBandAnchors?: number[];
   // Extensible; no UI-specific fields.
 }

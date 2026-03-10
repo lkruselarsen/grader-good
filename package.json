@@ -16,6 +16,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "dcraw": "^1.0.3",
+    "lightdrift-libraw": "^1.0.0-alpha.3",
     "libraw-wasm": "^1.1.2",
     "lucide-react": "^0.563.0",
     "next": "16.1.6",

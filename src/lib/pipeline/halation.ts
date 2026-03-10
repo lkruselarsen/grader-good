@@ -4,10 +4,19 @@
  * Tail-weighted (99.99% >> 98%), contrast-gated (highlight vs shadow, not upper vs lower highlight).
  */
 
-import { oklabToSrgb8, srgb8ToOklab } from "./stages/oklab";
-import { buildExposureMapFromSrgb, computeDarkNeighborMap } from "./exposureMap";
+import {
+  linearRgbToOklab,
+  oklabToLinearRgb,
+  oklabToSrgb8,
+  srgb8ToOklab,
+} from "./stages/oklab";
+import {
+  buildExposureMapFromFloat,
+  buildExposureMapFromSrgb,
+  computeDarkNeighborMap,
+} from "./exposureMap";
 import type { ExposureMap } from "./exposureMap";
-import type { PixelFrameRGBA, PipelineParams } from "./types";
+import type { PixelFrameF32, PixelFrameRGBA, PipelineParams } from "./types";
 
 const DEFAULT_TAIL_GAMMA = 4;
 // Radius defaults expressed as % of the image short edge (0–100 scale).
@@ -325,6 +334,197 @@ export function halation(
     out[srcOff] = Math.max(0, Math.min(255, Math.round(rgb.r)));
     out[srcOff + 1] = Math.max(0, Math.min(255, Math.round(rgb.g)));
     out[srcOff + 2] = Math.max(0, Math.min(255, Math.round(rgb.b)));
+  }
+
+  return { width, height, data: out };
+}
+
+/**
+ * Halation stage for linear float input. Same logic as halation but uses
+ * linearRgbToOklab/oklabToLinearRgb. Returns PixelFrameF32.
+ */
+export function halationFloat(
+  frame: PixelFrameF32,
+  params: PipelineParams
+): PixelFrameF32 {
+  const highlightFill = params.grading?.highlightFill;
+  if (!highlightFill || highlightFill.strength <= 0) {
+    return frame;
+  }
+
+  const { width, height, data } = frame;
+  const nPix = width * height;
+
+  if (nPix > MAX_HALATION_PIXELS) {
+    console.warn(
+      `[halation] frame too large (${nPix} px > ${MAX_HALATION_PIXELS}), skipping`
+    );
+    return frame;
+  }
+
+  const strength = Math.max(0, Math.min(2, highlightFill.strength));
+  const warmth = Math.max(-1, Math.min(1, highlightFill.warmth ?? 0));
+  const tailGamma = Math.max(2, Math.min(6, highlightFill.tailGamma ?? DEFAULT_TAIL_GAMMA));
+  const contrastGate = Math.max(0, Math.min(1, highlightFill.contrastGate ?? 1));
+  const rimStrength = Math.max(0, Math.min(1, highlightFill.rimStrength ?? 0.6));
+  const bloomStrength = Math.max(0, Math.min(1, highlightFill.bloomStrength ?? 0.8));
+  const interiorGuard = Math.max(0, Math.min(1, highlightFill.interiorGuard ?? 0.5));
+
+  const shortEdge = Math.min(width, height);
+  const rimRadiusPct = Math.max(0, Math.min(2, highlightFill.rimRadius ?? DEFAULT_RIM_RADIUS_PCT));
+  const bloomRadiusPct = Math.max(0, Math.min(10, highlightFill.bloomRadius ?? DEFAULT_BLOOM_RADIUS_PCT));
+  const rimRadius = Math.max(0, Math.round((rimRadiusPct / 100) * shortEdge));
+  const bloomRadius = Math.max(1, Math.round((bloomRadiusPct / 100) * shortEdge));
+
+  let rawMap: ExposureMap | null = null;
+  if (params.exposureMap && params.exposureMap.width === width && params.exposureMap.height === height) {
+    rawMap = params.exposureMap;
+  }
+  const fallbackMap = rawMap ?? buildExposureMapFromFloat(frame);
+
+  const Ypost = new Float32Array(nPix);
+  const postVals = new Float32Array(nPix);
+  let postCount = 0;
+  for (let i = 0, pix = 0; i < data.length; i += 4, pix++) {
+    const a = data[i + 3] ?? 0;
+    if (a < 0.5) continue;
+    const r = data[i] ?? 0;
+    const g = data[i + 1] ?? 0;
+    const b = data[i + 2] ?? 0;
+    const y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    Ypost[pix] = y;
+    postVals[postCount++] = y;
+  }
+  const postSorted = postVals.subarray(0, postCount);
+  postSorted.sort();
+  const postP98 = percentileFromSorted(postSorted, postCount, 0.98);
+  const postP99_99 = percentileFromSorted(postSorted, postCount, 0.9999);
+  const postSpan = Math.max(1e-6, postP99_99 - postP98);
+
+  const Dgraded = computeDarkNeighborMap(Ypost, width, height);
+
+  const { Y: Yraw, p98: rawP98, p99_99: rawP99_99 } = fallbackMap;
+  const rawSpan = Math.max(1e-6, rawP99_99 - rawP98);
+
+  const W = new Float32Array(nPix);
+
+  for (let i = 0; i < nPix; i++) {
+    const yPost = Ypost[i] ?? 0;
+    if (yPost <= postP98) {
+      W[i] = 0;
+      continue;
+    }
+    const wPost = Math.pow(Math.min(1, (yPost - postP98) / postSpan), tailGamma);
+    const postRank = Math.min(1, (yPost - postP98) / postSpan);
+    const postMod = 0.3 + 1.2 * postRank;
+    let rawBoost = 1.0;
+    if (rawMap !== null) {
+      const yRaw = Yraw[i] ?? 0;
+      if (yRaw > rawP98) {
+        const rawRank = Math.min(1, (yRaw - rawP98) / rawSpan);
+        rawBoost = 1.0 + 0.5 * rawRank;
+      }
+    }
+    W[i] = Math.min(1, wPost * postMod * rawBoost);
+  }
+
+  let dMax = 1e-6;
+  for (let i = 0; i < Dgraded.length; i++) {
+    const v = Dgraded[i];
+    if (v !== undefined && v > dMax) dMax = v;
+  }
+  const gate = new Float32Array(nPix);
+  for (let i = 0; i < nPix; i++) {
+    gate[i] = contrastGate * Math.min(1, (Dgraded[i] ?? 0) / dMax);
+  }
+
+  const gateBlurred = gaussianBlur(gate, width, height, bloomRadius, 3);
+  let gateMax = 1e-6;
+  for (let i = 0; i < gateBlurred.length; i++) {
+    const v = gateBlurred[i];
+    if (v !== undefined && v > gateMax) gateMax = v;
+  }
+
+  const rimMask = morphologicalGradient(W, width, height, rimRadius);
+  let rimMax = 1e-6;
+  for (let i = 0; i < rimMask.length; i++) {
+    const v = rimMask[i];
+    if (v !== undefined && v > rimMax) rimMax = v;
+  }
+  const rimBlurred = gaussianBlur(rimMask, width, height, rimRadius);
+
+  const bloomMask = new Float32Array(nPix);
+  for (let i = 0; i < nPix; i++) {
+    bloomMask[i] = (W[i] ?? 0) * (gate[i] ?? 0);
+  }
+  const bloomBlurred = gaussianBlur(bloomMask, width, height, bloomRadius, 3);
+
+  const rimW = strength * rimStrength * (0.5 + 0.5 * warmth);
+  const bloomW = strength * bloomStrength * (0.5 + 0.5 * warmth);
+
+  const out = new Float32Array(data.length);
+
+  for (let pix = 0; pix < nPix; pix++) {
+    const srcOff = pix * 4;
+    out[srcOff + 3] = data[srcOff + 3] ?? 1;
+    const a = data[srcOff + 3] ?? 0;
+    if (a < 0.5) {
+      out[srcOff] = data[srcOff] ?? 0;
+      out[srcOff + 1] = data[srcOff + 1] ?? 0;
+      out[srcOff + 2] = data[srcOff + 2] ?? 0;
+      continue;
+    }
+
+    let rimContrib = rimBlurred[pix] ?? 0;
+    let bloomContrib = bloomBlurred[pix] ?? 0;
+
+    const interiorFactor =
+      interiorGuard > 0 && rimMax >= 1e-6
+        ? 1 - interiorGuard * (1 - Math.min(1, (rimMask[pix] ?? 0) / rimMax))
+        : 1;
+    rimContrib *= interiorFactor;
+    bloomContrib *= interiorFactor;
+
+    const edgeProximity =
+      gateMax >= 1e-6 ? Math.min(1, (gateBlurred[pix] ?? 0) / gateMax) : 0;
+    rimContrib *= edgeProximity;
+    bloomContrib *= edgeProximity;
+
+    if (rimContrib < 1e-5 && bloomContrib < 1e-5) {
+      out[srcOff] = data[srcOff] ?? 0;
+      out[srcOff + 1] = data[srcOff + 1] ?? 0;
+      out[srcOff + 2] = data[srcOff + 2] ?? 0;
+      continue;
+    }
+
+    const lab = linearRgbToOklab(
+      data[srcOff] ?? 0,
+      data[srcOff + 1] ?? 0,
+      data[srcOff + 2] ?? 0
+    );
+    let da =
+      rimContrib * rimW * RIM_SAT * 0.1 * warmth +
+      bloomContrib * bloomW * BLOOM_SAT * 0.05 * warmth;
+    let db =
+      rimContrib * rimW * RIM_SAT * 0.15 * warmth +
+      bloomContrib * bloomW * BLOOM_SAT * 0.1 * warmth;
+
+    const whitePreserve =
+      lab.L > 0.92 ? Math.max(0, 1 - (lab.L - 0.92) / 0.08) : 1;
+    da *= whitePreserve;
+    db *= whitePreserve;
+
+    const dL =
+      rimContrib * rimW * RIM_WARMTH * 0.1 +
+      bloomContrib * bloomW * BLOOM_WARMTH * 0.15;
+    const Lp = Math.max(0, Math.min(1, lab.L + dL));
+    const ap = lab.a + da;
+    const bp = lab.b + db;
+
+    const rgb = oklabToLinearRgb(Lp, ap, bp);
+    out[srcOff] = Math.max(0, Math.min(1, rgb.r));
+    out[srcOff + 1] = Math.max(0, Math.min(1, rgb.g));
+    out[srcOff + 2] = Math.max(0, Math.min(1, rgb.b));
   }
 
   return { width, height, data: out };

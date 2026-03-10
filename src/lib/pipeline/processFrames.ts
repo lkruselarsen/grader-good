@@ -9,10 +9,10 @@
  * "Fatal JavaScript invalid size error 169220804" during webpack chunk processing.
  */
 
-import { grain } from "./grain";
-import { halation } from "./halation";
-import { match } from "./match";
-import type { PipelineParams, PixelFrameRGBA } from "./types";
+import { grain, grainFloat } from "./grain";
+import { halation, halationFloat } from "./halation";
+import { match, matchFloat } from "./match";
+import type { PipelineParams, PixelFrameF32, PixelFrameRGBA } from "./types";
 
 export function processFrames(
   source: PixelFrameRGBA,
@@ -22,5 +22,20 @@ export function processFrames(
   const afterMatch = match(source, reference, params);
   const afterHalation = halation(afterMatch, params);
   const afterGrain = grain(afterHalation, params);
+  return afterGrain;
+}
+
+/**
+ * Run pipeline in linear float space. Same stages as processFrames.
+ * Quantize to 8-bit only at export (pixelFrameF32ToPixelFrameRGBA).
+ */
+export function processFramesFloat(
+  source: PixelFrameF32,
+  reference: PixelFrameF32 | null,
+  params: PipelineParams
+): PixelFrameF32 {
+  const afterMatch = matchFloat(source, reference, params);
+  const afterHalation = halationFloat(afterMatch, params);
+  const afterGrain = grainFloat(afterHalation, params);
   return afterGrain;
 }

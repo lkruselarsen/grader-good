@@ -13,17 +13,14 @@
 
 import { NextResponse } from "next/server";
 import {
-  decodeBuffer,
-  decodeBufferLinear,
+  decodeBufferToLinearFloat,
   frameToPngBuffer,
 } from "@/src/lib/pipeline/decodeNode";
-import { processFrames } from "@/src/lib/pipeline/processFrames";
+import { processFramesFloat } from "@/src/lib/pipeline/processFrames";
 import {
-  buildExposureMapFromLinearRgb,
-  buildExposureMapFromSrgb,
+  buildExposureMapFromFloat,
   type ExposureMap,
 } from "@/src/lib/pipeline/exposureMap";
-import { frameToImageData } from "@/src/lib/pipeline/exportStage";
 import { fitLookParamsFromReference } from "@/src/lib/pipeline/stages/match";
 import {
   engineToGrading,
@@ -33,13 +30,18 @@ import {
   applyGradingDeltas,
   filterNonHalationDeltas,
   filterHalationDeltas,
+  filterPhaseDeltas,
   ensureFullMatch,
   parseJsonDeltas,
 } from "@/lib/apply-grading-deltas";
 import { buildEngineParamsFromLookParams } from "@/lib/build-engine-params";
-import { computeImageStats } from "@/src/lib/pipeline/imageStats";
+import {
+  computeImageStatsFromFloat,
+  computeBandAnchorsFromFrame,
+  pixelFrameF32ToPixelFrameRGBA,
+} from "@/src/lib/pipeline";
 import type { LookParams, LookParamsMatch } from "@/lib/look-params";
-import type { PixelFrameRGBA } from "@/src/lib/pipeline/types";
+import type { PixelFrameF32, PixelFrameRGBA } from "@/src/lib/pipeline/types";
 import { supabaseAdmin } from "@/lib/supabase/server";
 
 /** Max edge for images sent to OpenAI (evaluation prompt). At least 2048 for color accuracy. */
@@ -48,14 +50,8 @@ const IMAGE_MAX_EDGE = 2048;
 const EXPORT_MAX_EDGE = 8192;
 
 const OPENAI_SYSTEM_PROMPT = `
-You compare a graded RESULT image to a REFERENCE image and suggest NUMERIC parameter deltas so the result looks as close as possible to the reference.
-RAW source might be underexposed: If you are working on iteration 1-10, priotise getting exposure right.use the exposure curve and exposureStrength (0–1.9) to fix exposure. If exposure and contrast is correct, colors will be easier.
-You will be grading a digital raw image to look exactly like a film reference. 
-Film reference might have split colors highlights vs shadows, Use Per‑band temperature for that temperature split.
-Film has both unique color seperation and density, so keep your eyes out for individual objects colors not matching the reference:
-If exposure is correct, focus on these: Examples: A car with the wrong red, a tree with the wrong green, a flower with the wrong pink: Use  Refraction (Highlight/Shadow)(hue [0-360], saturation [0-3]) to nudge a color in a different direction. 
-Are you getting greens right?
-
+You are a professional color grader with expert knowledge in the characteristics of color negative film. You will be grading a digital raw image to look exactly like a film reference. You compare a RESULT image to a REFERENCE image and suggest NUMERIC parameter deltas so the result looks as close as possible to the reference.
+You might receive one or two previous edit iterations that can teach you about the visual effects of your tools. You will work in one isolated phase, before the image is handed to the next professional.
 
 Output rules:
 - Return a single JSON object ONLY (no prose, no markdown).
@@ -63,116 +59,75 @@ Output rules:
 - Omit keys for “no change”.
 
 
-You may adjust these MATCH parameters (JSON keys):
+- Values MUST be numeric deltas. Do NOT output nested objects, arrays, strings, or booleans.
 
-Scalar match controls:
-- exposureStrength (0–1.9): strength of matching a simiplied version of the reference exposure.
-  - Positive delta → (towards simiplied reference exposure).
-  - Negative delta → (towards source exposure).
-- colorStrength (0–1.8): how strongly colors pull towards a simplified model ofthe reference; 0 = source color, 1 = match reference, >1 exaggerates the reference. (be aware, it will not translate color seperation very well)
-- blackStrength (3–8): how strongly shadows and blacks are pulled towards the reference’s black depth; high values are valid when the reference has very deep blacks.
-- blackRange (0.3–1.8): upper luminance bound for the black/shadow pull; higher values extend the black adjustment further into midtones.
-- blackPoint (0–0.3, training clamp): black floor anchor; decreasing this deepens blacks, increasing this lifts blacks slightly.
-
-7‑handle curves (tonal and colour density shaping):
-
-Exposure curve:
-- exposureCurve.L_out_0 … exposureCurve.L_out_6 (0–2):
-  - Exposure multipliers at fixed input anchors [0, 1/6, 2/6, 3/6, 4/6, 5/6, 1].
-  - 1 = neutral, >1 brightens that tonal region, <1 darkens it.
-  - Handles blend smoothly between neighbours.
-  - Example: raising handle 3 and 4 brightens midtones; lowering handle 0 and 1 deepens shadows.
-
-Color density curve. Film has strong color density in the midtones and lower highlights, less density in shadows and upper highlights:
-- colorDensityCurve.scale_0 … colorDensityCurve.scale_6 (0.2–2.5):
-  - Per‑tonal‑region chroma scales at the same 7 anchors.
-  - >1 increases saturation around that L; <1 reduces it.
-  - Use this when only specific luminance ranges (e.g. bright highlights) are too saturated or too flat.
-
-Filmic contrast curve:
-- contrastCurve.values_0 … contrastCurve.values_6 (-5 to +5):
-  - One value per handle, mapping to tonal zones:
-    - 0 = darkest shadows (H1)
-    - 1 = shadows (H2)
-    - 2 = mid‑shadows (H3)
-    - 3 = midtones (H4)
-    - 4 = mid‑high (H5)
-    - 5 = highlights (H6)
-    - 6 = brightest highlights (H7)
-  - The underlying curve is FILMIC: negative values increase density (deeper, richer darkening), positive values create a subtle bleach‑bypass feel (brighter, lower density).
-  - Default “no‑change” filmic shape is:
-    - H1: -5, H2: -3.5, H3: -1.75, H4: 0, H5: +1.75, H6: +3.5, H7: +5.
-  - You suggest DELTAS to these values, e.g. "contrastCurve.values_3": 0.5 to slightly brighten midtones.
-  - The curve is smoothly interpolated between handles; extreme endpoints are constrained so H1/H2 and H6/H7 cannot move too far from their defaults.
-
-Five-band colour shaping:
-- bandLowerShadowHue, bandUpperShadowHue, bandMidHue, bandLowerHighHue, bandUpperHighHue (-1–1):
-  - Per‑band hue rotation. Increasing shifts hue CLOCKWISE around the color wheel; decreasing shifts COUNTER‑CLOCKWISE.
-  - Example for blues: +delta moves blue → purple, −delta moves blue → teal.
-
-Per‑band temperature (cold ↔ warm):
-- bandLowerShadowTemp, bandUpperShadowTemp, bandMidTemp, bandLowerHighTemp, bandUpperHighTemp (-1–1):
-  - Per‑band color temperature controls along the OKLab b‑axis.
-  - Negative values make that band COOLER (more blue/cyan).
-  - Positive values make that band WARMER (more yellow/orange).
-  - If only shadows are too warm, use NEGATIVE temp only in shadow bands; if only highlights are too warm, cool the highlight bands, etc.
-
-Highlight fill (halation):
-- highlightFillStrength (0–1): overall halation strength.
-- highlightFillWarmth (-1–1): tint for halation (negative = cooler, positive = warmer).
-- halationTailGamma (2–6): stepper curve so ultra-highlights (99.99%) dominate over lower (98%). Default 4.
-- halationContrastGate (0–1): dark-neighbor gating; strong at highlight vs shadow edges, weak between highlight plateaus.
-- halationRimStrength (0–1): thin red edge component. halationBloomStrength (0–1): soft bloom component.
-- halationRimRadius (0–2): rim blur radius as % of image short edge (resolution-independent). halationBloomRadius (0–10): bloom blur radius as % of image short edge.
-
-Actuance: Film is known to have stronger microcontrast in the midtones.
-- actuanceStrength (0.75–3): local contrast (microcontrast) strength on fine/medium details.
-  - Higher values increase crispness; near 0.75 is subtle, near 3 is very strong.
-- actuanceRadius (0.5–5): actuance radius.
-  - Lower values → only very fine detail; higher values → coarser structures.
-
-Refraction wheels (shadow/highlight colour remapping):
-- refractionShadow.<color>.hue (0–360) and refractionHighlight.<color>.hue (0–360):
-  - Per‑wheel hue targets in degrees for each of six colours: red, yellow, green, teal, blue, purple.
-  - Defaults are: red=0, yellow=60, green=120, teal=180, blue=240, purple=300.
-  - Setting green.hue to 110 makes greens slightly yellower/warmer; And setting green.hue to 160 would push it less warm and more teal, etc.
-- refractionShadow.<color>.sat and refractionHighlight.<color>.sat (0–3):
-  - Per‑wheel saturation multipliers. 0 = completely desaturated, 1 = unchanged, 3 = 3× saturation.
-- refractionSplitL (0–1):
-  - Luminance split between shadow and highlight wheels.
-  - Lower values → more of the image uses the SHADOW wheel.
-  - Higher values → more uses the HIGHLIGHT wheel.
-Use refraction when specific hues in shadows or highlights are wrong even after band controls (e.g. “greens too cyan only in highlights”).
-
-Grading‑side tone and saturation curves:
-- toneCurve.L_out_0 … toneCurve.L_out_6 (0–1):
-  - Final grading tone curve outputs at fixed anchors; 0 = black, 1 = white.
-  - Raising values lifts that tonal region; lowering values deepens it.
-- saturationByL.scale_0 … saturationByL.scale_15 (0.2–2.5) [if present]:
-  - Per‑L saturation scalars in grading; >1 increases saturation at that L anchor, <1 decreases it.
-
-JSON output schema:
-- Keys you may emit include (but are not limited to):
-  - Scalar: exposureStrength, blackStrength, blackRange, blackPoint, highlightFillStrength, highlightFillWarmth, halationTailGamma, halationContrastGate, halationRimStrength, halationBloomStrength, halationRimRadius, halationBloomRadius, actuanceStrength, actuanceRadius.
-  - Band hue/temp: bandLowerShadow, bandUpperShadow, bandMid, bandLowerHigh, bandUpperHigh, and all corresponding *Hue, *Sat, *Luma, *Temp fields listed above.
-  - Refraction: refractionShadow.<color>.hue / .sat, refractionHighlight.<color>.hue / .sat, refractionSplitL.
-  - Curves: exposureCurve.L_out_0 … L_out_6, colorDensityCurve.scale_0 … scale_6, contrastCurve.values_0 … values_6, toneCurve.L_out_0 … L_out_6.
-- Values MUST be numeric deltas (e.g. 0.1, -0.05). Do NOT output nested objects, arrays, strings, or booleans.
-
-Example (structure only):
-{"exposureStrength": 0.05, "blackStrength": 0.8, "blackPoint": -0.02, "bandMidTemp": -0.1, "refractionHighlight.green.hue": -15, "contrastCurve.values_3": 0.5}
+The user message specifies which parameters and includes phase-specific guidance.
 
 Return ONLY valid JSON.`;
 
 /** Substep 1: non-halation params only. Halation is disabled (strength=0) in this substep. */
-const OPENAI_SUBSTEP1_PROMPT = `Focus on exposure, contrast, color density, curves, refraction, per-band controls. Do NOT adjust halation params.
+const OPENAI_SUBSTEP1_PROMPT = `Focus on exposure, contrast, color density, curves, refraction, per-band controls. Do NOT adjust halation.
+
+Adjust: exposureStrength, exposureCurve.L_out_0…6, blackPoint, blackRange, blackStrength; contrastCurve.values_0…6; colorDensityCurve.scale_0…6; colorStrength, bandMidTemp/Hue/Sat, band*Hue/Temp/Sat/Luma; refractionShadow/Highlight.<color>.hue/.sat, refractionSplitL.
 Omit: highlightFillStrength, highlightFillWarmth, halationTailGamma, halationContrastGate, halationRimStrength, halationBloomStrength, halationRimRadius, halationBloomRadius.
-Return a single JSON object of parameter deltas only. Omit keys for no change. Values must be numeric deltas.`;
+EV: exposureCurve L_out 1=0 EV, 1.4≈+0.5 EV. Refraction green=120°; 120→115=orange, 120→125=greener.
+Return JSON of deltas only. Omit keys for no change.`;
 
 /** Substep 2: halation params only. */
-const OPENAI_SUBSTEP2_PROMPT = `Focus ONLY on halation (highlight bloom/rim). Compare highlight bloom and rim to the reference.
-Adjust only: highlightFillStrength (0–1), highlightFillWarmth (-1–1), halationTailGamma (2–6), halationContrastGate (0–1), halationRimStrength (0–1), halationBloomStrength (0–1), halationRimRadius (0–2), halationBloomRadius (0–10).
-Return a single JSON object of parameter deltas only. Omit keys for no change. Values must be numeric deltas.`;
+const OPENAI_SUBSTEP2_PROMPT = `Focus ONLY on halation (highlight bloom/rim). Compare bloom and rim to reference.
+
+Adjust only: highlightFillStrength (0–2), highlightFillWarmth (-1–1), halationTailGamma (2–6), halationContrastGate (0–1), halationRimStrength (0–1), halationBloomStrength (0–1), halationRimRadius (0–0.75), halationBloomRadius (0–2.5).
+Return JSON of deltas only. Omit keys for no change.`;
+
+const PHASE_PROMPTS: Record<1 | 2 | 3 | 4 | 5 | 6 | 7 | 8, string> = {
+  1: `Phase 1: Exposure only. RAW source may be underexposed.
+
+Parameters (adjust only these):
+- exposureCurve.L_out_0 … L_out_6: L_out_0 = blackpoint. L_out_1–6 (0–2) = exposure multipliers; 1 = neutral, >1 brightens, <1 darkens. EV: 1 = 0 EV, 1.4≈+0.5 EV, 0.7≈−0.5 EV.
+- blackPoint (0–0.2), blackRange (0.3–1.8), blackStrength (5–8): shadow depth.
+- bandLowerShadowLuma … bandUpperHighLuma (-0.2–0.2): per-band tone adjustment. 
+- exposureStrength (0–1.5): toward simplified reference exposure. 
+
+If raw source is strongly underexeposed: Max out exposureCurve.L_out_1 … L_out_6, bandUpperShadowLuma … bandUpperHighLuma, exposureStrength if you are in Run 1, Iteration 1. Let next agents work their way back.
+
+
+Band awareness: If exposure was pushed up, "midtones" may contain lifted shadows; bands use post-adjustment L. Return JSON of deltas only. Omit keys for no change.`,
+  2: `Phase 2: Overall contrast only. Make the digital raw look exactly like the film reference.
+
+Parameters: contrastCurve.values_0 … values_6 (-5 to +5). Filmic curve: H0 darkest shadows, H6 brightest highlights. Negative = deeper density, positive = bleach-bypass feel. Default no-change: [-5,-3.5,-1.75,0,1.75,3.5,5]. Also: bandLowerShadowLuma (only decrease, never lift), exposureCurve.L_out_0 (only decrease, never lift), blackStrength (5–8).
+
+Return JSON of deltas only. Omit keys for no change.`,
+  3: `Phase 3: Color density curve only. Make the digital raw look exactly like the color density in film reference
+
+Parameters: colorDensityCurve.scale_0 … scale_6 (0.2–2.5). Per-tonal-region chroma at 7 L anchors. >1 increases saturation at that L; <1 reduces it. Film has strong density in midtones/lower highlights.
+
+Return JSON of deltas only. Omit keys for no change.`,
+  4: `Phase 4: Overall grading (hue/temp) only. Film reference may have split colors (highlights vs shadows). Make the digital raw look exactly like the grading in thefilm reference.
+
+Parameters: colorStrength (0–1.8), bandMidTemp (-1–1), bandMidHue (-1–1), bandMidSat. Per-band temp: −1≈7500K cool, +1≈4000K warm; ±0.1≈±200K. Per-band hue: −1=−30°, +1=+30°; 0°=red, 120°=green, 240°=blue.
+
+Return JSON of deltas only. Omit keys for no change.`,
+  5: `Phase 5: Per-band grading only. Film has unique color separation. Watch for individual objects' colors not matching reference. Make the digital raw look exactly like the color grading in the film reference.
+
+Parameters: bandLowerShadow*, bandUpperShadow*, bandLowerHigh*, bandUpperHigh* (Hue, Sat, Temp only — no Luma). Hue: + = clockwise, − = counter-clockwise. Temp: − = cooler, + = warmer. Use bands to target shadows vs mids vs highlights.
+
+Return JSON of deltas only. Omit keys for no change.`,
+  6: `Phase 6: Refraction only. Fix specific object colors: car wrong red, tree wrong green, flower wrong pink. Fix individual, isolated colors that might have been ruined by the overall grade.
+
+Parameters: refractionShadow.<color>.hue (0–360), .sat (0–3); refractionHighlight.<color>.hue, .sat; refractionSplitL (0–1). Defaults: red=0, yellow=60, green=120, teal=180, blue=240, purple=300. Green 120→115 = more orange; 120→125 = cooler/greener. Are you getting greens right? Check current params before adjusting.
+
+Return JSON of deltas only. Omit keys for no change.`,
+  7: `Phase 7: Actuance only. Microcontrast and sharpness.
+
+Parameters: actuanceStrength (0.75–3): higher = stronger crispness. actuanceRadius (0.5–5): lower = fine detail only, higher = coarser structures.
+
+Return JSON of deltas only. Omit keys for no change.`,
+  8: `Phase 8: Halation only. Highlight bloom and rim.
+
+Parameters: highlightFillStrength (0–2), highlightFillWarmth (-1–1), halationTailGamma (2–6, default 4), halationContrastGate (0–1), halationRimStrength (0–1), halationBloomStrength (0–1), halationRimRadius (0–0.75), halationBloomRadius (0–2.5).
+
+Return JSON of deltas only. Omit keys for no change.`,
+};
 
 async function bufferFromBase64(dataUrlOrRaw: string | unknown): Promise<Buffer> {
   const str =
@@ -309,6 +264,15 @@ async function updateTrainingRun(
   await supabaseAdmin.from("training_runs").update(updates).eq("id", runId);
 }
 
+function getPhasedSchedule(maxIter: number): {
+  itersPerPhase: number;
+  numRuns: number;
+} {
+  if (maxIter <= 15) return { itersPerPhase: 5, numRuns: 2 };
+  if (maxIter <= 30) return { itersPerPhase: 10, numRuns: 2 };
+  return { itersPerPhase: 10, numRuns: 4 };
+}
+
 async function runTrainingJob(options: {
   apiKey: string;
   requestUrl: string;
@@ -321,14 +285,23 @@ async function runTrainingJob(options: {
   }>;
   maxIterations: number;
   cameraType: string | null;
+  useLibraw?: boolean;
+  phased?: boolean;
 }): Promise<void> {
-  const { apiKey, requestUrl, runId, pairs, maxIterations, cameraType } = options;
+  const { apiKey, requestUrl, runId, pairs, maxIterations, cameraType, useLibraw, phased } = options;
+
+  const { itersPerPhase, numRuns } = phased
+    ? getPhasedSchedule(maxIterations)
+    : { itersPerPhase: 0, numRuns: 1 };
+  const totalPhaseIterations = phased
+    ? numRuns * 8 * itersPerPhase
+    : maxIterations;
 
   // Track the configured max_iterations and total pairs on the run up-front.
   await updateTrainingRun(runId, {
     status: "running",
     current_iteration: 0,
-    max_iterations: maxIterations,
+    max_iterations: phased ? totalPhaseIterations : maxIterations,
     error: null,
     final_image_base64: null,
     current_pair: 0,
@@ -373,37 +346,21 @@ async function runTrainingJob(options: {
         }
 
         // Run grading on the RAW source at high resolution. 4096px gives ~16MP; edits apply to
-        // full dynamic range. Two-substep + lazy exposure map + memory pacing reduce OOM risk.
+        // full dynamic range. Linear float pipeline preserves dynamic range.
         const PROCESS_MAX_EDGE = 4096;
-        const sourceFrame: PixelFrameRGBA = await decodeBuffer(sourceBuffer, PROCESS_MAX_EDGE);
-        const referenceFrame: PixelFrameRGBA = await decodeBuffer(referenceBuffer, PROCESS_MAX_EDGE);
-        // Yield to event loop after RAW decode before heavy processing (memory-conscious pacing).
+        const sourceFrame: PixelFrameF32 = await decodeBufferToLinearFloat(
+          sourceBuffer,
+          PROCESS_MAX_EDGE
+        );
+        const referenceFrame: PixelFrameF32 = await decodeBufferToLinearFloat(
+          referenceBuffer,
+          PROCESS_MAX_EDGE
+        );
         await new Promise<void>((r) => setImmediate(r));
-        // Lazy exposure map: built only when halation runs (substep 2). Saves ~12MB at 1MP until needed.
-        // Try linear RAW decode first so rawBoost uses true RAW luminance; fallback to sRGB for non-RAW.
-        let exposureMap: ExposureMap | null = null;
-        async function getExposureMap(): Promise<ExposureMap> {
-          if (!exposureMap) {
-            const linearFrame = await decodeBufferLinear(
-              sourceBuffer,
-              PROCESS_MAX_EDGE
-            );
-            if (linearFrame) {
-              exposureMap = buildExposureMapFromLinearRgb(
-                linearFrame.width,
-                linearFrame.height,
-                linearFrame.data,
-                4
-              );
-            } else {
-              exposureMap = buildExposureMapFromSrgb(sourceFrame);
-            }
-          }
-          return exposureMap;
-        }
 
-        const refImageData = frameToImageData(referenceFrame);
-        const engineParams = fitLookParamsFromReference(refImageData);
+        const exposureMap: ExposureMap = buildExposureMapFromFloat(sourceFrame);
+
+        const engineParams = fitLookParamsFromReference(referenceFrame);
         const fittedGrading = engineToGrading(engineParams);
         const initialMatch = { ...DEFAULT_LOOK_PARAMS.match };
         let currentParams: LookParams = {
@@ -416,6 +373,220 @@ async function runTrainingJob(options: {
         let lastResultFrame: PixelFrameRGBA | null = null;
         let brokeDueToFetchError = false;
 
+        const sourcePng = await frameToPngBuffer(
+          pixelFrameF32ToPixelFrameRGBA(sourceFrame),
+          { maxEdge: IMAGE_MAX_EDGE }
+        );
+        const sourceBase64 = sourcePng.toString("base64");
+
+        const referencePng = await frameToPngBuffer(
+          pixelFrameF32ToPixelFrameRGBA(referenceFrame),
+          { maxEdge: IMAGE_MAX_EDGE }
+        );
+        const referenceBase64 = referencePng.toString("base64");
+
+        if (phased) {
+          let globalIterCount = 0;
+          let bandAnchors: number[] | null = null;
+          let secondLastResultBase64: string | null = null;
+          let secondLastParams: Record<string, unknown> | null = null;
+          for (let runIdx = 0; runIdx < numRuns; runIdx++) {
+            for (let phase = 1; phase <= 8; phase++) {
+              for (let phaseIter = 0; phaseIter < itersPerPhase; phaseIter++) {
+                globalIterCount++;
+                await updateTrainingRun(runId, {
+                  current_iteration: globalIterCount,
+                });
+                const useHalation = phase === 8;
+                const paramsForPhase: LookParams = useHalation
+                  ? currentParams
+                  : {
+                      match: {
+                        ...currentParams.match,
+                        highlightFillStrength: 0,
+                      },
+                      grading: currentParams.grading,
+                    };
+                const enginePhase = buildEngineParamsFromLookParams(
+                  paramsForPhase,
+                  fittedGrading
+                );
+                const resultFramePhaseFloat = processFramesFloat(
+                  sourceFrame,
+                  referenceFrame,
+                  {
+                    strength: 1,
+                    grading: enginePhase,
+                    exposureMap: useHalation ? exposureMap : undefined,
+                    colorBandAnchors: bandAnchors ?? undefined,
+                  }
+                );
+                lastResultFrame = pixelFrameF32ToPixelFrameRGBA(resultFramePhaseFloat);
+                if (phase === 1 && phaseIter === itersPerPhase - 1) {
+                  bandAnchors = computeBandAnchorsFromFrame(resultFramePhaseFloat);
+                }
+                const resultPngPhase = await frameToPngBuffer(lastResultFrame, {
+                  maxEdge: IMAGE_MAX_EDGE,
+                });
+                const resultBase64Phase = resultPngPhase.toString("base64");
+                const phaseName =
+                  phase === 1
+                    ? "Exposure"
+                    : phase === 2
+                      ? "Contrast"
+                      : phase === 3
+                        ? "Color density"
+                        : phase === 4
+                          ? "Overall grading"
+                          : phase === 5
+                            ? "Per-band"
+                            : phase === 6
+                              ? "Refraction"
+                              : phase === 7
+                                ? "Actuance"
+                                : "Halation";
+                const hasSecondLast = secondLastResultBase64 != null;
+                const includeSource = phase === 1 && !hasSecondLast;
+                const paramsBeforeDeltas = JSON.stringify(currentParams.match);
+                const secondLastText = hasSecondLast
+                  ? `\nLast params (absolute): ${paramsBeforeDeltas}\nDeltas from second-last to last: ${JSON.stringify(lastDeltas)}\nSecond-last params (absolute): ${JSON.stringify(secondLastParams ?? {})}`
+                  : "";
+                const imgDesc = hasSecondLast
+                  ? "Images: 1=result, 2=second-last edit, 3=reference."
+                  : includeSource
+                    ? "Images: 1=result, 2=reference, 3=pre-edit source. Use source to see original dark vs bright."
+                    : "Images: 1=result, 2=reference.";
+                const lastRunNote =
+                  runIdx + 1 === numRuns
+                    ? "\nYou are in the last run. The previous agents will have attempted to get the core parameters on point. Prioritize smaller adjustments.\n"
+                    : "";
+                const phaseUserText = `${PHASE_PROMPTS[phase as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8]}${lastRunNote}
+
+Run ${runIdx + 1}/${numRuns}, Phase ${phase} (${phaseName}), iteration ${phaseIter + 1}/${itersPerPhase}.${secondLastText}
+
+Current match parameters: ${paramsBeforeDeltas}
+
+${imgDesc} Compare result to reference. Return JSON of parameter deltas only for this phase. Required: include a "description" field (short phrase) describing your intent, e.g. "lift shadows +0.2 EV" or "no change".`;
+
+                const contentItems: Array<
+                  { type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }
+                > = [
+                  { type: "text", text: phaseUserText },
+                  {
+                    type: "image_url",
+                    image_url: {
+                      url: `data:image/png;base64,${resultBase64Phase}`,
+                    },
+                  },
+                ];
+                if (hasSecondLast) {
+                  contentItems.push({
+                    type: "image_url",
+                    image_url: {
+                      url: `data:image/png;base64,${secondLastResultBase64}`,
+                    },
+                  });
+                }
+                contentItems.push({
+                  type: "image_url",
+                  image_url: {
+                    url: `data:image/png;base64,${referenceBase64}`,
+                  },
+                });
+                if (includeSource) {
+                  contentItems.push({
+                    type: "image_url",
+                    image_url: {
+                      url: `data:image/png;base64,${sourceBase64}`,
+                    },
+                  });
+                }
+
+                const openaiResPhase = await fetchWithRetry(
+                  "https://api.openai.com/v1/chat/completions",
+                  {
+                    method: "POST",
+                    headers: {
+                      "Content-Type": "application/json",
+                      Authorization: `Bearer ${apiKey}`,
+                    },
+                    body: JSON.stringify({
+                      model: "gpt-4o",
+                      max_tokens: 1024,
+                      messages: [
+                        { role: "system", content: OPENAI_SYSTEM_PROMPT },
+                        {
+                          role: "user",
+                          content: contentItems,
+                        },
+                      ],
+                    }),
+                  },
+                  3,
+                  runId
+                );
+                if (!openaiResPhase.ok) {
+                  const errBody = await openaiResPhase.text();
+                  throw new Error(
+                    `OpenAI API error: ${openaiResPhase.status} ${errBody}`
+                  );
+                }
+                const dataPhase = (await openaiResPhase.json()) as {
+                  choices?: Array<{ message?: { content?: string } }>;
+                };
+                const contentPhase =
+                  dataPhase.choices?.[0]?.message?.content ?? "";
+                let iterationDescription: string | undefined;
+                try {
+                  const parsed = JSON.parse(
+                    contentPhase.trim().replace(/^```json?\s*|\s*```$/g, "")
+                  ) as Record<string, unknown>;
+                  if (
+                    typeof parsed.description === "string" &&
+                    parsed.description.trim().length > 0
+                  ) {
+                    iterationDescription = parsed.description.trim();
+                  }
+                } catch {
+                  // ignore
+                }
+                const rawDeltas = parseJsonDeltas(contentPhase);
+                const deltasPhase = filterPhaseDeltas(
+                  phase as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8,
+                  rawDeltas
+                );
+                try {
+                  if (supabaseAdmin) {
+                    await supabaseAdmin.from("training_iteration_logs").insert({
+                    training_run_id: runId,
+                    pair_index: pairIndex,
+                    run_index: runIdx + 1,
+                    phase,
+                    phase_iteration: phaseIter + 1,
+                    description: iterationDescription ?? "No description provided",
+                    params_changed: Object.keys(deltasPhase).length > 0 ? deltasPhase : null,
+                    });
+                  }
+                } catch (logErr) {
+                  console.warn(
+                    "[openai-loop] Failed to insert iteration log:",
+                    logErr
+                  );
+                }
+                secondLastResultBase64 = resultBase64Phase;
+                secondLastParams = { ...currentParams.match };
+                if (Object.keys(deltasPhase).length > 0) {
+                  currentParams = applyGradingDeltas(
+                    currentParams,
+                    deltasPhase
+                  );
+                }
+                lastDeltas = deltasPhase;
+              }
+            }
+          }
+          iterations = globalIterCount;
+        } else {
         while (
           Object.keys(lastDeltas).length > 0 &&
           iterations < maxIterations &&
@@ -436,15 +607,18 @@ async function runTrainingJob(options: {
               paramsSubstep1,
               fittedGrading
             );
-            let resultFrame1: PixelFrameRGBA = processFrames(
-              sourceFrame,
-              referenceFrame,
-              { strength: 1, grading: engine1, exposureMap: undefined }
+            let resultFrame1: PixelFrameRGBA = pixelFrameF32ToPixelFrameRGBA(
+              processFramesFloat(
+                sourceFrame,
+                referenceFrame,
+                { strength: 1, grading: engine1, exposureMap: undefined }
+              )
             );
 
-            const referencePng = await frameToPngBuffer(referenceFrame, {
-              maxEdge: IMAGE_MAX_EDGE,
-            });
+            const referencePng = await frameToPngBuffer(
+              pixelFrameF32ToPixelFrameRGBA(referenceFrame),
+              { maxEdge: IMAGE_MAX_EDGE }
+            );
             const referenceBase64 = referencePng.toString("base64");
 
             const resultPng1 = await frameToPngBuffer(resultFrame1, {
@@ -488,7 +662,7 @@ async function runTrainingJob(options: {
                             const baseMatchText = JSON.stringify(initialMatch);
                             return `${OPENAI_SUBSTEP1_PROMPT}
 
-This is iteration ${iterations} of ${maxIterations}, substep 1 (non-halation). iterations 1-10 get exposure and contrast right. If exposure and contrast are ~90% correct, pick up refraction, per-band temp, hue.
+This is iteration ${iterations} of ${maxIterations}, substep 1 (non-halation). iterations 1-15 get exposure, contrast, blackstength, exposurematch right. After that, get the core grading perfect: is each color looking 100% exactly like the reference? (ignore colors relating to halation).
 
 Last iteration deltas: ${lastDeltaText}
 
@@ -496,7 +670,7 @@ Current match parameters: ${currentMatchText}
 
 Baseline: ${baseMatchText}
 
-Compare the first image (result) to the second (reference). Return JSON of parameter deltas only.`;
+Images: 1=result, 2=reference, 3=pre-edit source. Use the source to see what was originally dark vs bright when exposure has been pushed. Compare result to reference, return JSON of parameter deltas only.`;
                           })(),
                         },
                         {
@@ -509,6 +683,12 @@ Compare the first image (result) to the second (reference). Return JSON of param
                           type: "image_url",
                           image_url: {
                             url: `data:image/png;base64,${referenceBase64}`,
+                          },
+                        },
+                        {
+                          type: "image_url",
+                          image_url: {
+                            url: `data:image/png;base64,${sourceBase64}`,
                           },
                         },
                       ],
@@ -555,11 +735,13 @@ Compare the first image (result) to the second (reference). Return JSON of param
               currentParams,
               fittedGrading
             );
-            const resultFrame2 = processFrames(sourceFrame, referenceFrame, {
-              strength: 1,
-              grading: engine2,
-              exposureMap: await getExposureMap(),
-            });
+            const resultFrame2 = pixelFrameF32ToPixelFrameRGBA(
+              processFramesFloat(sourceFrame, referenceFrame, {
+                strength: 1,
+                grading: engine2,
+                exposureMap,
+              })
+            );
             lastResultFrame = resultFrame2;
 
             const resultPng2 = await frameToPngBuffer(resultFrame2, {
@@ -598,7 +780,7 @@ Last deltas (both substeps): ${lastDeltaText}
 
 Current match parameters: ${currentMatchText}
 
-Compare the first image (result) to the second (reference). Return JSON of halation parameter deltas only.`;
+Images: 1=result, 2=reference, 3=pre-edit source. Compare result to reference, return JSON of halation parameter deltas only.`;
                           })(),
                         },
                         {
@@ -611,6 +793,12 @@ Compare the first image (result) to the second (reference). Return JSON of halat
                           type: "image_url",
                           image_url: {
                             url: `data:image/png;base64,${referenceBase64}`,
+                          },
+                        },
+                        {
+                          type: "image_url",
+                          image_url: {
+                            url: `data:image/png;base64,${sourceBase64}`,
                           },
                         },
                       ],
@@ -660,12 +848,8 @@ Compare the first image (result) to the second (reference). Return JSON of halat
 
           if (isNearlyComplete) {
             // Treat as success: save correction, persist final image, continue to next pair
-            const sourceStats = computeImageStats(
-              frameToImageData(sourceFrame)
-            );
-            const refStats = computeImageStats(
-              frameToImageData(referenceFrame)
-            );
+            const sourceStats = computeImageStatsFromFloat(sourceFrame);
+            const refStats = computeImageStatsFromFloat(referenceFrame);
             const correctionPayload = {
               sourceId: `openai-loop-pair-${pairIndex}-${Date.now()}`,
               referenceId: null,
@@ -713,14 +897,16 @@ Compare the first image (result) to the second (reference). Return JSON of halat
             }
             const frameToExport =
               lastResultFrame ??
-              processFrames(sourceFrame, referenceFrame, {
-                strength: 1,
-                grading: buildEngineParamsFromLookParams(
-                  currentParams,
-                  fittedGrading
-                ),
-                exposureMap: await getExposureMap(),
-              });
+              pixelFrameF32ToPixelFrameRGBA(
+                processFramesFloat(sourceFrame, referenceFrame, {
+                  strength: 1,
+                  grading: buildEngineParamsFromLookParams(
+                    currentParams,
+                    fittedGrading
+                  ),
+                  exposureMap,
+                })
+              );
             const finalUrl = await persistTrainingImage(
               frameToExport,
               runId,
@@ -741,14 +927,15 @@ Compare the first image (result) to the second (reference). Return JSON of halat
           brokeDueToFetchError = true;
         }
         }
+        }
 
         if (pairSucceeded) break;
 
         if (brokeDueToFetchError) continue;
 
         // Normal success: exited while with empty deltas or max iterations
-        const sourceStats = computeImageStats(frameToImageData(sourceFrame));
-        const refStats = computeImageStats(frameToImageData(referenceFrame));
+        const sourceStats = computeImageStatsFromFloat(sourceFrame);
+        const refStats = computeImageStatsFromFloat(referenceFrame);
 
         const correctionPayload = {
           sourceId: `openai-loop-pair-${pairIndex}-${Date.now()}`,
@@ -787,14 +974,16 @@ Compare the first image (result) to the second (reference). Return JSON of halat
 
         const frameToExport =
           lastResultFrame ??
-          processFrames(sourceFrame, referenceFrame, {
-            strength: 1,
-            grading: buildEngineParamsFromLookParams(
-              currentParams,
-              fittedGrading
-            ),
-            exposureMap: await getExposureMap(),
-          });
+          pixelFrameF32ToPixelFrameRGBA(
+            processFramesFloat(sourceFrame, referenceFrame, {
+              strength: 1,
+              grading: buildEngineParamsFromLookParams(
+                currentParams,
+                fittedGrading
+              ),
+              exposureMap,
+            })
+          );
         const finalPng = await frameToPngBuffer(frameToExport, {
           maxEdge: EXPORT_MAX_EDGE,
         });
@@ -852,6 +1041,8 @@ export async function POST(request: Request) {
     }>;
     max_iterations?: number;
     camera_type?: string | null;
+    use_libraw?: boolean;
+    phased?: boolean;
   };
   try {
     body = await request.json();
@@ -859,8 +1050,16 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
+  const phased = body.phased ?? false;
+  const rawMaxIter = body.max_iterations ?? 20;
+  const maxIterations = phased
+    ? rawMaxIter <= 15
+      ? 10
+      : rawMaxIter <= 30
+        ? 20
+        : 40
+    : Math.max(5, Math.min(100, rawMaxIter));
   const pairs = body.pairs;
-  const maxIterations = Math.max(5, Math.min(100, body.max_iterations ?? 20));
   const cameraType = body.camera_type ?? null;
   if (!Array.isArray(pairs) || pairs.length === 0) {
     return NextResponse.json(
@@ -907,6 +1106,8 @@ export async function POST(request: Request) {
     pairs,
     maxIterations,
     cameraType,
+    useLibraw: body.use_libraw ?? false,
+    phased,
   });
 
   return NextResponse.json({

@@ -15,6 +15,7 @@ import {
   buildExposureMapFromSrgb,
   buildExposureMapFromLinearRgb,
   computeImageStats,
+  computeBandAnchorsFromFrame,
 } from "@/src/lib/pipeline";
 import { runProcessOneInWorker } from "@/src/lib/pipeline/runProcessOneInWorker";
 import { fitLookParamsFromReference } from "@/src/lib/pipeline/stages/match";
@@ -52,6 +53,22 @@ function isDng(file: File): boolean {
   if (type === "image/x-adobe-dng" || type === "image/dng") return true;
   const name = (file.name || "").toLowerCase();
   return name.endsWith(".dng");
+}
+
+async function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result;
+      const base64 =
+        typeof dataUrl === "string" && dataUrl.includes(",")
+          ? dataUrl.split(",")[1] ?? ""
+          : "";
+      resolve(base64);
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
 }
 
 /** Convert a PixelFrameRGBA to base64 PNG, optionally scaled to maxEdge. */
@@ -105,6 +122,8 @@ export default function TrainPage() {
   const [maxIterations, setMaxIterations] = useState<number>(0);
   const [currentPair, setCurrentPair] = useState<number>(0);
   const [totalPairs, setTotalPairs] = useState<number>(0);
+  const [useServerFlow, setUseServerFlow] = useState<boolean>(false);
+  const [usePhasedApproach, setUsePhasedApproach] = useState<boolean>(false);
 
   const completePairs = pairs.filter(
     (p) => p.source != null && p.reference != null
@@ -165,11 +184,111 @@ export default function TrainPage() {
     setCurrentPair(0);
     setTotalPairs(completePairs.length);
 
-    const maxIter = Math.max(5, Math.min(100, iterations));
-    setMaxIterations(maxIter);
+    const maxIter = usePhasedApproach
+      ? iterations <= 15
+        ? 10
+        : iterations <= 30
+          ? 20
+          : 40
+      : Math.max(5, Math.min(100, iterations));
+    setMaxIterations(
+      usePhasedApproach ? (maxIter === 10 ? 80 : maxIter === 20 ? 160 : 320) : maxIter
+    );
     const camType = cameraTypeValue.trim() || null;
 
     try {
+      if (useServerFlow) {
+        setMessage("Uploading pairs…");
+        const pairsPayload = await Promise.all(
+          completePairs.map(async (p) => {
+            if (!p.source || !p.reference) throw new Error("Missing pair");
+            return {
+              source_base64: await fileToBase64(p.source),
+              reference_base64: await fileToBase64(p.reference),
+            };
+          })
+        );
+        const res = await fetch("/api/train/openai-loop", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            pairs: pairsPayload,
+            max_iterations: maxIter,
+            camera_type: camType,
+            use_libraw: true,
+            phased: usePhasedApproach,
+          }),
+        });
+        if (!res.ok) {
+          const err = (await res.json()) as { error?: string };
+          throw new Error(err.error ?? "Failed to start server run");
+        }
+        const { run_id } = (await res.json()) as { run_id?: string };
+        if (!run_id) throw new Error("No run_id returned");
+
+        setMessage("Server run started. Polling status…");
+        const pollInterval = 2500;
+        let done = false;
+
+        async function fetchStatusWithRetries(): Promise<Response> {
+          let lastErr: Error | null = null;
+          for (let attempt = 0; attempt < 3; attempt++) {
+            const res = await fetch(`/api/train/status?run_id=${run_id}`);
+            if (res.ok) return res;
+            const errBody = await res.json().catch(() => ({}));
+            lastErr = new Error(
+              (errBody as { error?: string }).error ?? "Status poll failed"
+            );
+            if (attempt < 2) await new Promise((r) => setTimeout(r, 2000));
+          }
+          throw lastErr!;
+        }
+
+        while (!done) {
+          await new Promise((r) => setTimeout(r, pollInterval));
+          const statusRes = await fetchStatusWithRetries();
+          const data = (await statusRes.json()) as {
+            status: string;
+            current_iteration?: number;
+            max_iterations?: number;
+            current_pair?: number;
+            total_pairs?: number;
+            error?: string;
+            final_image_urls?: string[];
+          };
+          setCurrentIteration(data.current_iteration ?? 0);
+          setCurrentPair(data.current_pair ?? 0);
+          if (data.status === "error") {
+            throw new Error(data.error ?? "Server run failed");
+          }
+          if (data.status === "done") {
+            done = true;
+            const imgUrl = data.final_image_urls?.[0];
+            if (imgUrl) {
+              const imgRes = await fetch(imgUrl);
+              const blob = await imgRes.blob();
+              const url = URL.createObjectURL(blob);
+              setFinalImageUrl((prev) => {
+                if (prev) URL.revokeObjectURL(prev);
+                return url;
+              });
+              setFinalBlobRef(blob);
+              setMessage(
+                completePairs.length > 1
+                  ? `Done. ${completePairs.length} pairs processed.`
+                  : "Done."
+              );
+            } else {
+              setMessage(
+                "Done, but final image not available (upload may have failed)."
+              );
+            }
+            setStatus("done");
+          }
+        }
+        return;
+      }
+
       for (let pairIndex = 0; pairIndex < completePairs.length; pairIndex++) {
         const pair = completePairs[pairIndex];
         if (!pair.source || !pair.reference) continue;
@@ -208,10 +327,124 @@ export default function TrainPage() {
           decodedRef,
           IMAGE_MAX_EDGE
         );
+        const sourceBase64 = await frameToPngBase64(
+          decodedSource,
+          IMAGE_MAX_EDGE
+        );
 
         let lastDeltas: Record<string, number> = { one: 1 };
         let iterCount = 0;
 
+        const getPhasedSchedule = (n: number) =>
+          n <= 15
+            ? { itersPerPhase: 5, numRuns: 2 }
+            : n <= 30
+              ? { itersPerPhase: 10, numRuns: 2 }
+              : { itersPerPhase: 10, numRuns: 4 };
+
+        if (usePhasedApproach) {
+          const { itersPerPhase, numRuns } = getPhasedSchedule(maxIter);
+          let globalIterCount = 0;
+          let bandAnchors: number[] | null = null;
+          let secondLastResultBase64: string | null = null;
+          let secondLastParams: Record<string, unknown> | null = null;
+          for (let runIdx = 0; runIdx < numRuns; runIdx++) {
+            for (let phase = 1; phase <= 8; phase++) {
+              for (let phaseIter = 0; phaseIter < itersPerPhase; phaseIter++) {
+                globalIterCount++;
+                iterCount = globalIterCount;
+                setCurrentIteration(globalIterCount);
+                setMessage(
+                  `Run ${runIdx + 1}/${numRuns}, Phase ${phase}, iter ${phaseIter + 1}/${itersPerPhase}…`
+                );
+                const useHalation = phase === 8;
+                const paramsForPhase: LookParams = useHalation
+                  ? currentParams
+                  : {
+                      match: {
+                        ...currentParams.match,
+                        highlightFillStrength: 0,
+                      },
+                      grading: currentParams.grading,
+                    };
+                const enginePhase = buildEngineParamsFromLookParams(
+                  paramsForPhase,
+                  fittedGrading
+                );
+                const sourceCopy: PixelFrameRGBA = {
+                  ...decodedSource,
+                  data: new Uint8ClampedArray(decodedSource.data),
+                };
+                const refCopy: PixelFrameRGBA | null = decodedRef
+                  ? {
+                      ...decodedRef,
+                      data: new Uint8ClampedArray(decodedRef.data),
+                    }
+                  : null;
+                const resultPhase = await runProcessOneInWorker(
+                  sourceCopy,
+                  refCopy,
+                  {
+                    strength: 1,
+                    grading: enginePhase,
+                    exposureMap: useHalation ? exposureMap : undefined,
+                    colorBandAnchors: bandAnchors ?? undefined,
+                  }
+                );
+                if (phase === 1 && phaseIter === itersPerPhase - 1) {
+                  bandAnchors = computeBandAnchorsFromFrame(resultPhase);
+                }
+                const resultBase64Phase = await frameToPngBase64(
+                  resultPhase,
+                  IMAGE_MAX_EDGE
+                );
+                const hasSecondLast = secondLastResultBase64 != null;
+                const resPhase = await fetch("/api/train/openai-deltas", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    result_base64: resultBase64Phase,
+                    reference_base64: referenceBase64,
+                    ...(phase === 1 && !hasSecondLast
+                      ? { source_base64: sourceBase64 }
+                      : {}),
+                    ...(hasSecondLast
+                      ? {
+                          second_last_base64: secondLastResultBase64,
+                          second_last_params: secondLastParams ?? {},
+                        }
+                      : {}),
+                    phase,
+                    run: runIdx + 1,
+                    num_runs: numRuns,
+                    phase_iteration: phaseIter + 1,
+                    iters_per_phase: itersPerPhase,
+                    last_deltas: lastDeltas,
+                    current_match: currentParams.match,
+                    initial_match: initialMatch,
+                  }),
+                });
+                if (!resPhase.ok) {
+                  const err = (await resPhase.json()) as { error?: string };
+                  throw new Error(err.error ?? "OpenAI phase request failed");
+                }
+                const dataPhase = (await resPhase.json()) as {
+                  deltas?: Record<string, number>;
+                };
+                const deltasPhase = dataPhase.deltas ?? {};
+                secondLastResultBase64 = resultBase64Phase;
+                secondLastParams = { ...currentParams.match };
+                if (Object.keys(deltasPhase).length > 0) {
+                  currentParams = applyGradingDeltas(
+                    currentParams,
+                    deltasPhase
+                  );
+                }
+                lastDeltas = deltasPhase;
+              }
+            }
+          }
+        } else {
         while (
           Object.keys(lastDeltas).length > 0 &&
           iterCount < maxIter
@@ -318,6 +551,7 @@ export default function TrainPage() {
           lastDeltas = { ...nonHalationDeltas, ...halationDeltas };
           if (Object.keys(lastDeltas).length === 0) break;
         }
+        }
 
         const sourceStats = computeImageStats(frameToImageData(decodedSource));
         const refStats = computeImageStats(frameToImageData(decodedRef));
@@ -409,7 +643,7 @@ export default function TrainPage() {
       setStatus("error");
       setMessage(err instanceof Error ? err.message : String(err));
     }
-  }, [completePairs, iterations, cameraTypeValue]);
+  }, [completePairs, iterations, cameraTypeValue, useServerFlow, usePhasedApproach]);
 
   return (
     <div className="p-4 md:p-6 max-w-2xl">
@@ -510,6 +744,39 @@ export default function TrainPage() {
             onChange={(e) => setIterations(Number(e.target.value) || 20)}
             disabled={status === "training"}
           />
+        </div>
+
+        <div className="flex flex-col gap-2">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={useServerFlow}
+              onChange={(e) => setUseServerFlow(e.target.checked)}
+              disabled={status === "training"}
+              className="rounded border-input"
+            />
+            <span className="text-sm">Run on server (LibRaw)</span>
+          </label>
+          {useServerFlow && (
+            <p className="text-xs text-muted-foreground">
+              Server mode uploads full source/reference; large files may be slow.
+            </p>
+          )}
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={usePhasedApproach}
+              onChange={(e) => setUsePhasedApproach(e.target.checked)}
+              disabled={status === "training"}
+              className="rounded border-input"
+            />
+            <span className="text-sm">Phased Approach</span>
+          </label>
+          {usePhasedApproach && (
+            <p className="text-xs text-muted-foreground">
+              8 phases (exposure, contrast, color density, grading, per-band, refraction, actuance, halation). Iterations map to 10 (80 steps), 20 (160 steps), or 40 (320 steps).
+            </p>
+          )}
         </div>
 
         <Button onClick={handleStart} disabled={!canStart}>

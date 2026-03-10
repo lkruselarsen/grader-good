@@ -2,7 +2,7 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   /** Don't bundle dcraw so runtime patch (const→let) is loaded from node_modules. */
-  serverExternalPackages: ["dcraw", "libraw-wasm"],
+  serverExternalPackages: ["dcraw", "libraw-wasm", "lightdrift-libraw"],
   /**
    * Enable async WebAssembly for webpack builds so libraw-wasm can run.
    * Turbopack ignores this and handles WASM automatically.
