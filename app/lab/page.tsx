@@ -24,17 +24,18 @@ import {
   runPipeline as runPipelineFn,
   previewSource,
   exportBaselinePngBlob,
+  exportGradedPngBlob,
 } from "@/lib/run-pipeline";
 import { imageToSemanticEmbedding } from "@/src/lib/semanticEmbeddings";
 import { imageToColClipTileEmbeddings } from "@/src/lib/colclipEmbeddings";
 import {
-  decode,
   frameToImageData,
   computeImageStats,
   type ImageStats,
   type ExposureLevel,
   type ChromaDistribution,
 } from "@/src/lib/pipeline";
+import { decode } from "@/src/lib/pipeline/decode";
 import { LEARNED_HEURISTICS } from "@/src/config/learnedHeuristics";
 import {
   applyHeuristicsToMatch,
@@ -131,7 +132,7 @@ const PARAM_SECTIONS: Array<{
         key: "exposureStrength",
         label: "Exposure match",
         min: 0,
-        max: 2,
+        max: 1.5,
         step: 0.01,
       },
       {
@@ -199,20 +200,6 @@ const PARAM_SECTIONS: Array<{
       },
       { key: "colorDensity", label: "Color density", min: 0.5, max: 2, step: 0.05 },
       {
-        key: "highlightFillStrength",
-        label: "Highlight fill strength",
-        min: 0,
-        max: 1,
-        step: 0.01,
-      },
-      {
-        key: "highlightFillWarmth",
-        label: "Highlight fill warmth",
-        min: -1,
-        max: 1,
-        step: 0.05,
-      },
-      {
         key: "actuanceStrength",
         label: "Actuance strength",
         min: 0.75,
@@ -225,6 +212,68 @@ const PARAM_SECTIONS: Array<{
         min: 0.5,
         max: 5,
         step: 0.5,
+      },
+    ],
+  },
+  {
+    id: "match",
+    label: "Halation",
+    params: [
+      {
+        key: "highlightFillStrength",
+        label: "Strength",
+        min: 0,
+        max: 2,
+        step: 0.01,
+      },
+      {
+        key: "highlightFillWarmth",
+        label: "Warmth",
+        min: -1,
+        max: 1,
+        step: 0.05,
+      },
+      {
+        key: "halationTailGamma",
+        label: "Tail gamma (ultra-highlight bias)",
+        min: 2,
+        max: 6,
+        step: 0.1,
+      },
+      {
+        key: "halationContrastGate",
+        label: "Contrast gate (dark-neighbor)",
+        min: 0,
+        max: 1,
+        step: 0.01,
+      },
+      {
+        key: "halationRimStrength",
+        label: "Rim strength (thin edge)",
+        min: 0,
+        max: 1,
+        step: 0.01,
+      },
+      {
+        key: "halationBloomStrength",
+        label: "Bloom strength (soft halo)",
+        min: 0,
+        max: 1,
+        step: 0.01,
+      },
+      {
+        key: "halationRimRadius",
+        label: "Rim radius (% short edge)",
+        min: 0,
+        max: 0.75,
+        step: 0.05,
+      },
+      {
+        key: "halationBloomRadius",
+        label: "Bloom radius (% short edge)",
+        min: 0,
+        max: 2.5,
+        step: 0.1,
       },
     ],
   },
@@ -255,6 +304,17 @@ export default function LabPage() {
   } | null>(null);
   /** Phase text during "Apply" pipeline (e.g. "Decoding…", "Applying grade…"). */
   const [applyProgress, setApplyProgress] = useState<string | null>(null);
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState<string | null>(null);
+
+  const [compareWasmUrl, setCompareWasmUrl] = useState<string | null>(null);
+  const [compareServerUrl, setCompareServerUrl] = useState<string | null>(null);
+  const [compareLoading, setCompareLoading] = useState(false);
+  const [compareError, setCompareError] = useState<string | null>(null);
+  const compareInputRef = useRef<HTMLInputElement | null>(null);
+
+  const [importJsonText, setImportJsonText] = useState("");
+  const [importError, setImportError] = useState<string | null>(null);
 
   const previewAbortRef = useRef<AbortController | null>(null);
   const autoParamsRef = useRef<LookParams | null>(null);
@@ -329,6 +389,118 @@ export default function LabPage() {
       setApplyProgress(null);
     }
   }, [source, activeRef?.file, lookParams]);
+
+  function onLoadParams() {
+    setImportError(null);
+    const trimmed = importJsonText.trim();
+    if (!trimmed) {
+      setImportError("Paste JSON first");
+      return;
+    }
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (typeof parsed !== "object" || parsed === null) {
+        setImportError("JSON must be an object");
+        return;
+      }
+      const obj = parsed as Record<string, unknown>;
+      if (
+        !obj.match ||
+        typeof obj.match !== "object" ||
+        obj.match === null ||
+        !obj.grading ||
+        typeof obj.grading !== "object" ||
+        obj.grading === null
+      ) {
+        setImportError("JSON must have 'match' and 'grading' objects");
+        return;
+      }
+      const merged: LookParams = {
+        match: { ...DEFAULT_LOOK_PARAMS.match, ...(obj.match as object) },
+        grading: { ...DEFAULT_LOOK_PARAMS.grading, ...(obj.grading as object) },
+      };
+      if (obj.halation && typeof obj.halation === "object") {
+        merged.halation = { ...merged.halation, ...(obj.halation as object) };
+      }
+      if (obj.grain && typeof obj.grain === "object") {
+        merged.grain = { ...merged.grain, ...(obj.grain as object) };
+      }
+      setLookParams(merged);
+      autoParamsRef.current = merged;
+    } catch (err) {
+      setImportError(err instanceof SyntaxError ? "Invalid JSON" : err instanceof Error ? err.message : "Parse failed");
+    }
+  }
+
+  const importJsonValid = useMemo(() => {
+    const t = importJsonText.trim();
+    if (!t) return false;
+    try {
+      const p = JSON.parse(t) as unknown;
+      if (typeof p !== "object" || p === null) return false;
+      const o = p as Record<string, unknown>;
+      return (
+        o.match != null &&
+        typeof o.match === "object" &&
+        o.grading != null &&
+        typeof o.grading === "object"
+      );
+    } catch {
+      return false;
+    }
+  }, [importJsonText]);
+
+  const onCompareDecodersPick = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0] ?? null;
+      e.target.value = "";
+      if (!file) return;
+      if (!isDngFile(file)) {
+        setCompareError("Select a DNG file");
+        return;
+      }
+      setCompareLoading(true);
+      setCompareError(null);
+      setCompareWasmUrl(null);
+      setCompareServerUrl(null);
+      try {
+        const [wasmFrame, serverRes] = await Promise.all([
+          decode(file),
+          (async () => {
+            const form = new FormData();
+            form.append("file", file);
+            return fetch("/api/decode/raw", {
+              method: "POST",
+              body: form,
+            });
+          })(),
+        ]);
+        const canvas = document.createElement("canvas");
+        canvas.width = wasmFrame.width;
+        canvas.height = wasmFrame.height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) throw new Error("Canvas 2D context");
+        ctx.putImageData(frameToImageData(wasmFrame), 0, 0);
+        const wasmDataUrl = canvas.toDataURL("image/png");
+        setCompareWasmUrl(wasmDataUrl);
+
+        if (!serverRes.ok) {
+          const err = (await serverRes.json()) as { error?: string };
+          throw new Error(err.error ?? "Server decode failed");
+        }
+        const data = (await serverRes.json()) as { png_base64?: string };
+        const serverDataUrl = data.png_base64
+          ? `data:image/png;base64,${data.png_base64}`
+          : null;
+        setCompareServerUrl(serverDataUrl);
+      } catch (err) {
+        setCompareError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setCompareLoading(false);
+      }
+    },
+    []
+  );
 
   const runEmbeddingSearch = useCallback(async () => {
     previewAbortRef.current?.abort();
@@ -456,6 +628,162 @@ export default function LabPage() {
     }
   }, [source, lookParams, useTileSearch]);
 
+  const runEmbeddingSearchWithCorrections = useCallback(async () => {
+    previewAbortRef.current?.abort();
+    setApplyError(null);
+    setApplySuccess(false);
+    if (!source) {
+      setApplyError("No source image");
+      return;
+    }
+    if (!LEARNED_HEURISTICS) {
+      setApplyError("No learned heuristics. Train corrections first.");
+      return;
+    }
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      setApplyError("Canvas not ready");
+      return;
+    }
+    setIsUsingEmbeddings(true);
+    setHasAppliedHeuristics(false);
+    setEmbeddingProgress(null);
+    try {
+      let body: { embeddingSemantic?: number[]; tileEmbeddings?: Array<{ tile_index: number; embedding: number[] }> };
+      if (useTileSearch) {
+        setEmbeddingProgress({ phase: "Decoding…" });
+        const sourceFrame = await decode(source.file);
+        const imageData = frameToImageData(sourceFrame);
+        setEmbeddingProgress({ phase: "Tiles", current: 0, total: 100 });
+        const tileEmbeddings = await imageToColClipTileEmbeddings(
+          imageData,
+          10,
+          10,
+          (current, total) => setEmbeddingProgress({ phase: "Tiles", current, total })
+        );
+        body = {
+          tileEmbeddings: tileEmbeddings.map((vec, i) => ({ tile_index: i, embedding: vec })),
+        };
+      } else {
+        setEmbeddingProgress({ phase: "Computing embedding…" });
+        const processingFile = await sourceFileForProcessing(source.file, canvas);
+        const embeddingSemantic = await imageToSemanticEmbedding(processingFile);
+        body = { embeddingSemantic };
+      }
+      setEmbeddingProgress({ phase: "Searching…" });
+      const res = await fetch("/api/dataset/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error ?? "Search failed");
+      }
+      const matches = data.matches ?? [];
+      if (matches.length === 0) {
+        throw new Error("No matches. Add samples in Dataset first.");
+      }
+      const top = matches[0];
+      lastMatchRef.current = {
+        reference_exposure: top.reference_exposure ?? undefined,
+        reference_chroma_distribution: top.reference_chroma_distribution ?? undefined,
+      };
+      const grading = engineToGrading(top.look_params);
+      const embedded = top.look_params ?? {};
+      const baseMatch = lookParams.match;
+      const effectiveBlackPoint =
+        baseMatch.blackPoint ?? grading.refBlackL ?? 0.05;
+      let nextMatch = {
+        ...baseMatch,
+        blackPoint: effectiveBlackPoint,
+        blackStrength:
+          typeof embedded.blackStrength === "number"
+            ? embedded.blackStrength
+            : baseMatch.blackStrength,
+        blackRange:
+          typeof embedded.blackRange === "number"
+            ? embedded.blackRange
+            : baseMatch.blackRange,
+        bandLowerShadow:
+          typeof embedded.colorBandStrengths?.lowerShadow === "number"
+            ? embedded.colorBandStrengths.lowerShadow
+            : baseMatch.bandLowerShadow,
+        bandUpperShadow:
+          typeof embedded.colorBandStrengths?.upperShadow === "number"
+            ? embedded.colorBandStrengths.upperShadow
+            : baseMatch.bandUpperShadow,
+        bandMid:
+          typeof embedded.colorBandStrengths?.mid === "number"
+            ? embedded.colorBandStrengths.mid
+            : baseMatch.bandMid,
+        bandLowerHigh:
+          typeof embedded.colorBandStrengths?.lowerHigh === "number"
+            ? embedded.colorBandStrengths.lowerHigh
+            : baseMatch.bandLowerHigh,
+        bandUpperHigh:
+          typeof embedded.colorBandStrengths?.upperHigh === "number"
+            ? embedded.colorBandStrengths.upperHigh
+            : baseMatch.bandUpperHigh,
+      };
+      setEmbeddingProgress({ phase: "Applying corrections…" });
+      const sourceFrame = await decode(source.file);
+      const sourceStats = computeImageStats(frameToImageData(sourceFrame));
+      const sourceExposureLevel = sourceStats.exposureLevel;
+      const sourceExposureBucket = bucketForSourceExposure(sourceExposureLevel);
+      const sourceExposureScore = exposureScoreFromLevel(sourceExposureLevel);
+      const sourceTypeBucket: BucketName | undefined = sourceType
+        ? (`source_type:${sourceType}` as BucketName)
+        : undefined;
+      const refExposureSource: ExposureLevel | null =
+        (top.reference_exposure as ExposureLevel | null) ?? null;
+      const refColorSource: ChromaDistribution | null =
+        (top.reference_chroma_distribution as ChromaDistribution | null) ?? null;
+      const refExposureBucket = bucketForRefExposure(refExposureSource);
+      const refExposureScore = exposureScoreFromLevel(refExposureSource);
+      const refColorBucket = bucketForRefColor(refColorSource);
+      const ctx: MatchContext = {
+        sourceExposureBucket,
+        sourceExposureScore,
+        sourceTypeBucket,
+        refExposureBucket,
+        refExposureScore,
+        refColorBucket,
+      };
+      const adjustedMatch = applyHeuristicsToMatch(nextMatch, LEARNED_HEURISTICS, ctx);
+      nextMatch = { ...nextMatch, ...adjustedMatch };
+      const nextParams: LookParams = {
+        ...lookParams,
+        match: nextMatch,
+        grading,
+      };
+      setLookParams(nextParams);
+      autoParamsRef.current = nextParams;
+      setLastSourceStats(sourceStats);
+      setLastRefStats(null);
+      setHasAppliedHeuristics(true);
+      setEmbeddingProgress({ phase: "Applying grade…" });
+      const pipelineResult = await runPipelineFn(
+        source.file,
+        null,
+        nextParams,
+        canvas,
+        { onProgress: (phase) => setEmbeddingProgress({ phase }) }
+      );
+      if (pipelineResult.sourceStats) {
+        setLastSourceStats(pipelineResult.sourceStats);
+      }
+      setApplySuccess(true);
+      setTimeout(() => setApplySuccess(false), 2500);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setApplyError(message);
+    } finally {
+      setIsUsingEmbeddings(false);
+      setEmbeddingProgress(null);
+    }
+  }, [source, lookParams, useTileSearch, sourceType]);
+
   // Show raw source preview when source is uploaded (no grading applied)
   useEffect(() => {
     if (!source || !canvasRef.current) return;
@@ -508,16 +836,27 @@ export default function LabPage() {
   }
 
   async function onExport() {
-    const c = canvasRef.current;
-    if (!c) return;
-    c.toBlob((blob) => {
-      if (!blob) return;
+    if (!source) return;
+    setIsExporting(true);
+    setExportProgress("Decoding…");
+    try {
+      const blob = await exportGradedPngBlob(
+        source.file,
+        activeRef?.file ?? null,
+        lookParams,
+        { onProgress: (p) => setExportProgress(p) }
+      );
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
-      a.download = `graded_${source?.file.name ?? "image"}.png`;
+      a.download = `graded_${source.file.name.replace(/\.[^.]+$/, "")}.png`;
       a.click();
       URL.revokeObjectURL(a.href);
-    }, "image/png");
+    } catch (err) {
+      console.error("Export failed", err);
+    } finally {
+      setIsExporting(false);
+      setExportProgress(null);
+    }
   }
 
   async function onExportBaseline() {
@@ -679,14 +1018,29 @@ export default function LabPage() {
                   onChange={(e) => onPickRefs(e.target.files)}
                 />
                 <div className="space-y-1">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => void runEmbeddingSearch()}
-                    disabled={!source || isApplying || isUsingEmbeddings}
-                  >
-                    {isUsingEmbeddings ? "Searching…" : "Use embeddings"}
-                  </Button>
+                  <div className="flex flex-wrap gap-1">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void runEmbeddingSearch()}
+                      disabled={!source || isApplying || isUsingEmbeddings}
+                    >
+                      {isUsingEmbeddings ? "Searching…" : "Use embeddings"}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void runEmbeddingSearchWithCorrections()}
+                      disabled={
+                        !source ||
+                        isApplying ||
+                        isUsingEmbeddings ||
+                        !LEARNED_HEURISTICS
+                      }
+                    >
+                      Use embeddings + corrections
+                    </Button>
+                  </div>
                   {isUsingEmbeddings && embeddingProgress && (
                     <>
                       <div className="h-1.5 w-full max-w-[200px] rounded-full bg-muted overflow-hidden">
@@ -785,13 +1139,7 @@ export default function LabPage() {
                       {section.params.map((param) => {
                         const raw =
                           (sectionParams as Record<string, number>)[param.key];
-                        const value =
-                          typeof raw === "number"
-                            ? raw
-                            : (param.key === "highlightFillStrength" ||
-                               param.key === "highlightFillWarmth")
-                              ? 0
-                              : undefined;
+                        const value = typeof raw === "number" ? raw : undefined;
                         if (value === undefined) return null;
                         return (
                           <div key={param.key} className="space-y-1.5">
@@ -1216,6 +1564,97 @@ export default function LabPage() {
                 </div>
               </details>
 
+              {/* Import JSON (corrected params from Supabase) */}
+              <details className="border rounded-md p-2">
+                <summary className="text-[11px] font-medium text-muted-foreground/80 cursor-pointer">
+                  Import JSON (corrected params from Supabase)
+                </summary>
+                <p className="text-[10px] text-muted-foreground mt-1">
+                  Paste the content of a "corrected params" cell from Supabase.
+                </p>
+                <textarea
+                  className="mt-2 w-full min-h-[100px] rounded-md border border-input bg-background px-3 py-2 text-xs font-mono"
+                  placeholder='{ "match": { ... }, "grading": { ... } }'
+                  value={importJsonText}
+                  onChange={(e) => {
+                    setImportJsonText(e.target.value);
+                    setImportError(null);
+                  }}
+                  rows={5}
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="mt-2"
+                  disabled={!importJsonValid}
+                  onClick={onLoadParams}
+                >
+                  Load Params
+                </Button>
+                {importError && (
+                  <p className="text-xs text-destructive mt-1">{importError}</p>
+                )}
+              </details>
+
+              <details className="border rounded-md p-2">
+                <summary className="text-[11px] font-medium text-muted-foreground/80 cursor-pointer">
+                  Compare decoders
+                </summary>
+                <p className="text-[10px] text-muted-foreground mt-1">
+                  Load a DNG to compare libraw-wasm (client) vs server LibRaw side-by-side.
+                </p>
+                <input
+                  ref={compareInputRef}
+                  type="file"
+                  accept=".dng,image/x-adobe-dng,image/dng"
+                  onChange={onCompareDecodersPick}
+                  className="hidden"
+                  aria-hidden
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="mt-2"
+                  onClick={() => compareInputRef.current?.click()}
+                  disabled={compareLoading}
+                >
+                  {compareLoading ? "Decoding…" : "Load DNG to compare"}
+                </Button>
+                {compareError && (
+                  <p className="text-xs text-destructive mt-1">{compareError}</p>
+                )}
+                {(compareWasmUrl || compareServerUrl) && !compareLoading && (
+                  <div className="grid grid-cols-2 gap-2 mt-2">
+                    <div className="space-y-1">
+                      <p className="text-[10px] font-medium text-muted-foreground">
+                        libraw-wasm
+                      </p>
+                      {compareWasmUrl && (
+                        /* eslint-disable-next-line @next/next/no-img-element */
+                        <img
+                          src={compareWasmUrl}
+                          alt="libraw-wasm decode"
+                          className="w-full max-h-32 object-contain rounded border"
+                        />
+                      )}
+                    </div>
+                    <div className="space-y-1">
+                      <p className="text-[10px] font-medium text-muted-foreground">
+                        Server (LibRaw)
+                      </p>
+                      {compareServerUrl && (
+                        /* eslint-disable-next-line @next/next/no-img-element */
+                        <img
+                          src={compareServerUrl}
+                          alt="Server LibRaw decode"
+                          className="w-full max-h-32 object-contain rounded border"
+                        />
+                      )}
+                    </div>
+                  </div>
+                )}
+              </details>
+
               <Separator />
 
               <section className="flex gap-2 flex-wrap items-center">
@@ -1254,11 +1693,11 @@ export default function LabPage() {
                 </Button>
                 <Button
                   variant="secondary"
-                  onClick={onExport}
-                  disabled={!source || isApplying || isUsingEmbeddings}
+                  onClick={() => void onExport()}
+                  disabled={!source || isApplying || isUsingEmbeddings || isExporting}
                   size="sm"
                 >
-                  Export
+                  {isExporting ? (exportProgress ?? "Exporting…") : "Export full-res"}
                 </Button>
                 <Button
                   variant="outline"

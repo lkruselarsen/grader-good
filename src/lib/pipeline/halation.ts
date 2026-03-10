@@ -1,144 +1,131 @@
 /**
- * Halation stage: highlight fill (bloom/density) — veiling glare, local highlight
- * lift, saturation collapse + glow. Gated to top L percentiles and specular
- * texture-ness; runs on a downscaled mask for stability.
+ * Halation stage: two-component (thin red rim + soft bloom), RAW-aware.
+ * Uses ExposureMap from initial RAW when present; never uses post-match luminance for boundaries.
+ * Tail-weighted (99.99% >> 98%), contrast-gated (highlight vs shadow, not upper vs lower highlight).
  */
 
-import { oklabToSrgb8, srgb8ToOklab } from "./stages/oklab";
-import type { PixelFrameRGBA, PipelineParams } from "./types";
+import {
+  linearRgbToOklab,
+  oklabToLinearRgb,
+  oklabToSrgb8,
+  srgb8ToOklab,
+} from "./stages/oklab";
+import {
+  buildExposureMapFromFloat,
+  buildExposureMapFromSrgb,
+  computeDarkNeighborMap,
+} from "./exposureMap";
+import type { ExposureMap } from "./exposureMap";
+import type { PixelFrameF32, PixelFrameRGBA, PipelineParams } from "./types";
 
-const HIGHLIGHT_PERCENTILE = 0.9; // 0.95 → 0.90 so more pixels get the effect
-const LIFT_AMOUNT = 0.14; // stronger lift at max strength
-const SAT_COLLAPSE = 1.0; // full collapse at max (chroma kept non-negative below)
-const WARMTH_A = 0.08; // stronger warm tint at max strength
-const WARMTH_B = 0.1;
-const DOWNSCALE_FACTOR = 4;
-const MIN_DOWNSCALE_DIM = 64;
-const VARIANCE_KERNEL = 3; // 3x3
-const SPECULAR_SMOOTH = 0.3; // base weight in highlights; 0.7 from variance
+const DEFAULT_TAIL_GAMMA = 4;
+// Radius defaults expressed as % of the image short edge (0–100 scale).
+// Converted to absolute pixels at runtime so the effect is resolution-independent.
+const DEFAULT_RIM_RADIUS_PCT = 0.1;   // 0.1% of short edge ≈ 1px at 1200px
+const DEFAULT_BLOOM_RADIUS_PCT = 1.0; // 1.0% of short edge ≈ 12px at 1200px
+const RIM_WARMTH = 0.15;
+const BLOOM_WARMTH = 0.08;
+const RIM_SAT = 0.5;
+const BLOOM_SAT = 0.2;
 
-function percentileFromSorted(vals: number[], p: number): number {
-  if (vals.length === 0) return 1;
-  const idx = Math.floor(Math.max(0, Math.min(1, p)) * (vals.length - 1));
-  vals.sort((a, b) => a - b);
-  return vals[idx] ?? vals[vals.length - 1] ?? 1;
+// Hard cap: refuse to process frames larger than this to prevent V8 OOM.
+// 36MP supports Leica M10 (24MP) and similar full-res RAWs. Higher resolutions
+// risk tab OOM on low-memory machines.
+const MAX_HALATION_PIXELS = 36_000_000;
+
+function percentileFromSorted(vals: ArrayLike<number>, len: number, p: number): number {
+  if (len === 0) return 1;
+  const idx = Math.min(len - 1, Math.max(0, Math.floor(p * len)));
+  return (vals[idx] as number | undefined) ?? (vals[len - 1] as number | undefined) ?? 1;
 }
 
-/** Box downscale of a Float32 grid. */
-function downscaleL(
-  L: Float32Array,
-  mask: Uint8Array,
-  width: number,
-  height: number
-): { L: Float32Array; mask: Uint8Array; w: number; h: number } {
-  const scale = Math.max(
-    1,
-    Math.min(
-      DOWNSCALE_FACTOR,
-      Math.floor(width / MIN_DOWNSCALE_DIM),
-      Math.floor(height / MIN_DOWNSCALE_DIM)
-    )
-  );
-  const w = Math.max(1, Math.floor(width / scale));
-  const h = Math.max(1, Math.floor(height / scale));
-  const outL = new Float32Array(w * h);
-  const outMask = new Uint8Array(w * h);
-
-  for (let dy = 0; dy < h; dy++) {
-    for (let dx = 0; dx < w; dx++) {
-      let sum = 0;
-      let count = 0;
-      const y0 = dy * scale;
-      const x0 = dx * scale;
-      for (let yy = 0; yy < scale && y0 + yy < height; yy++) {
-        for (let xx = 0; xx < scale && x0 + xx < width; xx++) {
-          const idx = (y0 + yy) * width + (x0 + xx);
-          if (mask[idx]) {
-            sum += L[idx];
-            count++;
-          }
-        }
-      }
-      const outIdx = dy * w + dx;
-      if (count > 0) {
-        outL[outIdx] = sum / count;
-        outMask[outIdx] = 1;
-      }
-    }
-  }
-  return { L: outL, mask: outMask, w, h };
+function srgbToLinear(c8: number): number {
+  const c = c8 / 255;
+  if (c <= 0.04045) return c / 12.92;
+  return ((c + 0.055) / 1.055) ** 2.4;
 }
 
-/** Local variance (3x3 or 5x5) on a grid; returns variance per pixel. */
-function localVariance(
-  L: Float32Array,
-  mask: Uint8Array,
+/** Separable Gaussian blur on Float32Array.
+ * @param sigmaDivisor optional; when present, sigma = radius / sigmaDivisor.
+ *   Default (undefined) uses sigma = radius / 2. Use 3 for bloom to better match
+ *   the user's bloom radius (effective extent ≈ radius at 3 sigma). */
+function gaussianBlur(
+  src: Float32Array,
   width: number,
   height: number,
-  k: number
+  radius: number,
+  sigmaDivisor?: number
 ): Float32Array {
-  const half = (k - 1) >> 1;
-  const out = new Float32Array(L.length);
+  if (radius <= 0) return new Float32Array(src);
+  const out = new Float32Array(src.length);
+  const kSize = radius * 2 + 1;
+  // Use Float32Array instead of number[] to avoid V8 Smi-array GC churn across
+  // many rapid calls in the training loop.
+  const kernel = new Float32Array(kSize);
+  let sum = 0;
+  const sigma = sigmaDivisor != null ? radius / sigmaDivisor : radius / 2;
+  for (let i = 0; i < kSize; i++) {
+    const offset = i - radius;
+    const v = Math.exp(-(offset * offset) / (2 * sigma * sigma));
+    kernel[i] = v;
+    sum += v;
+  }
+  for (let i = 0; i < kSize; i++) kernel[i] /= sum;
+
+  const tmp = new Float32Array(src.length);
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      let sum = 0;
-      let sumSq = 0;
-      let n = 0;
-      for (let dy = -half; dy <= half; dy++) {
-        for (let dx = -half; dx <= half; dx++) {
-          const ny = Math.max(0, Math.min(height - 1, y + dy));
-          const nx = Math.max(0, Math.min(width - 1, x + dx));
-          const idx = ny * width + nx;
-          if (mask[idx]) {
-            const v = L[idx];
-            sum += v;
-            sumSq += v * v;
-            n++;
-          }
-        }
+      let v = 0;
+      for (let dx = -radius; dx <= radius; dx++) {
+        const nx = Math.max(0, Math.min(width - 1, x + dx));
+        v += (src[y * width + nx] ?? 0) * (kernel[dx + radius] ?? 0);
       }
-      const idx = y * width + x;
-      if (n > 1) {
-        const mean = sum / n;
-        const variance = sumSq / n - mean * mean;
-        out[idx] = Math.max(0, variance);
+      tmp[y * width + x] = v;
+    }
+  }
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let v = 0;
+      for (let dy = -radius; dy <= radius; dy++) {
+        const ny = Math.max(0, Math.min(height - 1, y + dy));
+        v += (tmp[ny * width + x] ?? 0) * (kernel[dy + radius] ?? 0);
       }
+      out[y * width + x] = v;
     }
   }
   return out;
 }
 
-/** Bilinear upsample a float grid from (sw,sh) to (width, height). */
-function upsampleBilinear(
-  src: Float32Array,
-  sw: number,
-  sh: number,
+/** Morphological gradient (dilate - erode) on mask; returns edge strength. */
+function morphologicalGradient(
+  mask: Float32Array,
   width: number,
-  height: number
+  height: number,
+  r: number
 ): Float32Array {
-  const out = new Float32Array(width * height);
-  const fx = sw > 1 ? (width - 1) / (sw - 1) : 0;
-  const fy = sh > 1 ? (height - 1) / (sh - 1) : 0;
+  const dilate = new Float32Array(mask.length);
+  const erode = new Float32Array(mask.length);
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      const sx = sw > 1 ? x / fx : 0;
-      const sy = sh > 1 ? y / fy : 0;
-      const x0 = Math.floor(sx);
-      const y0 = Math.floor(sy);
-      const x1 = Math.min(sw - 1, x0 + 1);
-      const y1 = Math.min(sh - 1, y0 + 1);
-      const tx = sx - x0;
-      const ty = sy - y0;
-      const v00 = src[y0 * sw + x0] ?? 0;
-      const v10 = src[y0 * sw + x1] ?? 0;
-      const v01 = src[y1 * sw + x0] ?? 0;
-      const v11 = src[y1 * sw + x1] ?? 0;
-      out[y * width + x] =
-        v00 * (1 - tx) * (1 - ty) +
-        v10 * tx * (1 - ty) +
-        v01 * (1 - tx) * ty +
-        v11 * tx * ty;
+      let maxV = 0;
+      let minV = 1;
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          const ny = Math.max(0, Math.min(height - 1, y + dy));
+          const nx = Math.max(0, Math.min(width - 1, x + dx));
+          const v = mask[ny * width + nx] ?? 0;
+          maxV = Math.max(maxV, v);
+          minV = Math.min(minV, v);
+        }
+      }
+      const idx = y * width + x;
+      dilate[idx] = maxV;
+      erode[idx] = minV;
     }
+  }
+  const out = new Float32Array(mask.length);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = Math.max(0, dilate[i] - erode[i]);
   }
   return out;
 }
@@ -148,116 +135,397 @@ export function halation(
   params: PipelineParams
 ): PixelFrameRGBA {
   const highlightFill = params.grading?.highlightFill;
-  if (
-    !highlightFill ||
-    highlightFill.strength <= 0
-  ) {
+  if (!highlightFill || highlightFill.strength <= 0) {
     return frame;
   }
 
   const { width, height, data } = frame;
   const nPix = width * height;
-  const strength = Math.max(0, Math.min(1, highlightFill.strength));
+
+  // Safety guard: skip halation on oversized frames rather than OOM-crashing V8.
+  // Frames reaching this stage should always be ≤1200px, but if a full-resolution
+  // image slips through (e.g. decodeBuffer resize failure) we degrade gracefully.
+  if (nPix > MAX_HALATION_PIXELS) {
+    console.warn(`[halation] frame too large (${nPix} px > ${MAX_HALATION_PIXELS}), skipping`);
+    return frame;
+  }
+
+  const strength = Math.max(0, Math.min(2, highlightFill.strength));
   const warmth = Math.max(-1, Math.min(1, highlightFill.warmth ?? 0));
+  const tailGamma = Math.max(2, Math.min(6, highlightFill.tailGamma ?? DEFAULT_TAIL_GAMMA));
+  const contrastGate = Math.max(0, Math.min(1, highlightFill.contrastGate ?? 1));
+  const rimStrength = Math.max(0, Math.min(1, highlightFill.rimStrength ?? 0.6));
+  const bloomStrength = Math.max(0, Math.min(1, highlightFill.bloomStrength ?? 0.8));
+  const interiorGuard = Math.max(0, Math.min(1, highlightFill.interiorGuard ?? 0.5));
 
-  const L = new Float32Array(nPix);
-  const a = new Float32Array(nPix);
-  const b = new Float32Array(nPix);
-  const mask = new Uint8Array(nPix);
+  // Radius params are stored as % of short edge (0–100 scale).
+  // Convert to absolute pixels here so the effect is resolution-independent.
+  const shortEdge = Math.min(width, height);
+  const rimRadiusPct = Math.max(0, Math.min(2, highlightFill.rimRadius ?? DEFAULT_RIM_RADIUS_PCT));
+  const bloomRadiusPct = Math.max(0, Math.min(10, highlightFill.bloomRadius ?? DEFAULT_BLOOM_RADIUS_PCT));
+  const rimRadius = Math.max(0, Math.round((rimRadiusPct / 100) * shortEdge));
+  const bloomRadius = Math.max(1, Math.round((bloomRadiusPct / 100) * shortEdge));
 
+  // --- RAW exposure map (hierarchy signal) ---
+  let rawMap: ExposureMap | null = null;
+  if (params.exposureMap && params.exposureMap.width === width && params.exposureMap.height === height) {
+    rawMap = params.exposureMap;
+  }
+  // Fall back: build from sRGB frame (non-RAW sources)
+  const fallbackMap = rawMap ?? buildExposureMapFromSrgb(frame);
+
+  // --- Signal 1: post-grade luminance (trigger gate) ---
+  // Compute linear luminance from the actual graded frame pixels.
+  // This answers "does this area look like a highlight that would cause halation?"
+  const Ypost = new Float32Array(nPix);
+  const postVals = new Float32Array(nPix);
+  let postCount = 0;
   for (let i = 0, pix = 0; i < data.length; i += 4, pix++) {
-    const r = data[i];
-    const g = data[i + 1];
-    const blue = data[i + 2];
-    const alpha = data[i + 3];
-    if (alpha < 128) {
-      mask[pix] = 0;
+    if ((data[i + 3] ?? 0) < 128) continue;
+    const y =
+      0.2126 * srgbToLinear(data[i] ?? 0) +
+      0.7152 * srgbToLinear(data[i + 1] ?? 0) +
+      0.0722 * srgbToLinear(data[i + 2] ?? 0);
+    Ypost[pix] = y;
+    postVals[postCount++] = y;
+  }
+  const postSorted = postVals.subarray(0, postCount);
+  postSorted.sort();
+  const postP98 = percentileFromSorted(postSorted, postCount, 0.98);
+  const postP99_99 = percentileFromSorted(postSorted, postCount, 0.9999);
+  const postSpan = Math.max(1e-6, postP99_99 - postP98);
+
+  // --- Contrast gate: dark-neighbor map from graded luminance ---
+  const Dgraded = computeDarkNeighborMap(Ypost, width, height);
+
+  // --- Signal 2: RAW percentile rank (hierarchy modifier) ---
+  // Answers "how extreme was this highlight in the original capture?"
+  // Used to scale W up/down relative to other triggered pixels — not as a trigger gate.
+  const { Y: Yraw, p98: rawP98, p99_99: rawP99_99 } = fallbackMap;
+  const rawSpan = Math.max(1e-6, rawP99_99 - rawP98);
+
+  const W = new Float32Array(nPix);
+
+  for (let i = 0; i < nPix; i++) {
+    const yPost = Ypost[i] ?? 0;
+    // Gate: must look like a highlight in the post-grade image
+    if (yPost <= postP98) {
+      W[i] = 0;
       continue;
     }
-    mask[pix] = 1;
-    const lab = srgb8ToOklab(r, g, blue);
-    L[pix] = lab.L;
-    a[pix] = lab.a;
-    b[pix] = lab.b;
-  }
+    // Base weight from post-grade tail curve
+    const wPost = Math.pow(Math.min(1, (yPost - postP98) / postSpan), tailGamma);
 
-  const { L: LDown, mask: maskDown, w: sw, h: sh } = downscaleL(
-    L,
-    mask,
-    width,
-    height
-  );
+    // Post-grade percentile rank: drives halation strength for lifted highlights.
+    const postRank = Math.min(1, (yPost - postP98) / postSpan);
+    const postMod = 0.3 + 1.2 * postRank;
 
-  const opaque: number[] = [];
-  for (let i = 0; i < LDown.length; i++) {
-    if (maskDown[i]) opaque.push(LDown[i]);
-  }
-  const p95 = percentileFromSorted(opaque, HIGHLIGHT_PERCENTILE);
-  const L_hi = Math.max(0.75, p95);
-
-  const varianceDown = localVariance(LDown, maskDown, sw, sh, VARIANCE_KERNEL);
-  let maxVar = 0;
-  for (let i = 0; i < varianceDown.length; i++) {
-    if (maskDown[i] && LDown[i] >= L_hi) {
-      if (varianceDown[i] > maxVar) maxVar = varianceDown[i];
+    // RAW hierarchy boost: extreme RAW highlights (3 stops over) get more halation
+    // than moderate ones; pixels below rawP98 get no boost (rawBoost = 1).
+    let rawBoost = 1.0;
+    if (rawMap !== null) {
+      const yRaw = Yraw[i] ?? 0;
+      if (yRaw > rawP98) {
+        const rawRank = Math.min(1, (yRaw - rawP98) / rawSpan);
+        rawBoost = 1.0 + 0.5 * rawRank;
+      }
     }
-  }
-  const varScale = maxVar > 1e-6 ? 1 / maxVar : 0;
 
-  const weightDown = new Float32Array(sw * sh);
-  for (let i = 0; i < weightDown.length; i++) {
-    if (!maskDown[i] || LDown[i] <= L_hi) {
-      weightDown[i] = 0;
-      continue;
-    }
-    const normVar = Math.min(1, varianceDown[i] * varScale);
-    weightDown[i] = SPECULAR_SMOOTH + (1 - SPECULAR_SMOOTH) * normVar;
+    const effectiveMod = postMod * rawBoost;
+    W[i] = Math.min(1, wPost * effectiveMod);
   }
 
-  const weightFull = upsampleBilinear(weightDown, sw, sh, width, height);
+  let dMax = 1e-6;
+  for (let i = 0; i < Dgraded.length; i++) {
+    const v = Dgraded[i];
+    if (v !== undefined && v > dMax) dMax = v;
+  }
+  const gate = new Float32Array(nPix);
+  for (let i = 0; i < nPix; i++) {
+    const d = Dgraded[i] ?? 0;
+    gate[i] = contrastGate * Math.min(1, d / dMax);
+  }
+
+  // Edge-proximity falloff: halation drops to zero beyond bloom radius from edges.
+  const gateBlurred = gaussianBlur(gate, width, height, bloomRadius, 3);
+  let gateMax = 1e-6;
+  for (let i = 0; i < gateBlurred.length; i++) {
+    const v = gateBlurred[i];
+    if (v !== undefined && v > gateMax) gateMax = v;
+  }
+
+  const rimMask = morphologicalGradient(W, width, height, rimRadius);
+  let rimMax = 1e-6;
+  for (let i = 0; i < rimMask.length; i++) {
+    const v = rimMask[i];
+    if (v !== undefined && v > rimMax) rimMax = v;
+  }
+  const rimBlurred = gaussianBlur(rimMask, width, height, rimRadius);
+
+  // Compute bloomMask inline into a Float32Array rather than allocating a separate
+  // intermediate array — saves one nPix Float32Array allocation (~3.8 MB at 1200×800).
+  const bloomMask = new Float32Array(nPix);
+  for (let i = 0; i < nPix; i++) {
+    bloomMask[i] = (W[i] ?? 0) * (gate[i] ?? 0);
+  }
+  const bloomBlurred = gaussianBlur(bloomMask, width, height, bloomRadius, 3);
+
+  const rimW = strength * rimStrength * (0.5 + 0.5 * warmth);
+  const bloomW = strength * bloomStrength * (0.5 + 0.5 * warmth);
 
   const out = new Uint8ClampedArray(data.length);
+
+  // Compute OKLab inline per pixel rather than pre-materializing three nPix-sized
+  // L/a/b Float32Arrays (~11.4 MB at 1200×800). Only pixels with nonzero halation
+  // energy need the OKLab conversion, so this also skips the conversion for the
+  // majority of pixels that receive no contribution.
   for (let pix = 0; pix < nPix; pix++) {
     const srcOff = pix * 4;
     out[srcOff + 3] = data[srcOff + 3];
-
-    if (!mask[pix]) {
+    if ((data[srcOff + 3] ?? 0) < 128) {
       out[srcOff] = data[srcOff];
       out[srcOff + 1] = data[srcOff + 1];
       out[srcOff + 2] = data[srcOff + 2];
       continue;
     }
 
-    const effectW = Math.min(1, strength * weightFull[pix]);
-    if (effectW <= 1e-6) {
+    let rimContrib = rimBlurred[pix] ?? 0;
+    let bloomContrib = bloomBlurred[pix] ?? 0;
+
+    const interiorFactor =
+      interiorGuard > 0 && rimMax >= 1e-6
+        ? 1 - interiorGuard * (1 - Math.min(1, (rimMask[pix] ?? 0) / rimMax))
+        : 1;
+    rimContrib *= interiorFactor;
+    bloomContrib *= interiorFactor;
+
+    const edgeProximity =
+      gateMax >= 1e-6 ? Math.min(1, (gateBlurred[pix] ?? 0) / gateMax) : 0;
+    rimContrib *= edgeProximity;
+    bloomContrib *= edgeProximity;
+
+    // Pass through pixels that receive no halation energy at all.
+    // Crucially, shadow/midtone pixels adjacent to highlights will have nonzero
+    // rimContrib/bloomContrib from the blur — that is exactly where real halation
+    // appears (photons scattered into the dark neighbor, not back into the highlight).
+    if (rimContrib < 1e-5 && bloomContrib < 1e-5) {
       out[srcOff] = data[srcOff];
       out[srcOff + 1] = data[srcOff + 1];
       out[srcOff + 2] = data[srcOff + 2];
       continue;
     }
 
-    let Lp = L[pix] + effectW * LIFT_AMOUNT;
-    let ap = a[pix] + effectW * warmth * WARMTH_A;
-    let bp = b[pix] + effectW * warmth * WARMTH_B;
+    const lab = srgb8ToOklab(data[srcOff] ?? 0, data[srcOff + 1] ?? 0, data[srcOff + 2] ?? 0);
+    let da = rimContrib * rimW * RIM_SAT * 0.1 * warmth + bloomContrib * bloomW * BLOOM_SAT * 0.05 * warmth;
+    let db = rimContrib * rimW * RIM_SAT * 0.15 * warmth + bloomContrib * bloomW * BLOOM_SAT * 0.1 * warmth;
 
-    const C = Math.sqrt(ap * ap + bp * bp);
-    if (C > 1e-6) {
-      const Cnew = Math.max(0, C * (1 - effectW * Math.min(1, SAT_COLLAPSE)));
-      const ratio = Cnew / C;
-      ap *= ratio;
-      bp *= ratio;
-    }
+    // Luminance-based chromatic gate: avoid tinting pure white/clipped highlights.
+    const whitePreserve =
+      lab.L > 0.92 ? Math.max(0, 1 - (lab.L - 0.92) / 0.08) : 1;
+    da *= whitePreserve;
+    db *= whitePreserve;
 
-    Lp = Math.max(0, Math.min(1, Lp));
+    const dL = rimContrib * rimW * RIM_WARMTH * 0.1 + bloomContrib * bloomW * BLOOM_WARMTH * 0.15;
+    const Lp = Math.max(0, Math.min(1, lab.L + dL));
+    const ap = lab.a + da;
+    const bp = lab.b + db;
+
     const rgb = oklabToSrgb8(Lp, ap, bp);
     out[srcOff] = Math.max(0, Math.min(255, Math.round(rgb.r)));
     out[srcOff + 1] = Math.max(0, Math.min(255, Math.round(rgb.g)));
     out[srcOff + 2] = Math.max(0, Math.min(255, Math.round(rgb.b)));
   }
 
-  return {
-    width,
-    height,
-    data: out,
-  };
+  return { width, height, data: out };
+}
+
+/**
+ * Halation stage for linear float input. Same logic as halation but uses
+ * linearRgbToOklab/oklabToLinearRgb. Returns PixelFrameF32.
+ */
+export function halationFloat(
+  frame: PixelFrameF32,
+  params: PipelineParams
+): PixelFrameF32 {
+  const highlightFill = params.grading?.highlightFill;
+  if (!highlightFill || highlightFill.strength <= 0) {
+    return frame;
+  }
+
+  const { width, height, data } = frame;
+  const nPix = width * height;
+
+  if (nPix > MAX_HALATION_PIXELS) {
+    console.warn(
+      `[halation] frame too large (${nPix} px > ${MAX_HALATION_PIXELS}), skipping`
+    );
+    return frame;
+  }
+
+  const strength = Math.max(0, Math.min(2, highlightFill.strength));
+  const warmth = Math.max(-1, Math.min(1, highlightFill.warmth ?? 0));
+  const tailGamma = Math.max(2, Math.min(6, highlightFill.tailGamma ?? DEFAULT_TAIL_GAMMA));
+  const contrastGate = Math.max(0, Math.min(1, highlightFill.contrastGate ?? 1));
+  const rimStrength = Math.max(0, Math.min(1, highlightFill.rimStrength ?? 0.6));
+  const bloomStrength = Math.max(0, Math.min(1, highlightFill.bloomStrength ?? 0.8));
+  const interiorGuard = Math.max(0, Math.min(1, highlightFill.interiorGuard ?? 0.5));
+
+  const shortEdge = Math.min(width, height);
+  const rimRadiusPct = Math.max(0, Math.min(2, highlightFill.rimRadius ?? DEFAULT_RIM_RADIUS_PCT));
+  const bloomRadiusPct = Math.max(0, Math.min(10, highlightFill.bloomRadius ?? DEFAULT_BLOOM_RADIUS_PCT));
+  const rimRadius = Math.max(0, Math.round((rimRadiusPct / 100) * shortEdge));
+  const bloomRadius = Math.max(1, Math.round((bloomRadiusPct / 100) * shortEdge));
+
+  let rawMap: ExposureMap | null = null;
+  if (params.exposureMap && params.exposureMap.width === width && params.exposureMap.height === height) {
+    rawMap = params.exposureMap;
+  }
+  const fallbackMap = rawMap ?? buildExposureMapFromFloat(frame);
+
+  const Ypost = new Float32Array(nPix);
+  const postVals = new Float32Array(nPix);
+  let postCount = 0;
+  for (let i = 0, pix = 0; i < data.length; i += 4, pix++) {
+    const a = data[i + 3] ?? 0;
+    if (a < 0.5) continue;
+    const r = data[i] ?? 0;
+    const g = data[i + 1] ?? 0;
+    const b = data[i + 2] ?? 0;
+    const y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    Ypost[pix] = y;
+    postVals[postCount++] = y;
+  }
+  const postSorted = postVals.subarray(0, postCount);
+  postSorted.sort();
+  const postP98 = percentileFromSorted(postSorted, postCount, 0.98);
+  const postP99_99 = percentileFromSorted(postSorted, postCount, 0.9999);
+  const postSpan = Math.max(1e-6, postP99_99 - postP98);
+
+  const Dgraded = computeDarkNeighborMap(Ypost, width, height);
+
+  const { Y: Yraw, p98: rawP98, p99_99: rawP99_99 } = fallbackMap;
+  const rawSpan = Math.max(1e-6, rawP99_99 - rawP98);
+
+  const W = new Float32Array(nPix);
+
+  for (let i = 0; i < nPix; i++) {
+    const yPost = Ypost[i] ?? 0;
+    if (yPost <= postP98) {
+      W[i] = 0;
+      continue;
+    }
+    const wPost = Math.pow(Math.min(1, (yPost - postP98) / postSpan), tailGamma);
+    const postRank = Math.min(1, (yPost - postP98) / postSpan);
+    const postMod = 0.3 + 1.2 * postRank;
+    let rawBoost = 1.0;
+    if (rawMap !== null) {
+      const yRaw = Yraw[i] ?? 0;
+      if (yRaw > rawP98) {
+        const rawRank = Math.min(1, (yRaw - rawP98) / rawSpan);
+        rawBoost = 1.0 + 0.5 * rawRank;
+      }
+    }
+    W[i] = Math.min(1, wPost * postMod * rawBoost);
+  }
+
+  let dMax = 1e-6;
+  for (let i = 0; i < Dgraded.length; i++) {
+    const v = Dgraded[i];
+    if (v !== undefined && v > dMax) dMax = v;
+  }
+  const gate = new Float32Array(nPix);
+  for (let i = 0; i < nPix; i++) {
+    gate[i] = contrastGate * Math.min(1, (Dgraded[i] ?? 0) / dMax);
+  }
+
+  const gateBlurred = gaussianBlur(gate, width, height, bloomRadius, 3);
+  let gateMax = 1e-6;
+  for (let i = 0; i < gateBlurred.length; i++) {
+    const v = gateBlurred[i];
+    if (v !== undefined && v > gateMax) gateMax = v;
+  }
+
+  const rimMask = morphologicalGradient(W, width, height, rimRadius);
+  let rimMax = 1e-6;
+  for (let i = 0; i < rimMask.length; i++) {
+    const v = rimMask[i];
+    if (v !== undefined && v > rimMax) rimMax = v;
+  }
+  const rimBlurred = gaussianBlur(rimMask, width, height, rimRadius);
+
+  const bloomMask = new Float32Array(nPix);
+  for (let i = 0; i < nPix; i++) {
+    bloomMask[i] = (W[i] ?? 0) * (gate[i] ?? 0);
+  }
+  const bloomBlurred = gaussianBlur(bloomMask, width, height, bloomRadius, 3);
+
+  const rimW = strength * rimStrength * (0.5 + 0.5 * warmth);
+  const bloomW = strength * bloomStrength * (0.5 + 0.5 * warmth);
+
+  const out = new Float32Array(data.length);
+
+  for (let pix = 0; pix < nPix; pix++) {
+    const srcOff = pix * 4;
+    out[srcOff + 3] = data[srcOff + 3] ?? 1;
+    const a = data[srcOff + 3] ?? 0;
+    if (a < 0.5) {
+      out[srcOff] = data[srcOff] ?? 0;
+      out[srcOff + 1] = data[srcOff + 1] ?? 0;
+      out[srcOff + 2] = data[srcOff + 2] ?? 0;
+      continue;
+    }
+
+    let rimContrib = rimBlurred[pix] ?? 0;
+    let bloomContrib = bloomBlurred[pix] ?? 0;
+
+    const interiorFactor =
+      interiorGuard > 0 && rimMax >= 1e-6
+        ? 1 - interiorGuard * (1 - Math.min(1, (rimMask[pix] ?? 0) / rimMax))
+        : 1;
+    rimContrib *= interiorFactor;
+    bloomContrib *= interiorFactor;
+
+    const edgeProximity =
+      gateMax >= 1e-6 ? Math.min(1, (gateBlurred[pix] ?? 0) / gateMax) : 0;
+    rimContrib *= edgeProximity;
+    bloomContrib *= edgeProximity;
+
+    if (rimContrib < 1e-5 && bloomContrib < 1e-5) {
+      out[srcOff] = data[srcOff] ?? 0;
+      out[srcOff + 1] = data[srcOff + 1] ?? 0;
+      out[srcOff + 2] = data[srcOff + 2] ?? 0;
+      continue;
+    }
+
+    const lab = linearRgbToOklab(
+      data[srcOff] ?? 0,
+      data[srcOff + 1] ?? 0,
+      data[srcOff + 2] ?? 0
+    );
+    let da =
+      rimContrib * rimW * RIM_SAT * 0.1 * warmth +
+      bloomContrib * bloomW * BLOOM_SAT * 0.05 * warmth;
+    let db =
+      rimContrib * rimW * RIM_SAT * 0.15 * warmth +
+      bloomContrib * bloomW * BLOOM_SAT * 0.1 * warmth;
+
+    const whitePreserve =
+      lab.L > 0.92 ? Math.max(0, 1 - (lab.L - 0.92) / 0.08) : 1;
+    da *= whitePreserve;
+    db *= whitePreserve;
+
+    const dL =
+      rimContrib * rimW * RIM_WARMTH * 0.1 +
+      bloomContrib * bloomW * BLOOM_WARMTH * 0.15;
+    const Lp = Math.max(0, Math.min(1, lab.L + dL));
+    const ap = lab.a + da;
+    const bp = lab.b + db;
+
+    const rgb = oklabToLinearRgb(Lp, ap, bp);
+    out[srcOff] = Math.max(0, Math.min(1, rgb.r));
+    out[srcOff + 1] = Math.max(0, Math.min(1, rgb.g));
+    out[srcOff + 2] = Math.max(0, Math.min(1, rgb.b));
+  }
+
+  return { width, height, data: out };
 }

@@ -3,12 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --webpack",
+    "dev": "NODE_OPTIONS='--max-old-space-size=8192' next dev --webpack",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
     "learn:heuristics": "node scripts/update-heuristics.mjs",
-    "postinstall": "node scripts/patch-dcraw.js"
+    "postinstall": "node scripts/patch-dcraw.js && node scripts/copy-libraw-wasm.js"
   },
   "dependencies": {
     "@huggingface/transformers": "^3.8.1",
@@ -16,6 +16,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "dcraw": "^1.0.3",
+    "lightdrift-libraw": "^1.0.0-alpha.3",
     "libraw-wasm": "^1.1.2",
     "lucide-react": "^0.563.0",
     "next": "16.1.6",

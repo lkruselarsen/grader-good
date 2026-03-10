@@ -2,7 +2,7 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   /** Don't bundle dcraw so runtime patch (const→let) is loaded from node_modules. */
-  serverExternalPackages: ["dcraw"],
+  serverExternalPackages: ["dcraw", "libraw-wasm", "lightdrift-libraw"],
   /**
    * Enable async WebAssembly for webpack builds so libraw-wasm can run.
    * Turbopack ignores this and handles WASM automatically.
@@ -12,6 +12,10 @@ const nextConfig: NextConfig = {
       ...(config.experiments || {}),
       asyncWebAssembly: true,
     };
+    // libraw-wasm em-pthread chunks cause webpack's gzip filesystem cache to
+    // attempt a ~169M-element array allocation, crashing V8 with
+    // "Fatal JavaScript invalid size error 169220804". Switch to memory cache.
+    config.cache = { type: "memory" };
     return config;
   },
   /**

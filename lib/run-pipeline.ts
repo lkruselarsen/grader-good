@@ -7,13 +7,15 @@ import type { LookParams, LookParamsGrading } from "./look-params";
 import { engineToGrading, DEFAULT_LOOK_PARAMS } from "./look-params";
 import { buildEngineParamsFromLookParams } from "./build-engine-params";
 import {
-  processOne,
+  processFramesFloat,
   exportToCanvas,
   frameToImageData,
-  decode,
-  computeImageStats,
+  buildExposureMapFromFloat,
+  computeImageStatsFromFloat,
+  pixelFrameF32ToPixelFrameRGBA,
   type ImageStats,
 } from "@/src/lib/pipeline";
+import { decode, decodeToLinearFloat } from "@/src/lib/pipeline/decode";
 import { fitLookParamsFromReference } from "@/src/lib/pipeline/stages/match";
 
 const MAX_PREVIEW_EDGE = 1600;
@@ -103,6 +105,61 @@ export async function exportBaselinePngBlob(
   });
 }
 
+/**
+ * Run the full pipeline at the source's native resolution (no MAX_PREVIEW_EDGE cap)
+ * and return the graded result as a PNG Blob. Use for the Export button.
+ */
+export async function exportGradedPngBlob(
+  sourceFile: File,
+  referenceFile: File | null,
+  params: LookParams,
+  options?: RunPipelineOptions
+): Promise<Blob> {
+  const onProgress = options?.onProgress;
+
+  onProgress?.("Decoding…");
+  const decodedSource = await decodeToLinearFloat(sourceFile);
+  const decodedRef = referenceFile ? await decodeToLinearFloat(referenceFile) : null;
+  const exposureMap = buildExposureMapFromFloat(decodedSource);
+
+  let finalGrading: LookParamsGrading;
+  if (decodedRef) {
+    finalGrading = engineToGrading(fitLookParamsFromReference(decodedRef));
+  } else {
+    finalGrading = params?.grading ?? DEFAULT_LOOK_PARAMS.grading;
+  }
+
+  onProgress?.("Applying grade…");
+  const engineWithMatch = buildEngineParamsFromLookParams(params, finalGrading);
+  const resultFloat = processFramesFloat(decodedSource, decodedRef, {
+    strength: 1,
+    grading: engineWithMatch,
+    exposureMap,
+  });
+
+  onProgress?.("Encoding PNG…");
+  const result = pixelFrameF32ToPixelFrameRGBA(resultFloat);
+  const canvas = document.createElement("canvas");
+  canvas.width = result.width;
+  canvas.height = result.height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Could not get 2D context for export");
+  ctx.putImageData(frameToImageData(result), 0, 0);
+
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) {
+          reject(new Error("Failed to encode graded PNG"));
+          return;
+        }
+        resolve(blob);
+      },
+      "image/png"
+    );
+  });
+}
+
 export interface RunPipelineOptions {
   /** Called at each phase so the UI can show progress (e.g. "Decoding…", "Applying grade…"). */
   onProgress?: (phase: string) => void;
@@ -125,23 +182,20 @@ export async function runPipeline(
   const onProgress = options?.onProgress;
 
   onProgress?.("Decoding…");
-  const decodedSource = await decode(sourceFile);
-  const sourceStats = computeImageStats(frameToImageData(decodedSource));
-  const decodedRef = referenceFile ? await decode(referenceFile) : null;
+  const decodedSource = await decodeToLinearFloat(sourceFile);
+  const decodedRef = referenceFile ? await decodeToLinearFloat(referenceFile) : null;
+  const sourceStats = computeImageStatsFromFloat(decodedSource);
   const refStats = decodedRef
-    ? computeImageStats(frameToImageData(decodedRef))
+    ? computeImageStatsFromFloat(decodedRef)
     : undefined;
+
+  const exposureMap = buildExposureMapFromFloat(decodedSource);
 
   let finalGrading: LookParamsGrading;
   let fittedGrading: LookParams["grading"] | undefined;
 
   if (decodedRef) {
-    const refImageData = new ImageData(
-      new Uint8ClampedArray(decodedRef.data),
-      decodedRef.width,
-      decodedRef.height
-    );
-    const engineParams = fitLookParamsFromReference(refImageData);
+    const engineParams = fitLookParamsFromReference(decodedRef);
     fittedGrading = engineToGrading(engineParams);
     finalGrading = fittedGrading;
   } else {
@@ -150,10 +204,12 @@ export async function runPipeline(
 
   onProgress?.("Applying grade…");
   const engineWithMatch = buildEngineParamsFromLookParams(params, finalGrading);
-  const result = await processOne(decodedSource, decodedRef, {
+  const resultFloat = processFramesFloat(decodedSource, decodedRef, {
     strength: 1,
     grading: engineWithMatch,
+    exposureMap,
   });
+  const result = pixelFrameF32ToPixelFrameRGBA(resultFloat);
 
   const ret: RunPipelineResult = {
     ...(fittedGrading && { fittedGrading }),

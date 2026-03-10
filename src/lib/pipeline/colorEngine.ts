@@ -6,11 +6,12 @@
 
 import {
   applyLook,
+  applyLookFloat,
   defaultLookParams,
   fitLookParamsFromReference,
   type LookParams,
 } from "./stages/match";
-import type { PixelFrameRGBA, PipelineParams } from "./types";
+import type { PixelFrameF32, PixelFrameRGBA, PipelineParams } from "./types";
 
 /** Convert PixelFrameRGBA to ImageData (same layout: width, height, RGBA). */
 function frameToImageData(frame: PixelFrameRGBA): ImageData {
@@ -49,14 +50,62 @@ export function apply(
   const strength = params.strength ?? 1;
   const sourceImageData = frameToImageData(source);
 
-  const lookParams: LookParams =
+  const baseLook =
     params.grading ??
     (reference
       ? fitLookParamsFromReference(frameToImageData(reference))
       : defaultLookParams());
+  const lookParams: LookParams =
+    params.colorBandAnchors && params.colorBandAnchors.length === 5
+      ? { ...baseLook, colorBandAnchors: params.colorBandAnchors }
+      : baseLook;
 
   const gradedImageData = applyLook(sourceImageData, lookParams);
   const blended = blend(source.data, gradedImageData.data, strength);
+
+  return {
+    width: source.width,
+    height: source.height,
+    data: blended,
+  };
+}
+
+/** Blend source and graded by strength in linear space. */
+function blendFloat(
+  src: Float32Array,
+  graded: Float32Array,
+  strength: number
+): Float32Array {
+  const out = new Float32Array(src.length);
+  const s = Math.max(0, Math.min(1, strength));
+  for (let i = 0; i < src.length; i++) {
+    out[i] = (1 - s) * src[i] + s * graded[i];
+  }
+  return out;
+}
+
+/**
+ * Apply OKLab color grading in linear float space.
+ * Uses fitLookParamsFromReference (supports PixelFrameF32) and applyLookFloat.
+ */
+export function applyFloat(
+  source: PixelFrameF32,
+  reference: PixelFrameF32 | null,
+  params: PipelineParams
+): PixelFrameF32 {
+  const strength = params.strength ?? 1;
+  const baseLook =
+    params.grading ??
+    (reference
+      ? fitLookParamsFromReference(reference)
+      : defaultLookParams());
+  const lookParams: LookParams =
+    params.colorBandAnchors && params.colorBandAnchors.length === 5
+      ? { ...baseLook, colorBandAnchors: params.colorBandAnchors }
+      : baseLook;
+
+  const graded = applyLookFloat(source, lookParams);
+  const blended = blendFloat(source.data, graded.data, strength);
 
   return {
     width: source.width,

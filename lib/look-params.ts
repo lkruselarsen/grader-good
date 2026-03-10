@@ -126,6 +126,20 @@ export interface LookParamsMatch {
   highlightFillStrength: number;
   /** Optional highlight fill warmth (-1..1). Small warm tint in affected highlights. */
   highlightFillWarmth?: number;
+  /** Halation tail gamma (2–6). Steeper = stronger in ultra-highlights (99.99%) vs lower (98%). */
+  halationTailGamma?: number;
+  /** Halation contrast gate (0–1). Dark-neighbor gating: highlight vs shadow, not upper vs lower highlight. */
+  halationContrastGate?: number;
+  /** Halation rim strength (0–1). Thin red edge component. */
+  halationRimStrength?: number;
+  /** Halation bloom strength (0–1). Soft halo component. */
+  halationBloomStrength?: number;
+  /** Halation rim radius (% of image short edge, 0–2). Resolution-independent. */
+  halationRimRadius?: number;
+  /** Halation bloom radius (% of image short edge, 0–10). Resolution-independent. */
+  halationBloomRadius?: number;
+  /** Halation interior guard (0–1). Attenuate halation in highlight cores; 0=off, 0.5=default. */
+  halationInteriorGuard?: number;
   /** Refraction: shadow wheel (6 nodes: red, yellow, green, teal, blue, purple). Each node { hue: 0..360°, sat: 0..3 }. */
   refractionShadow?: RefractionWheel;
   /** Refraction: highlight wheel. Same shape. */
@@ -230,8 +244,8 @@ export const DEFAULT_LOOK_PARAMS: LookParams = {
     exposureStrength: 1.11,
     // Film-like defaults: slightly lifted but deep blacks so training and
     // heuristics start closer to typical references.
-    blackStrength: 5.5,
-    blackRange: 0.6,
+    blackStrength: 6.3,
+    blackRange: 0.7,
     blackPoint: 0.01,
     bandLowerShadow: 1,
     bandUpperShadow: 1,
@@ -253,8 +267,15 @@ export const DEFAULT_LOOK_PARAMS: LookParams = {
     bandMidLuma: 0,
     bandLowerHighLuma: 0,
     bandUpperHighLuma: 0,
-    highlightFillStrength: 0,
-    highlightFillWarmth: 0,
+    highlightFillStrength: 1.6,
+    highlightFillWarmth: 0.6,
+    halationTailGamma: 4,
+    halationContrastGate: 1,
+    halationRimStrength: 0.6,
+    halationBloomStrength: 0.8,
+    halationRimRadius: 0.1,
+    halationBloomRadius: 1.0,
+    halationInteriorGuard: 0.5,
     // Default actuance is slightly on so local contrast is visible by default.
     actuanceStrength: 1,
     actuanceRadius: 2,
