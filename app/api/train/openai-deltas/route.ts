@@ -9,6 +9,7 @@ import { NextResponse } from "next/server";
 import {
   parseJsonDeltas,
   filterPhaseDeltas,
+  filterPhaseDeltasModel2,
 } from "@/lib/apply-grading-deltas";
 
 const OPENAI_SYSTEM_PROMPT = `
@@ -43,15 +44,15 @@ const PHASE_PROMPTS: Record<
 
 Parameters (adjust only these):
 - exposureStrength (0–1.5): toward simplified reference exposure.
-- exposureCurve.L_out_0 … L_out_6: L_out_0 = blackpoint, only decrease (0–1), never lift. L_out_1–6 (0–2) = exposure multipliers; 1 = neutral, >1 brightens, <1 darkens. EV: 1 = 0 EV, 1.4≈+0.5 EV, 0.7≈−0.5 EV.
-- blackPoint (0–0.2), blackRange (0.3–1.8), blackStrength (5–8): shadow depth.
+- exposureCurve.L_out_0 … L_out_6: L_out_0 = blackpoint (0–1). L_out_1–6 (0–2) = exposure multipliers; 1 = neutral, >1 brightens, <1 darkens. EV: 1 = 0 EV, 1.4≈+0.5 EV, 0.7≈−0.5 EV.
+- blackPoint (0–REF_BLACK_L), blackRange (0.3–1.8), blackStrength (0.5–8): shadow depth. refBlackL from reference; blackPoint overrides when set.
 - bandLowerShadowLuma … bandUpperHighLuma (-0.2–0.2): per-band tone nudge.
 
 Return JSON of deltas only. Omit keys for no change.`,
   2: `Phase 2: Overall contrast only.
 
-Parameters: contrastCurve.values_0 … values_6 (-5 to +5). Filmic curve: H0 darkest shadows, H6 brightest highlights. Negative = deeper density, positive = bleach-bypass feel. Default no-change: [-5,-3.5,-1.75,0,1.75,3.5,5]. Also: bandLowerShadowLuma (only decrease, never lift), exposureCurve.L_out_0 (only decrease, never lift), blackStrength (5–8).
-If blacks are too gray: Decrease bandLowerShadowLuma and exposureCurve.L_out_0. And increase blackStrength.
+Parameters: contrastCurve.values_0 … values_6 (-5 to +5). Filmic curve: H0 darkest shadows, H6 brightest highlights. Negative = deeper density, positive = bleach-bypass feel. Default no-change: [-5,-3.5,-1.75,0,1.75,3.5,5]. Also: bandLowerShadowLuma, exposureCurve.L_out_0, blackStrength (0.5–8).
+
 Return JSON of deltas only. Omit keys for no change.`,
   3: `Phase 3: Color density curve only.
 
@@ -60,10 +61,12 @@ Parameters: colorDensityCurve.scale_0 … scale_6 (0.2–2.5). Per-tonal-region 
 Return JSON of deltas only. Omit keys for no change.`,
   4: `Phase 4: Overall grading (hue/temp) only. Film reference may have split colors (highlights vs shadows).
 
-Parameters: colorStrength (0–1.8), bandMidTemp (-1–1), bandMidHue (-1–1), bandMidSat. Per-band temp: −1≈7500K cool, +1≈4000K warm; ±0.1≈±200K. Per-band hue: −1=−30°, +1=+30°; 0°=red, 120°=green, 240°=blue.
+Parameters: colorStrength (0–1.8), bandMidTemp (-1–1), bandMidHue (-1–1), bandMidSat. Per-band hue: −1=−30°, +1=+30°; 0°=red, 120°=green, 240°=blue.
 
 Return JSON of deltas only. Omit keys for no change.`,
   5: `Phase 5: Per-band grading only. Film has unique color separation. Watch for individual objects' colors not matching reference.
+
+Distinguish halation warmth (bloom/glow around bright edges) from per-band highlight color. Band highlight controls affect the color of bright tones; do not push warmth if the reference's highlight warmth is from halation, not local color.
 
 Parameters: bandLowerShadow*, bandUpperShadow*, bandLowerHigh*, bandUpperHigh* (Hue, Sat, Temp only — no Luma). Hue: + = clockwise, − = counter-clockwise. Temp: − = cooler, + = warmer. Use bands to target shadows vs mids vs highlights.
 
@@ -75,7 +78,7 @@ Parameters: refractionShadow.<color>.hue (0–360), .sat (0–3); refractionHigh
 Return JSON of deltas only. Omit keys for no change.`,
   7: `Phase 7: Actuance only. Microcontrast and sharpness.
 
-Parameters: actuanceStrength (0.75–3): higher = stronger crispness. actuanceRadius (0.5–5): lower = fine detail only, higher = coarser structures.
+Parameters: actuanceStrength (0.75–3): higher = stronger crispness. actuanceRadius (0.5–5): lower = fine detail only, higher = coarser structures. actuanceHighlightGuard (0.5–0.9, default 0.65): L above which actuance is suppressed to avoid dark strokes at shadow–highlight edges. actuanceHighlightGuardFloor (0.2–0.75, default 0.5): L below which actuance is full; ramps to zero at highlight guard. Lower = wider transition. actuanceHighlightMinSize (0.002–0.02, default 0.005): fraction of shortest edge; highlights in regions smaller than this are drowned out. Lower = more small highlights get actuance.
 
 Return JSON of deltas only. Omit keys for no change.`,
   8: `Phase 8: Halation only. Highlight bloom and rim.
@@ -85,9 +88,34 @@ Parameters: highlightFillStrength (0–2), highlightFillWarmth (-1–1), halatio
 Return JSON of deltas only. Omit keys for no change.`,
 };
 
+/** Model 2: 3 phases. Same wording as openai-loop MODEL2_PHASE_PROMPTS. Only params that work post-Model2. */
+const MODEL2_PHASE_PROMPTS: Record<1 | 2 | 3, string> = {
+  1: `Phase 1 (combined): Exposure, Color density, Actuance. Post-Model2: only these params apply. Make the digital raw match the reference in exposure, color density, and sharpness.
+
+Parameters (adjust only these):
+- exposureCurve.L_out_0 … L_out_6: L_out_0 = blackpoint (0–1). L_out_1–6 max 1.5 each (0–1.5). 1 = neutral, >1 brightens, <1 darkens. EV: 1 = 0 EV, 1.4≈+0.5 EV.
+- colorDensityCurve.scale_0 … scale_6: min 0.8 each (0.8–2.5). Per-tonal-region chroma.
+- actuanceStrength (0–3), actuanceRadius (0.5–5), actuanceHighlightGuard (0.5–0.9, default 0.65), actuanceHighlightGuardFloor (0.2–0.75, default 0.5), actuanceHighlightMinSize (0.002–0.02, default 0.005): actuance ramps from full at floor to zero at highlight guard. actuanceHighlightMinSize: fraction of shortest edge; highlights in regions smaller than this are drowned out. Lower = more small highlights get actuance.
+
+Return JSON of deltas only. Omit keys for no change.`,
+  2: `Phase 2: Per-band hue and temperature only. Post-Model2: only hue and temp apply. Film has unique color separation. Match the reference's per-band color.
+
+Distinguish halation warmth (bloom/glow around bright edges) from per-band highlight color.
+
+Parameters: bandLowerShadowHue, bandUpperShadowHue, bandMidHue, bandLowerHighHue, bandUpperHighHue; bandLowerShadowTemp, bandUpperShadowTemp, bandMidTemp, bandLowerHighTemp, bandUpperHighTemp. All max 0.5, min -0.5. Hue: + = clockwise, − = counter-clockwise. Temp: − = cooler, + = warmer.
+
+Return JSON of deltas only. Omit keys for no change.`,
+  3: `Phase 3: Halation only. Highlight bloom and rim.
+
+Parameters: highlightFillStrength (0–2), highlightFillWarmth (-1–1), halationThreshold (0.90–0.9999, default 0.98; lower = more area eligible; top 0.01% still gets strongest halation), halationTailGamma (2–6), halationContrastGate (0–1), halationRimStrength (0–1), halationBloomStrength (0–1), halationRimRadius (0–0.75), halationBloomRadius (0–2.5).
+
+Return JSON of deltas only. Omit keys for no change.`,
+};
+
 interface OpenAIDeltasBody {
   result_base64: string;
   reference_base64: string;
+  ref_black_l?: number;
   substep?: 1 | 2;
   phase?: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
   source_base64?: string;
@@ -102,6 +130,7 @@ interface OpenAIDeltasBody {
   last_deltas?: Record<string, number>;
   current_match?: Record<string, unknown>;
   initial_match?: Record<string, unknown>;
+  model2?: boolean;
 }
 
 export async function POST(request: Request) {
@@ -117,7 +146,8 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const { result_base64, reference_base64, substep = 1, phase } = body;
+  const { result_base64, reference_base64, ref_black_l, substep = 1, phase, model2 } =
+    body;
   if (!result_base64 || !reference_base64) {
     return NextResponse.json(
       { error: "result_base64 and reference_base64 are required" },
@@ -125,7 +155,7 @@ export async function POST(request: Request) {
     );
   }
 
-  const isPhased = typeof phase === "number" && phase >= 1 && phase <= 8;
+  const isPhased = typeof phase === "number" && phase >= 1 && (model2 ? phase <= 3 : phase <= 8);
 
   const iteration = body.iteration ?? 1;
   const maxIterations = body.max_iterations ?? 20;
@@ -146,8 +176,9 @@ export async function POST(request: Request) {
 
   let userText: string;
   if (isPhased && phase) {
-    const phaseName =
-      phase === 1
+    const phaseName = model2 && phase >= 1 && phase <= 3
+      ? (phase === 1 ? "Exposure+Density+Acutance" : phase === 2 ? "Per-band" : "Halation")
+      : phase === 1
         ? "Exposure"
         : phase === 2
           ? "Contrast"
@@ -175,7 +206,14 @@ export async function POST(request: Request) {
       body.num_runs != null && run === body.num_runs
         ? "\nYou are in the last run. The previous agents will have attempted to get the core parameters on point. Prioritize smaller adjustments.\n"
         : "";
-    userText = `${PHASE_PROMPTS[phase]}${lastRunNote}
+    const phasePromptRaw = model2 && phase >= 1 && phase <= 3
+      ? MODEL2_PHASE_PROMPTS[phase as 1 | 2 | 3]
+      : PHASE_PROMPTS[phase as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8];
+    const phasePrompt = phasePromptRaw.replace(
+      "REF_BLACK_L",
+      (ref_black_l ?? 0.2).toFixed(3)
+    );
+    userText = `${phasePrompt}${lastRunNote}
 
 Run ${run}${body.num_runs != null ? `/${body.num_runs}` : ""}, Phase ${phase} (${phaseName}), iteration ${phaseIteration} of ${itersPerPhase} in this phase.${secondLastBlurb}
 
@@ -264,7 +302,9 @@ Compare the first image (result) to the second (reference). Return JSON of param
     const rawContent = data.choices?.[0]?.message?.content ?? "";
     let deltas = parseJsonDeltas(rawContent);
     if (isPhased && phase) {
-      deltas = filterPhaseDeltas(phase, deltas);
+      deltas = model2 && phase >= 1 && phase <= 3
+        ? filterPhaseDeltasModel2(phase as 1 | 2 | 3, deltas)
+        : filterPhaseDeltas(phase as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8, deltas);
     }
 
     return NextResponse.json({ deltas });

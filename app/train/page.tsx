@@ -37,7 +37,11 @@ import type { ExposureMap } from "@/src/lib/pipeline/exposureMap";
 const MAX_PAIRS = 6;
 const IMAGE_MAX_EDGE = 2048; // For OpenAI evaluation
 
-type PairFiles = { source: File | null; reference: File | null };
+type PairFiles = {
+  source: File | null;
+  reference: File | null;
+  refSourceSameScene?: boolean;
+};
 
 const CAMERA_OPTIONS = ["Leica M10", "Epson R-D1", "Sony A7", "Generic", "Other"];
 
@@ -45,6 +49,7 @@ function initPairs(): PairFiles[] {
   return Array.from({ length: MAX_PAIRS }, () => ({
     source: null,
     reference: null,
+    refSourceSameScene: true,
   }));
 }
 
@@ -124,6 +129,7 @@ export default function TrainPage() {
   const [totalPairs, setTotalPairs] = useState<number>(0);
   const [useServerFlow, setUseServerFlow] = useState<boolean>(false);
   const [usePhasedApproach, setUsePhasedApproach] = useState<boolean>(false);
+  const [matchModel2, setMatchModel2] = useState<boolean>(false);
 
   const completePairs = pairs.filter(
     (p) => p.source != null && p.reference != null
@@ -185,15 +191,30 @@ export default function TrainPage() {
     setTotalPairs(completePairs.length);
 
     const maxIter = usePhasedApproach
-      ? iterations <= 15
-        ? 10
-        : iterations <= 30
-          ? 20
-          : 40
+      ? iterations < 10
+        ? Math.max(5, Math.min(9, iterations))
+        : iterations <= 15
+          ? 10
+          : iterations <= 30
+            ? 20
+            : 40
       : Math.max(5, Math.min(100, iterations));
-    setMaxIterations(
-      usePhasedApproach ? (maxIter === 10 ? 80 : maxIter === 20 ? 160 : 320) : maxIter
-    );
+    const getPhasedScheduleForTotal = (n: number) =>
+      n < 10
+        ? { itersPerPhase: n, numRuns: 1 }
+        : n <= 15
+          ? { itersPerPhase: 5, numRuns: 2 }
+          : n <= 30
+            ? { itersPerPhase: 10, numRuns: 2 }
+            : { itersPerPhase: 10, numRuns: 4 };
+    const phasedTotalSteps = usePhasedApproach
+      ? (() => {
+          const { itersPerPhase, numRuns } = getPhasedScheduleForTotal(maxIter);
+          const numPhases = matchModel2 ? 3 : 8;
+          return numRuns * numPhases * itersPerPhase;
+        })()
+      : maxIter;
+    setMaxIterations(phasedTotalSteps);
     const camType = cameraTypeValue.trim() || null;
 
     try {
@@ -205,6 +226,7 @@ export default function TrainPage() {
             return {
               source_base64: await fileToBase64(p.source),
               reference_base64: await fileToBase64(p.reference),
+              ref_source_same_scene: p.refSourceSameScene ?? true,
             };
           })
         );
@@ -217,6 +239,7 @@ export default function TrainPage() {
             camera_type: camType,
             use_libraw: true,
             phased: usePhasedApproach,
+            model2: matchModel2,
           }),
         });
         if (!res.ok) {
@@ -317,7 +340,11 @@ export default function TrainPage() {
         );
         const engineParams = fitLookParamsFromReference(refImageData);
         const fittedGrading: LookParamsGrading = engineToGrading(engineParams);
-        const initialMatch = { ...DEFAULT_LOOK_PARAMS.match };
+        const refBlackL = fittedGrading.refBlackL ?? 0.2;
+        const initialMatch = {
+          ...DEFAULT_LOOK_PARAMS.match,
+          blackPoint: refBlackL,
+        };
         let currentParams: LookParams = {
           match: initialMatch,
           grading: fittedGrading,
@@ -336,28 +363,47 @@ export default function TrainPage() {
         let iterCount = 0;
 
         const getPhasedSchedule = (n: number) =>
-          n <= 15
-            ? { itersPerPhase: 5, numRuns: 2 }
-            : n <= 30
-              ? { itersPerPhase: 10, numRuns: 2 }
-              : { itersPerPhase: 10, numRuns: 4 };
+          n < 10
+            ? { itersPerPhase: n, numRuns: 1 }
+            : n <= 15
+              ? { itersPerPhase: 5, numRuns: 2 }
+              : n <= 30
+                ? { itersPerPhase: 10, numRuns: 2 }
+                : { itersPerPhase: 10, numRuns: 4 };
 
         if (usePhasedApproach) {
           const { itersPerPhase, numRuns } = getPhasedSchedule(maxIter);
+          const phasesTotal = matchModel2 ? 3 : 8;
+          const phaseNames: Record<number, string> = matchModel2
+            ? {
+                1: "Exposure+Density+Acutance",
+                2: "Per-band",
+                3: "Halation",
+              }
+            : {
+                1: "Exposure",
+                2: "Contrast",
+                3: "Color density",
+                4: "Overall grading",
+                5: "Per-band",
+                6: "Refraction",
+                7: "Actuance",
+                8: "Halation",
+              };
           let globalIterCount = 0;
           let bandAnchors: number[] | null = null;
           let secondLastResultBase64: string | null = null;
           let secondLastParams: Record<string, unknown> | null = null;
           for (let runIdx = 0; runIdx < numRuns; runIdx++) {
-            for (let phase = 1; phase <= 8; phase++) {
+            for (let phase = 1; phase <= phasesTotal; phase++) {
               for (let phaseIter = 0; phaseIter < itersPerPhase; phaseIter++) {
                 globalIterCount++;
                 iterCount = globalIterCount;
                 setCurrentIteration(globalIterCount);
                 setMessage(
-                  `Run ${runIdx + 1}/${numRuns}, Phase ${phase}, iter ${phaseIter + 1}/${itersPerPhase}…`
+                  `Run ${runIdx + 1}/${numRuns}, Phase ${phase} (${phaseNames[phase] ?? phase}), iter ${phaseIter + 1}/${itersPerPhase}…`
                 );
-                const useHalation = phase === 8;
+                const useHalation = phase === (matchModel2 ? 3 : 8);
                 const paramsForPhase: LookParams = useHalation
                   ? currentParams
                   : {
@@ -389,6 +435,13 @@ export default function TrainPage() {
                     grading: enginePhase,
                     exposureMap: useHalation ? exposureMap : undefined,
                     colorBandAnchors: bandAnchors ?? undefined,
+                    ...(matchModel2
+                      ? {
+                          matchModel: 2 as const,
+                          model2Strength: 1,
+                          model2RobustSampling: true,
+                        }
+                      : {}),
                   }
                 );
                 if (phase === 1 && phaseIter === itersPerPhase - 1) {
@@ -405,6 +458,7 @@ export default function TrainPage() {
                   body: JSON.stringify({
                     result_base64: resultBase64Phase,
                     reference_base64: referenceBase64,
+                    ref_black_l: refBlackL,
                     ...(phase === 1 && !hasSecondLast
                       ? { source_base64: sourceBase64 }
                       : {}),
@@ -422,6 +476,7 @@ export default function TrainPage() {
                     last_deltas: lastDeltas,
                     current_match: currentParams.match,
                     initial_match: initialMatch,
+                    model2: matchModel2,
                   }),
                 });
                 if (!resPhase.ok) {
@@ -437,7 +492,10 @@ export default function TrainPage() {
                 if (Object.keys(deltasPhase).length > 0) {
                   currentParams = applyGradingDeltas(
                     currentParams,
-                    deltasPhase
+                    deltasPhase,
+                    matchModel2
+                      ? { model2: true, model2Phase: phase as 1 | 2 | 3 }
+                      : undefined
                   );
                 }
                 lastDeltas = deltasPhase;
@@ -477,6 +535,13 @@ export default function TrainPage() {
             strength: 1,
             grading: engine1,
             exposureMap: undefined,
+            ...(matchModel2
+              ? {
+                  matchModel: 2 as const,
+                  model2Strength: 1,
+                  model2RobustSampling: true,
+                }
+              : {}),
           });
           const resultBase641 = await frameToPngBase64(result1, IMAGE_MAX_EDGE);
 
@@ -486,6 +551,7 @@ export default function TrainPage() {
             body: JSON.stringify({
               result_base64: resultBase641,
               reference_base64: referenceBase64,
+              ref_black_l: refBlackL,
               substep: 1,
               iteration: iterCount,
               max_iterations: maxIter,
@@ -502,7 +568,11 @@ export default function TrainPage() {
           const deltas1 = data1.deltas ?? {};
           const nonHalationDeltas = filterNonHalationDeltas(deltas1);
           if (Object.keys(nonHalationDeltas).length > 0) {
-            currentParams = applyGradingDeltas(currentParams, nonHalationDeltas);
+            currentParams = applyGradingDeltas(
+              currentParams,
+              nonHalationDeltas,
+              matchModel2 ? { model2: true } : undefined
+            );
           }
 
           // Substep 2: halation
@@ -521,6 +591,13 @@ export default function TrainPage() {
             strength: 1,
             grading: engine2,
             exposureMap,
+            ...(matchModel2
+              ? {
+                  matchModel: 2 as const,
+                  model2Strength: 1,
+                  model2RobustSampling: true,
+                }
+              : {}),
           });
           const resultBase642 = await frameToPngBase64(result2, IMAGE_MAX_EDGE);
 
@@ -535,6 +612,7 @@ export default function TrainPage() {
               max_iterations: maxIter,
               last_deltas: lastDeltas,
               current_match: currentParams.match,
+              model2: matchModel2,
             }),
           });
           if (!res2.ok) {
@@ -574,6 +652,13 @@ export default function TrainPage() {
             strength: 1,
             grading: engineFinal,
             exposureMap,
+            ...(matchModel2
+              ? {
+                  matchModel: 2 as const,
+                  model2Strength: 1,
+                  model2RobustSampling: true,
+                }
+              : {}),
           }
         );
 
@@ -643,7 +728,7 @@ export default function TrainPage() {
       setStatus("error");
       setMessage(err instanceof Error ? err.message : String(err));
     }
-  }, [completePairs, iterations, cameraTypeValue, useServerFlow, usePhasedApproach]);
+  }, [completePairs, iterations, cameraTypeValue, useServerFlow, usePhasedApproach, matchModel2]);
 
   return (
     <div className="p-4 md:p-6 max-w-2xl">
@@ -685,24 +770,44 @@ export default function TrainPage() {
           {pairs.map((pair, idx) => (
             <div
               key={idx}
-              className="grid grid-cols-2 gap-2 p-2 rounded-md border border-input/50"
+              className="space-y-2 p-2 rounded-md border border-input/50"
             >
-              <button
-                type="button"
-                onClick={() => triggerSourcePick(idx)}
-                disabled={status === "training"}
-                className="h-9 rounded-md border border-input bg-background px-3 py-2 text-sm font-medium hover:bg-accent disabled:pointer-events-none disabled:opacity-50 text-left truncate"
-              >
-                {pair.source ? pair.source.name : `Pair ${idx + 1} source…`}
-              </button>
-              <button
-                type="button"
-                onClick={() => triggerReferencePick(idx)}
-                disabled={status === "training"}
-                className="h-9 rounded-md border border-input bg-background px-3 py-2 text-sm font-medium hover:bg-accent disabled:pointer-events-none disabled:opacity-50 text-left truncate"
-              >
-                {pair.reference ? pair.reference.name : `Pair ${idx + 1} ref…`}
-              </button>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => triggerSourcePick(idx)}
+                  disabled={status === "training"}
+                  className="h-9 rounded-md border border-input bg-background px-3 py-2 text-sm font-medium hover:bg-accent disabled:pointer-events-none disabled:opacity-50 text-left truncate"
+                >
+                  {pair.source ? pair.source.name : `Pair ${idx + 1} source…`}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => triggerReferencePick(idx)}
+                  disabled={status === "training"}
+                  className="h-9 rounded-md border border-input bg-background px-3 py-2 text-sm font-medium hover:bg-accent disabled:pointer-events-none disabled:opacity-50 text-left truncate"
+                >
+                  {pair.reference ? pair.reference.name : `Pair ${idx + 1} ref…`}
+                </button>
+              </div>
+              <label className="flex items-center gap-2 cursor-pointer text-sm">
+                <input
+                  type="checkbox"
+                  checked={pair.refSourceSameScene ?? true}
+                  onChange={(e) =>
+                    setPairs((prev) =>
+                      prev.map((p, i) =>
+                        i === idx
+                          ? { ...p, refSourceSameScene: e.target.checked }
+                          : p
+                      )
+                    )
+                  }
+                  disabled={status === "training"}
+                  className="rounded border-input"
+                />
+                <span>Ref, source same scene</span>
+              </label>
             </div>
           ))}
         </div>
@@ -774,7 +879,24 @@ export default function TrainPage() {
           </label>
           {usePhasedApproach && (
             <p className="text-xs text-muted-foreground">
-              8 phases (exposure, contrast, color density, grading, per-band, refraction, actuance, halation). Iterations map to 10 (80 steps), 20 (160 steps), or 40 (320 steps).
+              {matchModel2
+                ? "3 phases (Exposure+Contrast+Density+Acutance, Per-band, Halation). Iterations map to 10 (30 steps), 20 (60 steps), or 40 (120 steps)."
+                : "8 phases (exposure, contrast, color density, grading, per-band, refraction, actuance, halation). Iterations map to 10 (80 steps), 20 (160 steps), or 40 (320 steps)."}
+            </p>
+          )}
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={matchModel2}
+              onChange={(e) => setMatchModel2(e.target.checked)}
+              disabled={status === "training"}
+              className="rounded border-input"
+            />
+            <span className="text-sm">Model 2</span>
+          </label>
+          {matchModel2 && (
+            <p className="text-xs text-muted-foreground">
+              Uses Reinhard-style match (fixed 1.0) and 3 phases: Exposure+Contrast+Density+Acutance, 5-band hue/temp, Halation.
             </p>
           )}
         </div>

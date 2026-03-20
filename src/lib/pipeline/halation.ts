@@ -191,9 +191,10 @@ export function halation(
   }
   const postSorted = postVals.subarray(0, postCount);
   postSorted.sort();
-  const postP98 = percentileFromSorted(postSorted, postCount, 0.98);
+  const threshold = Math.max(0.9, Math.min(0.9999, highlightFill.threshold ?? 0.98));
+  const postP_threshold = percentileFromSorted(postSorted, postCount, threshold);
   const postP99_99 = percentileFromSorted(postSorted, postCount, 0.9999);
-  const postSpan = Math.max(1e-6, postP99_99 - postP98);
+  const postSpan = Math.max(1e-6, postP99_99 - postP_threshold);
 
   // --- Contrast gate: dark-neighbor map from graded luminance ---
   const Dgraded = computeDarkNeighborMap(Ypost, width, height);
@@ -209,15 +210,15 @@ export function halation(
   for (let i = 0; i < nPix; i++) {
     const yPost = Ypost[i] ?? 0;
     // Gate: must look like a highlight in the post-grade image
-    if (yPost <= postP98) {
+    if (yPost <= postP_threshold) {
       W[i] = 0;
       continue;
     }
     // Base weight from post-grade tail curve
-    const wPost = Math.pow(Math.min(1, (yPost - postP98) / postSpan), tailGamma);
+    const wPost = Math.pow(Math.min(1, (yPost - postP_threshold) / postSpan), tailGamma);
 
     // Post-grade percentile rank: drives halation strength for lifted highlights.
-    const postRank = Math.min(1, (yPost - postP98) / postSpan);
+    const postRank = Math.min(1, (yPost - postP_threshold) / postSpan);
     const postMod = 0.3 + 1.2 * postRank;
 
     // RAW hierarchy boost: extreme RAW highlights (3 stops over) get more halation
@@ -397,9 +398,10 @@ export function halationFloat(
   }
   const postSorted = postVals.subarray(0, postCount);
   postSorted.sort();
-  const postP98 = percentileFromSorted(postSorted, postCount, 0.98);
+  const threshold = Math.max(0.9, Math.min(0.9999, highlightFill.threshold ?? 0.98));
+  const postP_threshold = percentileFromSorted(postSorted, postCount, threshold);
   const postP99_99 = percentileFromSorted(postSorted, postCount, 0.9999);
-  const postSpan = Math.max(1e-6, postP99_99 - postP98);
+  const postSpan = Math.max(1e-6, postP99_99 - postP_threshold);
 
   const Dgraded = computeDarkNeighborMap(Ypost, width, height);
 
@@ -410,12 +412,12 @@ export function halationFloat(
 
   for (let i = 0; i < nPix; i++) {
     const yPost = Ypost[i] ?? 0;
-    if (yPost <= postP98) {
+    if (yPost <= postP_threshold) {
       W[i] = 0;
       continue;
     }
-    const wPost = Math.pow(Math.min(1, (yPost - postP98) / postSpan), tailGamma);
-    const postRank = Math.min(1, (yPost - postP98) / postSpan);
+    const wPost = Math.pow(Math.min(1, (yPost - postP_threshold) / postSpan), tailGamma);
+    const postRank = Math.min(1, (yPost - postP_threshold) / postSpan);
     const postMod = 0.3 + 1.2 * postRank;
     let rawBoost = 1.0;
     if (rawMap !== null) {

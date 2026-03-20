@@ -17,9 +17,8 @@ export const CLAMP_MAP: Record<string, [number, number]> = {
   exposureStrength: [0, 1.5],
   lumaStrength: [0, 0.5],
   colorStrength: [0, 2],
-  blackStrength: [5, 8],
+  blackStrength: [0.5, 8],
   blackRange: [0.2, 1.8],
-  blackPoint: [0, 0.01],
   colorDensity: [0.5, 2],
   bandLowerShadow: [0, 2],
   bandUpperShadow: [0, 2],
@@ -34,13 +33,17 @@ export const CLAMP_MAP: Record<string, [number, number]> = {
   halationBloomStrength: [0, 1],
   halationRimRadius: [0, 0.75],
   halationBloomRadius: [0, 2.5],
+  halationThreshold: [0.9, 0.9999],
   actuanceStrength: [0, 3],
   actuanceRadius: [0.5, 5],
-  bandLowerShadowHue: [-1, 1],
-  bandUpperShadowHue: [-1, 1],
+  actuanceHighlightGuard: [0.5, 0.9],
+  actuanceHighlightGuardFloor: [0.2, 0.75],
+  actuanceHighlightMinSize: [0.002, 0.02],
+  bandLowerShadowHue: [-0.35, 0.35],
+  bandUpperShadowHue: [-0.35, 0.35],
   bandMidHue: [-1, 1],
-  bandLowerHighHue: [-1, 1],
-  bandUpperHighHue: [-1, 1],
+  bandLowerHighHue: [-0.35, 0.35],
+  bandUpperHighHue: [-0.35, 0.35],
   bandLowerShadowSat: [0, 2],
   bandUpperShadowSat: [0, 2],
   bandMidSat: [0, 2],
@@ -52,11 +55,11 @@ export const CLAMP_MAP: Record<string, [number, number]> = {
   bandLowerHighLuma: [-0.2, 0.2],
   bandUpperHighLuma: [-0.2, 0.2],
   refractionSplitL: [0, 1],
-  bandLowerShadowTemp: [-1, 1],
-  bandUpperShadowTemp: [-1, 1],
+  bandLowerShadowTemp: [-0.35, 0.35],
+  bandUpperShadowTemp: [-0.35, 0.35],
   bandMidTemp: [-1, 1],
-  bandLowerHighTemp: [-1, 1],
-  bandUpperHighTemp: [-1, 1],
+  bandLowerHighTemp: [-0.35, 0.35],
+  bandUpperHighTemp: [-0.35, 0.35],
 };
 
 export const HALATION_KEYS = new Set([
@@ -68,6 +71,7 @@ export const HALATION_KEYS = new Set([
   "halationBloomStrength",
   "halationRimRadius",
   "halationBloomRadius",
+  "halationThreshold",
 ]);
 
 /** Phase 1–8 parameter keys for phased approach. Phase 6 uses prefix match for refraction. */
@@ -131,8 +135,46 @@ export const PHASE_KEYS: Record<1 | 2 | 3 | 4 | 5 | 6 | 7 | 8, Set<string>> = {
     "bandUpperHighTemp",
   ]),
   6: new Set(["refractionSplitL"]),
-  7: new Set(["actuanceStrength", "actuanceRadius"]),
+  7: new Set(["actuanceStrength", "actuanceRadius", "actuanceHighlightGuard", "actuanceHighlightGuardFloor", "actuanceHighlightMinSize"]),
   8: new Set([...HALATION_KEYS]),
+};
+
+/** Model 2: 3 phases. Only params that work post-Model2. Phase 1 = exposure+color density+actuance; 2 = per-band hue/temp; 3 = halation. */
+export const PHASE_KEYS_MODEL2: Record<1 | 2 | 3, Set<string>> = {
+  1: new Set([
+    "exposureCurve.L_out_0",
+    "exposureCurve.L_out_1",
+    "exposureCurve.L_out_2",
+    "exposureCurve.L_out_3",
+    "exposureCurve.L_out_4",
+    "exposureCurve.L_out_5",
+    "exposureCurve.L_out_6",
+    "colorDensityCurve.scale_0",
+    "colorDensityCurve.scale_1",
+    "colorDensityCurve.scale_2",
+    "colorDensityCurve.scale_3",
+    "colorDensityCurve.scale_4",
+    "colorDensityCurve.scale_5",
+    "colorDensityCurve.scale_6",
+    "actuanceStrength",
+    "actuanceRadius",
+    "actuanceHighlightGuard",
+    "actuanceHighlightGuardFloor",
+    "actuanceHighlightMinSize",
+  ]),
+  2: new Set([
+    "bandLowerShadowHue",
+    "bandUpperShadowHue",
+    "bandMidHue",
+    "bandLowerHighHue",
+    "bandUpperHighHue",
+    "bandLowerShadowTemp",
+    "bandUpperShadowTemp",
+    "bandMidTemp",
+    "bandLowerHighTemp",
+    "bandUpperHighTemp",
+  ]),
+  3: new Set([...HALATION_KEYS]),
 };
 
 function keyBelongsToPhase(phase: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8, key: string): boolean {
@@ -150,6 +192,23 @@ export function filterPhaseDeltas(
   const out: Record<string, number> = {};
   for (const [k, v] of Object.entries(deltas)) {
     if (keyBelongsToPhase(phase, k)) out[k] = v;
+  }
+  return out;
+}
+
+function keyBelongsToPhaseModel2(phase: 1 | 2 | 3, key: string): boolean {
+  const allowed = PHASE_KEYS_MODEL2[phase];
+  if (allowed.has(key)) return true;
+  return false;
+}
+
+export function filterPhaseDeltasModel2(
+  phase: 1 | 2 | 3,
+  deltas: Record<string, number>
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(deltas)) {
+    if (keyBelongsToPhaseModel2(phase, k)) out[k] = v;
   }
   return out;
 }
@@ -195,11 +254,21 @@ function clamp(value: number, min: number, max: number): number {
   return value;
 }
 
+export type ApplyGradingDeltasOptions = {
+  model2?: boolean;
+  model2Phase?: 1 | 2 | 3;
+};
+
 function applyScalarMatchDeltas(
   match: LookParamsMatch,
-  deltas: Record<string, number>
+  deltas: Record<string, number>,
+  refBlackL?: number,
+  options?: ApplyGradingDeltasOptions
 ): LookParamsMatch {
   const next: LookParamsMatch = { ...match };
+  const blackPointMax = refBlackL ?? 0.2;
+  const model2 = options?.model2 ?? false;
+  const model2Phase = options?.model2Phase;
   for (const [key, delta] of Object.entries(deltas)) {
     if (typeof delta !== "number" || !Number.isFinite(delta)) continue;
     if (
@@ -218,7 +287,15 @@ function applyScalarMatchDeltas(
         ? current
         : (DEFAULT_LOOK_PARAMS.match as unknown as Record<string, unknown>)[key];
     const numericBase = typeof base === "number" ? base : 0;
-    const [min, max] = CLAMP_MAP[key] ?? [numericBase - 2, numericBase + 2];
+    let minMax: [number, number];
+    if (key === "blackPoint") {
+      minMax = [0, blackPointMax];
+    } else if (model2 && model2Phase === 2 && (key.endsWith("Hue") || key.endsWith("Temp"))) {
+      minMax = [-0.5, 0.5];
+    } else {
+      minMax = CLAMP_MAP[key] ?? [numericBase - 2, numericBase + 2];
+    }
+    const [min, max] = minMax;
     const value = numericBase + delta;
     (next as unknown as Record<string, number>)[key] = Math.max(
       min,
@@ -230,8 +307,10 @@ function applyScalarMatchDeltas(
 
 function applyRefractionAndCurveDeltas(
   params: LookParams,
-  deltas: Record<string, number>
+  deltas: Record<string, number>,
+  options?: ApplyGradingDeltasOptions
 ): LookParams {
+  const model2 = options?.model2 ?? false;
   const next: LookParams = {
     match: { ...params.match },
     grading: { ...params.grading },
@@ -318,6 +397,8 @@ function applyRefractionAndCurveDeltas(
         let v = base + delta;
         if (idx === 0) {
           v = clamp(v, 0, 1);
+        } else if (model2 && idx >= 1) {
+          v = clamp(v, 0, 1.5);
         } else {
           v = clamp(v, 0, 2);
         }
@@ -343,7 +424,8 @@ function applyRefractionAndCurveDeltas(
       const curve = ensureColorDensityCurve();
       if (idx >= 0 && idx < curve.scale.length) {
         const base = curve.scale[idx] ?? 1;
-        curve.scale[idx] = clamp(base + delta, 0.2, 2.5);
+        const cdMin = model2 ? 0.8 : 0.2;
+        curve.scale[idx] = clamp(base + delta, cdMin, 2.5);
       }
       continue;
     }
@@ -365,17 +447,25 @@ function applyRefractionAndCurveDeltas(
 
 /**
  * Apply deltas to LookParams. Handles scalar match params and refraction/curve keys.
+ * options.model2 / options.model2Phase enable Model 2 clamp overrides (L_out 1..6 max 1.5, colorDensity min 0.8, band Hue/Temp ±0.5 in phase 2).
  */
 export function applyGradingDeltas(
   params: LookParams,
-  deltas: Record<string, number>
+  deltas: Record<string, number>,
+  options?: ApplyGradingDeltasOptions
 ): LookParams {
-  const scalarUpdatedMatch = applyScalarMatchDeltas(params.match, deltas);
+  const refBlackL = params.grading?.refBlackL;
+  const scalarUpdatedMatch = applyScalarMatchDeltas(
+    params.match,
+    deltas,
+    refBlackL,
+    options
+  );
   const withScalars: LookParams = {
     match: scalarUpdatedMatch,
     grading: params.grading,
   };
-  return applyRefractionAndCurveDeltas(withScalars, deltas);
+  return applyRefractionAndCurveDeltas(withScalars, deltas, options);
 }
 
 /**

@@ -70,6 +70,50 @@ function isDngFile(file: File): boolean {
   return name.endsWith(".dng");
 }
 
+const MAX_PREVIEW_EDGE = 1600;
+
+async function callLabApplyApi(
+  sourceFile: File,
+  referenceFile: File | null,
+  params: LookParams,
+  model2Strength: number,
+  model2RobustSampling: boolean
+): Promise<{ png_base64: string; fittedGrading?: LookParams["grading"] }> {
+  const form = new FormData();
+  form.append("source", sourceFile);
+  if (referenceFile) form.append("reference", referenceFile);
+  form.append("params", JSON.stringify(params));
+  form.append("model2Strength", String(model2Strength));
+  form.append("model2RobustSampling", String(model2RobustSampling));
+  const res = await fetch("/api/lab/apply", { method: "POST", body: form });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error ?? "Apply failed");
+  return data;
+}
+
+function drawPngBase64ToCanvas(
+  canvas: HTMLCanvasElement,
+  png_base64: string
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const w = img.naturalWidth;
+      const h = img.naturalHeight;
+      const scale = Math.min(1, MAX_PREVIEW_EDGE / Math.max(w, h));
+      const cw = Math.max(1, Math.round(w * scale));
+      const ch = Math.max(1, Math.round(h * scale));
+      canvas.width = cw;
+      canvas.height = ch;
+      const ctx = canvas.getContext("2d");
+      ctx?.drawImage(img, 0, 0, w, h, 0, 0, cw, ch);
+      resolve();
+    };
+    img.onerror = () => reject(new Error("Failed to load result image"));
+    img.src = `data:image/png;base64,${png_base64}`;
+  });
+}
+
 function exposureScoreFromLevel(
   exposure: ExposureLevel | null | undefined
 ): number | null {
@@ -213,6 +257,27 @@ const PARAM_SECTIONS: Array<{
         max: 5,
         step: 0.5,
       },
+      {
+        key: "actuanceHighlightGuard",
+        label: "Highlight guard",
+        min: 0.5,
+        max: 0.9,
+        step: 0.05,
+      },
+      {
+        key: "actuanceHighlightGuardFloor",
+        label: "Transition floor",
+        min: 0.2,
+        max: 0.75,
+        step: 0.05,
+      },
+      {
+        key: "actuanceHighlightMinSize",
+        label: "Highlight min size",
+        min: 0.002,
+        max: 0.02,
+        step: 0.001,
+      },
     ],
   },
   {
@@ -316,6 +381,10 @@ export default function LabPage() {
   const [importJsonText, setImportJsonText] = useState("");
   const [importError, setImportError] = useState<string | null>(null);
 
+  const [matchModel2, setMatchModel2] = useState(false);
+  const [model2Strength, setModel2Strength] = useState(1);
+  const [model2RobustSampling, setModel2RobustSampling] = useState(true);
+
   const previewAbortRef = useRef<AbortController | null>(null);
   const autoParamsRef = useRef<LookParams | null>(null);
   const lastMatchRef = useRef<{
@@ -344,43 +413,65 @@ export default function LabPage() {
     setIsApplying(true);
     setApplyProgress(null);
     try {
-      // Use original source so we grade the source image, not whatever is on the canvas.
-      const result = await runPipelineFn(
-        source.file,
-        activeRef?.file ?? null,
-        lookParams,
-        canvas,
-        { onProgress: (phase) => setApplyProgress(phase) }
-      );
-      if (result.sourceStats) {
-        setLastSourceStats(result.sourceStats);
-      }
-      if (result.refStats) {
-        setLastRefStats(result.refStats);
-      }
-      if (result.fittedGrading) {
-        setLookParams((prev) => {
-          // Use an explicit blackPoint in match so corrections/heuristics can learn it.
-          const effectiveBlackPoint =
-            prev.match.blackPoint ??
-            result.fittedGrading?.refBlackL ??
-            0.05;
-          const nextMatch = {
-            ...prev.match,
-            blackPoint: effectiveBlackPoint,
-          };
-          const next: LookParams = {
+      if (matchModel2) {
+        setApplyProgress("Applying (server)…");
+        const data = await callLabApplyApi(
+          source.file,
+          activeRef?.file ?? null,
+          lookParams,
+          model2Strength,
+          model2RobustSampling
+        );
+        await drawPngBase64ToCanvas(canvas, data.png_base64);
+        if (data.fittedGrading) {
+          setLookParams((prev) => ({
             ...prev,
-            match: nextMatch,
-            grading: result.fittedGrading!,
-          };
-          autoParamsRef.current = next;
-          return next;
-        });
+            grading: data.fittedGrading!,
+          }));
+          autoParamsRef.current = { ...lookParams, grading: data.fittedGrading };
+        }
+        setHasAppliedHeuristics(false);
+        setApplySuccess(true);
+        setTimeout(() => setApplySuccess(false), 2500);
+      } else {
+        // Use original source so we grade the source image, not whatever is on the canvas.
+        const result = await runPipelineFn(
+          source.file,
+          activeRef?.file ?? null,
+          lookParams,
+          canvas,
+          { onProgress: (phase) => setApplyProgress(phase) }
+        );
+        if (result.sourceStats) {
+          setLastSourceStats(result.sourceStats);
+        }
+        if (result.refStats) {
+          setLastRefStats(result.refStats);
+        }
+        if (result.fittedGrading) {
+          setLookParams((prev) => {
+            // Use an explicit blackPoint in match so corrections/heuristics can learn it.
+            const effectiveBlackPoint =
+              prev.match.blackPoint ??
+              result.fittedGrading?.refBlackL ??
+              0.05;
+            const nextMatch = {
+              ...prev.match,
+              blackPoint: effectiveBlackPoint,
+            };
+            const next: LookParams = {
+              ...prev,
+              match: nextMatch,
+              grading: result.fittedGrading!,
+            };
+            autoParamsRef.current = next;
+            return next;
+          });
+        }
+        setHasAppliedHeuristics(false);
+        setApplySuccess(true);
+        setTimeout(() => setApplySuccess(false), 2500);
       }
-      setHasAppliedHeuristics(false);
-      setApplySuccess(true);
-      setTimeout(() => setApplySuccess(false), 2500);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setApplyError(message);
@@ -388,7 +479,7 @@ export default function LabPage() {
       setIsApplying(false);
       setApplyProgress(null);
     }
-  }, [source, activeRef?.file, lookParams]);
+  }, [source, activeRef?.file, lookParams, matchModel2, model2Strength, model2RobustSampling]);
 
   function onLoadParams() {
     setImportError(null);
@@ -606,17 +697,29 @@ export default function LabPage() {
       setLookParams(nextParams);
       autoParamsRef.current = nextParams;
       setEmbeddingProgress({ phase: "Applying grade…" });
-      const pipelineResult = await runPipelineFn(
-        source.file,
-        null,
-        nextParams,
-        canvas,
-        { onProgress: (phase) => setEmbeddingProgress({ phase }) }
-      );
-      if (pipelineResult.sourceStats) {
-        setLastSourceStats(pipelineResult.sourceStats);
+      if (matchModel2) {
+        const data = await callLabApplyApi(
+          source.file,
+          null,
+          nextParams,
+          model2Strength,
+          model2RobustSampling
+        );
+        await drawPngBase64ToCanvas(canvas, data.png_base64);
+        setLastRefStats(null);
+      } else {
+        const pipelineResult = await runPipelineFn(
+          source.file,
+          null,
+          nextParams,
+          canvas,
+          { onProgress: (phase) => setEmbeddingProgress({ phase }) }
+        );
+        if (pipelineResult.sourceStats) {
+          setLastSourceStats(pipelineResult.sourceStats);
+        }
+        setLastRefStats(null);
       }
-      setLastRefStats(null);
       setApplySuccess(true);
       setTimeout(() => setApplySuccess(false), 2500);
     } catch (err) {
@@ -626,7 +729,7 @@ export default function LabPage() {
       setIsUsingEmbeddings(false);
       setEmbeddingProgress(null);
     }
-  }, [source, lookParams, useTileSearch]);
+  }, [source, lookParams, useTileSearch, matchModel2, model2Strength, model2RobustSampling]);
 
   const runEmbeddingSearchWithCorrections = useCallback(async () => {
     previewAbortRef.current?.abort();
@@ -763,15 +866,26 @@ export default function LabPage() {
       setLastRefStats(null);
       setHasAppliedHeuristics(true);
       setEmbeddingProgress({ phase: "Applying grade…" });
-      const pipelineResult = await runPipelineFn(
-        source.file,
-        null,
-        nextParams,
-        canvas,
-        { onProgress: (phase) => setEmbeddingProgress({ phase }) }
-      );
-      if (pipelineResult.sourceStats) {
-        setLastSourceStats(pipelineResult.sourceStats);
+      if (matchModel2) {
+        const data = await callLabApplyApi(
+          source.file,
+          null,
+          nextParams,
+          model2Strength,
+          model2RobustSampling
+        );
+        await drawPngBase64ToCanvas(canvas, data.png_base64);
+      } else {
+        const pipelineResult = await runPipelineFn(
+          source.file,
+          null,
+          nextParams,
+          canvas,
+          { onProgress: (phase) => setEmbeddingProgress({ phase }) }
+        );
+        if (pipelineResult.sourceStats) {
+          setLastSourceStats(pipelineResult.sourceStats);
+        }
       }
       setApplySuccess(true);
       setTimeout(() => setApplySuccess(false), 2500);
@@ -782,7 +896,7 @@ export default function LabPage() {
       setIsUsingEmbeddings(false);
       setEmbeddingProgress(null);
     }
-  }, [source, lookParams, useTileSearch, sourceType]);
+  }, [source, lookParams, useTileSearch, sourceType, matchModel2, model2Strength, model2RobustSampling]);
 
   // Show raw source preview when source is uploaded (no grading applied)
   useEffect(() => {
@@ -840,17 +954,38 @@ export default function LabPage() {
     setIsExporting(true);
     setExportProgress("Decoding…");
     try {
-      const blob = await exportGradedPngBlob(
-        source.file,
-        activeRef?.file ?? null,
-        lookParams,
-        { onProgress: (p) => setExportProgress(p) }
-      );
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = `graded_${source.file.name.replace(/\.[^.]+$/, "")}.png`;
-      a.click();
-      URL.revokeObjectURL(a.href);
+      if (matchModel2) {
+        setExportProgress("Applying (server)…");
+        const data = await callLabApplyApi(
+          source.file,
+          activeRef?.file ?? null,
+          lookParams,
+          model2Strength,
+          model2RobustSampling
+        );
+        setExportProgress("Encoding…");
+        const binary = atob(data.png_base64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        const blob = new Blob([bytes], { type: "image/png" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `graded_${source.file.name.replace(/\.[^.]+$/, "")}.png`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+      } else {
+        const blob = await exportGradedPngBlob(
+          source.file,
+          activeRef?.file ?? null,
+          lookParams,
+          { onProgress: (p) => setExportProgress(p) }
+        );
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `graded_${source.file.name.replace(/\.[^.]+$/, "")}.png`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+      }
     } catch (err) {
       console.error("Export failed", err);
     } finally {
@@ -1131,11 +1266,383 @@ export default function LabPage() {
                   const sectionParams = lookParams[section.id];
                   if (!sectionParams || typeof sectionParams !== "object")
                     return null;
+                  const isMatchSection = section.id === "match" && section.label === "Match";
                   return (
                     <div key={`${section.id}-${section.label}`} className="space-y-3">
                       <h3 className="text-xs font-medium text-muted-foreground/80">
                         {section.label}
                       </h3>
+                      {isMatchSection && (
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            id="match-model-2"
+                            checked={matchModel2}
+                            onChange={(e) => setMatchModel2(e.target.checked)}
+                            className="rounded border"
+                          />
+                          <Label htmlFor="match-model-2" className="text-xs cursor-pointer">
+                            Model 2 (faster, server)
+                          </Label>
+                        </div>
+                      )}
+                      {isMatchSection && matchModel2 ? (
+                        <>
+                          <div className="space-y-1.5">
+                            <Label className="text-xs">Strength</Label>
+                            <div className="flex items-center gap-2">
+                              <Slider
+                                className="flex-1"
+                                value={[model2Strength]}
+                                min={0}
+                                max={1}
+                                step={0.05}
+                                onValueChange={(v) => setModel2Strength(v[0] ?? 1)}
+                              />
+                              <span className="text-[10px] tabular-nums">{model2Strength.toFixed(2)}</span>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              id="model2-robust"
+                              checked={model2RobustSampling}
+                              onChange={(e) => setModel2RobustSampling(e.target.checked)}
+                              className="rounded border"
+                            />
+                            <Label htmlFor="model2-robust" className="text-xs cursor-pointer">
+                              Robust sampling
+                            </Label>
+                          </div>
+                          <details className="mt-3 border-t pt-2">
+                            <summary className="text-[11px] font-medium text-muted-foreground/80 cursor-pointer">
+                              Post-Model 2: Exposure curve (7-handle)
+                            </summary>
+                            <p className="text-[10px] text-muted-foreground mt-1">
+                              Per-band exposure multiplier applied after Reinhard transfer. 1 = neutral; &gt;1 brightens, &lt;1 darkens.
+                            </p>
+                            <div className="mt-2 space-y-1">
+                              {(lookParams.match.exposureCurve ?? defaultExposureCurve()).L_out.map((_, idx) => {
+                                const curve = lookParams.match.exposureCurve ?? defaultExposureCurve();
+                                const exposure = curve.L_out[idx] ?? 1;
+                                const maxVal = idx === 0 ? 1 : 1.5;
+                                return (
+                                  <div key={idx} className="flex gap-2 items-center text-[10px]">
+                                    <span className="w-4">{idx}</span>
+                                    <Label className="text-[10px] w-14">L_out</Label>
+                                    <Input
+                                      type="number"
+                                      className="w-16 h-6 text-xs"
+                                      min={0}
+                                      max={maxVal}
+                                      step={0.05}
+                                      value={exposure}
+                                      onChange={(e) => {
+                                        const v = parseFloat(e.target.value);
+                                        if (Number.isNaN(v)) return;
+                                        const def = defaultExposureCurve();
+                                        const base = lookParams.match.exposureCurve ?? def;
+                                        const L_in = base.L_in.length
+                                          ? [...base.L_in]
+                                          : [...def.L_in];
+                                        const L_out = [...(base.L_out.length ? base.L_out : def.L_out)];
+                                        L_out[idx] = Math.max(0, Math.min(maxVal, v));
+                                        setLookParams((prev) => ({
+                                          ...prev,
+                                          match: {
+                                            ...prev.match,
+                                            exposureCurve: { L_in, L_out },
+                                          },
+                                        }));
+                                      }}
+                                    />
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </details>
+                          <details className="mt-3 border-t pt-2">
+                            <summary className="text-[11px] font-medium text-muted-foreground/80 cursor-pointer">
+                              Post-Model 2: Color density curve (7-handle)
+                            </summary>
+                            <p className="text-[10px] text-muted-foreground mt-1">
+                              Per-tonal-region chroma scale. 1 = neutral; &gt;1 increases saturation; min 0.8, max 2.5.
+                            </p>
+                            <div className="mt-2 space-y-1">
+                              {(lookParams.match.colorDensityCurve ?? defaultColorDensityCurve()).scale.map((_, idx) => {
+                                const cur = lookParams.match.colorDensityCurve ?? defaultColorDensityCurve();
+                                const scale = cur.scale[idx] ?? 1;
+                                return (
+                                  <div key={idx} className="flex gap-2 items-center text-[10px]">
+                                    <span className="w-4">{idx}</span>
+                                    <Label className="text-[10px] w-14">scale</Label>
+                                    <Input
+                                      type="number"
+                                      className="w-16 h-6 text-xs"
+                                      min={0.8}
+                                      max={2.5}
+                                      step={0.05}
+                                      value={scale}
+                                      onChange={(e) => {
+                                        const v = parseFloat(e.target.value);
+                                        if (Number.isNaN(v)) return;
+                                        const def = defaultColorDensityCurve();
+                                        const base = lookParams.match.colorDensityCurve ?? def;
+                                        const L_anchors = base.L_anchors?.length ? [...base.L_anchors] : [...def.L_anchors];
+                                        const scaleArr = [...(base.scale?.length ? base.scale : def.scale)];
+                                        scaleArr[idx] = Math.max(0.8, Math.min(2.5, v));
+                                        setLookParams((prev) => ({
+                                          ...prev,
+                                          match: {
+                                            ...prev.match,
+                                            colorDensityCurve: { L_anchors, scale: scaleArr },
+                                          },
+                                        }));
+                                      }}
+                                    />
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </details>
+                          <details className="mt-3 border-t pt-2">
+                            <summary className="text-[11px] font-medium text-muted-foreground/80 cursor-pointer">
+                              Post-Model 2: 5-band hue and temp
+                            </summary>
+                            <p className="text-[10px] text-muted-foreground mt-1">
+                              Per-band hue rotation and temperature (-0.5 to 0.5).
+                            </p>
+                            <div className="mt-2 space-y-2">
+                              {(["LowerShadow", "UpperShadow", "Mid", "LowerHigh", "UpperHigh"] as const).map((band) => {
+                                const hueKey = `band${band}Hue` as const;
+                                const tempKey = `band${band}Temp` as const;
+                                const hueVal = (lookParams.match[hueKey] ?? 0);
+                                const tempVal = (lookParams.match[tempKey] ?? 0);
+                                return (
+                                  <div key={band} className="flex gap-3 items-center text-[10px]">
+                                    <span className="w-20">{band.replace(/([A-Z])/g, " $1").trim()}</span>
+                                    <div className="flex gap-1 items-center flex-1">
+                                      <Label className="text-[10px] w-8">Hue</Label>
+                                      <Slider
+                                        className="flex-1 max-w-24"
+                                        value={[hueVal]}
+                                        min={-0.5}
+                                        max={0.5}
+                                        step={0.05}
+                                        onValueChange={(v) => setParam("match", hueKey, v[0] ?? 0)}
+                                      />
+                                    </div>
+                                    <div className="flex gap-1 items-center flex-1">
+                                      <Label className="text-[10px] w-8">Temp</Label>
+                                      <Slider
+                                        className="flex-1 max-w-24"
+                                        value={[tempVal]}
+                                        min={-0.5}
+                                        max={0.5}
+                                        step={0.05}
+                                        onValueChange={(v) => setParam("match", tempKey, v[0] ?? 0)}
+                                      />
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </details>
+                          <details className="mt-3 border-t pt-2">
+                            <summary className="text-[11px] font-medium text-muted-foreground/80 cursor-pointer">
+                              Post-Model 2: Actuance
+                            </summary>
+                            <p className="text-[10px] text-muted-foreground mt-1">
+                              Local contrast (sharpening). Strength 0–3, radius 0.5–5.
+                            </p>
+                            <div className="mt-2 space-y-2">
+                              <div className="flex gap-2 items-center text-[10px]">
+                                <Label className="text-[10px] w-24">Strength</Label>
+                                <Slider
+                                  className="flex-1"
+                                  value={[lookParams.match.actuanceStrength ?? 0]}
+                                  min={0}
+                                  max={3}
+                                  step={0.05}
+                                  onValueChange={(v) => setParam("match", "actuanceStrength", v[0] ?? 0)}
+                                />
+                                <span className="text-[10px] tabular-nums w-8">
+                                  {(lookParams.match.actuanceStrength ?? 0).toFixed(2)}
+                                </span>
+                              </div>
+                              <div className="flex gap-2 items-center text-[10px]">
+                                <Label className="text-[10px] w-24">Radius</Label>
+                                <Slider
+                                  className="flex-1"
+                                  value={[lookParams.match.actuanceRadius ?? 1]}
+                                  min={0.5}
+                                  max={5}
+                                  step={0.25}
+                                  onValueChange={(v) => setParam("match", "actuanceRadius", v[0] ?? 1)}
+                                />
+                              </div>
+                              <div className="flex gap-2 items-center text-[10px]" title="Suppress actuance above this L to avoid dark strokes at shadow–highlight edges.">
+                                <Label className="text-[10px] w-24">Highlight guard</Label>
+                                <Slider
+                                  className="flex-1"
+                                  value={[lookParams.match.actuanceHighlightGuard ?? 0.65]}
+                                  min={0.5}
+                                  max={0.9}
+                                  step={0.05}
+                                  onValueChange={(v) => setParam("match", "actuanceHighlightGuard", v[0] ?? 0.65)}
+                                />
+                                <span className="text-[10px] tabular-nums w-8">
+                                  {(lookParams.match.actuanceHighlightGuard ?? 0.65).toFixed(2)}
+                                </span>
+                              </div>
+                              <div className="flex gap-2 items-center text-[10px]" title="L below which actuance is full strength; ramps to zero at highlight guard. Lower = wider transition zone.">
+                                <Label className="text-[10px] w-24">Transition floor</Label>
+                                <Slider
+                                  className="flex-1"
+                                  value={[lookParams.match.actuanceHighlightGuardFloor ?? 0.35]}
+                                  min={0.2}
+                                  max={0.75}
+                                  step={0.05}
+                                  onValueChange={(v) => setParam("match", "actuanceHighlightGuardFloor", v[0] ?? 0.35)}
+                                />
+                                <span className="text-[10px] tabular-nums w-8">
+                                  {(lookParams.match.actuanceHighlightGuardFloor ?? 0.35).toFixed(2)}
+                                </span>
+                              </div>
+                              <div className="flex gap-2 items-center text-[10px]" title="Fraction of shortest edge; small highlights below this extent are drowned out (actuance applied).">
+                                <Label className="text-[10px] w-24">Highlight min size</Label>
+                                <Slider
+                                  className="flex-1"
+                                  value={[lookParams.match.actuanceHighlightMinSize ?? 0.02]}
+                                  min={0.002}
+                                  max={0.02}
+                                  step={0.001}
+                                  onValueChange={(v) => setParam("match", "actuanceHighlightMinSize", v[0] ?? 0.02)}
+                                />
+                                <span className="text-[10px] tabular-nums w-8">
+                                  {(lookParams.match.actuanceHighlightMinSize ?? 0.02).toFixed(3)}
+                                </span>
+                              </div>
+                            </div>
+                          </details>
+                          <details className="mt-3 border-t pt-2">
+                            <summary className="text-[11px] font-medium text-muted-foreground/80 cursor-pointer">
+                              Post-Model 2: Halation
+                            </summary>
+                            <p className="text-[10px] text-muted-foreground mt-1">
+                              Highlight bloom/rim. Lower threshold = more area eligible; top 0.01% still gets strongest halation.
+                            </p>
+                            <div className="mt-2 space-y-2">
+                              <div className="flex gap-2 items-center text-[10px]">
+                                <Label className="text-[10px] w-24">Threshold (entry %)</Label>
+                                <Slider
+                                  className="flex-1"
+                                  value={[(lookParams.match.halationThreshold ?? 0.92) * 100]}
+                                  min={90}
+                                  max={99.99}
+                                  step={0.01}
+                                  onValueChange={(v) => setParam("match", "halationThreshold", (v[0] ?? 92) / 100)}
+                                />
+                                <span className="text-[10px] tabular-nums w-10">
+                                  {((lookParams.match.halationThreshold ?? 0.92) * 100).toFixed(2)}%
+                                </span>
+                              </div>
+                              <div className="flex gap-2 items-center text-[10px]">
+                                <Label className="text-[10px] w-24">Strength</Label>
+                                <Slider
+                                  className="flex-1"
+                                  value={[lookParams.match.highlightFillStrength ?? 2.0]}
+                                  min={0}
+                                  max={2}
+                                  step={0.05}
+                                  onValueChange={(v) => setParam("match", "highlightFillStrength", v[0] ?? 2.0)}
+                                />
+                                <span className="text-[10px] tabular-nums w-8">
+                                  {(lookParams.match.highlightFillStrength ?? 2.0).toFixed(2)}
+                                </span>
+                              </div>
+                              <div className="flex gap-2 items-center text-[10px]">
+                                <Label className="text-[10px] w-24">Warmth</Label>
+                                <Slider
+                                  className="flex-1"
+                                  value={[lookParams.match.highlightFillWarmth ?? 0.6]}
+                                  min={-1}
+                                  max={1}
+                                  step={0.05}
+                                  onValueChange={(v) => setParam("match", "highlightFillWarmth", v[0] ?? 0.6)}
+                                />
+                              </div>
+                              <div className="flex gap-2 items-center text-[10px]">
+                                <Label className="text-[10px] w-24">Tail gamma</Label>
+                                <Slider
+                                  className="flex-1"
+                                  value={[lookParams.match.halationTailGamma ?? 4]}
+                                  min={2}
+                                  max={6}
+                                  step={0.1}
+                                  onValueChange={(v) => setParam("match", "halationTailGamma", v[0] ?? 4)}
+                                />
+                              </div>
+                              <div className="flex gap-2 items-center text-[10px]">
+                                <Label className="text-[10px] w-24">Contrast gate</Label>
+                                <Slider
+                                  className="flex-1"
+                                  value={[lookParams.match.halationContrastGate ?? 1]}
+                                  min={0}
+                                  max={1}
+                                  step={0.01}
+                                  onValueChange={(v) => setParam("match", "halationContrastGate", v[0] ?? 1)}
+                                />
+                              </div>
+                              <div className="flex gap-2 items-center text-[10px]">
+                                <Label className="text-[10px] w-24">Rim strength</Label>
+                                <Slider
+                                  className="flex-1"
+                                  value={[lookParams.match.halationRimStrength ?? 0.6]}
+                                  min={0}
+                                  max={1}
+                                  step={0.01}
+                                  onValueChange={(v) => setParam("match", "halationRimStrength", v[0] ?? 0.6)}
+                                />
+                              </div>
+                              <div className="flex gap-2 items-center text-[10px]">
+                                <Label className="text-[10px] w-24">Bloom strength</Label>
+                                <Slider
+                                  className="flex-1"
+                                  value={[lookParams.match.halationBloomStrength ?? 0.8]}
+                                  min={0}
+                                  max={1}
+                                  step={0.01}
+                                  onValueChange={(v) => setParam("match", "halationBloomStrength", v[0] ?? 0.8)}
+                                />
+                              </div>
+                              <div className="flex gap-2 items-center text-[10px]">
+                                <Label className="text-[10px] w-24">Rim radius</Label>
+                                <Slider
+                                  className="flex-1"
+                                  value={[lookParams.match.halationRimRadius ?? 0.1]}
+                                  min={0}
+                                  max={0.75}
+                                  step={0.05}
+                                  onValueChange={(v) => setParam("match", "halationRimRadius", v[0] ?? 0.1)}
+                                />
+                              </div>
+                              <div className="flex gap-2 items-center text-[10px]">
+                                <Label className="text-[10px] w-24">Bloom radius</Label>
+                                <Slider
+                                  className="flex-1"
+                                  value={[lookParams.match.halationBloomRadius ?? 1]}
+                                  min={0}
+                                  max={2.5}
+                                  step={0.1}
+                                  onValueChange={(v) => setParam("match", "halationBloomRadius", v[0] ?? 1)}
+                                />
+                              </div>
+                            </div>
+                          </details>
+                        </>
+                      ) : (
+                      <>
                       {section.params.map((param) => {
                         const raw =
                           (sectionParams as Record<string, number>)[param.key];
@@ -1178,7 +1685,7 @@ export default function LabPage() {
                                     0.05,
                                 ]}
                                 min={0}
-                                max={0.6}
+                                max={lookParams.grading.refBlackL ?? 0.2}
                                 step={0.005}
                                 onValueChange={(v) =>
                                   setParam("match", "blackPoint", v[0] ?? 0.05)
@@ -1188,7 +1695,7 @@ export default function LabPage() {
                                 type="number"
                                 className="w-16 h-8 text-xs"
                                 min={0}
-                                max={0.6}
+                                max={lookParams.grading.refBlackL ?? 0.2}
                                 step={0.005}
                                 value={
                                   lookParams.match.blackPoint ??
@@ -1197,11 +1704,13 @@ export default function LabPage() {
                                 }
                                 onChange={(e) => {
                                   const n = parseFloat(e.target.value);
+                                  const maxVal =
+                                    lookParams.grading.refBlackL ?? 0.2;
                                   if (!Number.isNaN(n))
                                     setParam(
                                       "match",
                                       "blackPoint",
-                                      Math.max(0, Math.min(0.6, n))
+                                      Math.max(0, Math.min(maxVal, n))
                                     );
                                 }}
                               />
@@ -1532,6 +2041,8 @@ export default function LabPage() {
                           </details>
                         </>
                       )}
+                      </>
+                      )}
                     </div>
                   );
                 })}
@@ -1570,7 +2081,7 @@ export default function LabPage() {
                   Import JSON (corrected params from Supabase)
                 </summary>
                 <p className="text-[10px] text-muted-foreground mt-1">
-                  Paste the content of a "corrected params" cell from Supabase.
+                  Paste the content of a corrected params cell from Supabase.
                 </p>
                 <textarea
                   className="mt-2 w-full min-h-[100px] rounded-md border border-input bg-background px-3 py-2 text-xs font-mono"

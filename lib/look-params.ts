@@ -54,7 +54,8 @@ export function defaultExposureCurve(): { L_in: number[]; L_out: number[] } {
 /** Default 7-handle color density: same L anchors, scale all 1. */
 export function defaultColorDensityCurve(): { L_anchors: number[]; scale: number[] } {
   const L = [0, 1 / 6, 2 / 6, 3 / 6, 4 / 6, 5 / 6, 1];
-  return { L_anchors: [...L], scale: [1, 1, 1, 1, 1, 1, 1] };
+  // Default scales: handles 0–4 = 1.4, handle 5 = 1.2, handle 6 = 1.0.
+  return { L_anchors: [...L], scale: [1.4, 1.4, 1.4, 1.4, 1.4, 1.2, 1.0] };
 }
 
 /**
@@ -140,6 +141,8 @@ export interface LookParamsMatch {
   halationBloomRadius?: number;
   /** Halation interior guard (0–1). Attenuate halation in highlight cores; 0=off, 0.5=default. */
   halationInteriorGuard?: number;
+  /** Halation threshold (0.90–0.9999). Entry percentile for halation eligibility. Model 2 only; default 0.98. */
+  halationThreshold?: number;
   /** Refraction: shadow wheel (6 nodes: red, yellow, green, teal, blue, purple). Each node { hue: 0..360°, sat: 0..3 }. */
   refractionShadow?: RefractionWheel;
   /** Refraction: highlight wheel. Same shape. */
@@ -156,6 +159,12 @@ export interface LookParamsMatch {
   actuanceStrength?: number;
   /** Actuance radius (relative or pixels). */
   actuanceRadius?: number;
+  /** Luminance above which actuance is suppressed (0.5–0.9, default 0.65). Avoids dark strokes at shadow–highlight edges. */
+  actuanceHighlightGuard?: number;
+  /** L below which actuance is full strength; ramps to zero at highlight guard threshold. Range 0.2–0.75, default 0.5. */
+  actuanceHighlightGuardFloor?: number;
+  /** Fraction of shortest edge; highlights in regions smaller than this are drowned out (actuance applied). Range 0.002–0.02, default 0.005. */
+  actuanceHighlightMinSize?: number;
   /**
    * Per-band colour temperature (cold ↔ warm) controls (-1..1, 0 = neutral).
    * Negative values push the band cooler (towards blue/cyan), positive values
@@ -267,7 +276,8 @@ export const DEFAULT_LOOK_PARAMS: LookParams = {
     bandMidLuma: 0,
     bandLowerHighLuma: 0,
     bandUpperHighLuma: 0,
-    highlightFillStrength: 1.6,
+    colorDensityCurve: defaultColorDensityCurve(),
+    highlightFillStrength: 2.0,
     highlightFillWarmth: 0.6,
     halationTailGamma: 4,
     halationContrastGate: 1,
@@ -276,9 +286,13 @@ export const DEFAULT_LOOK_PARAMS: LookParams = {
     halationRimRadius: 0.1,
     halationBloomRadius: 1.0,
     halationInteriorGuard: 0.5,
+    halationThreshold: 0.92,
     // Default actuance is slightly on so local contrast is visible by default.
-    actuanceStrength: 1,
+    actuanceStrength: 1.3,
     actuanceRadius: 2,
+    actuanceHighlightGuard: 0.65,
+    actuanceHighlightGuardFloor: 0.35,
+    actuanceHighlightMinSize: 0.02,
     bandLowerShadowTemp: 0,
     bandUpperShadowTemp: 0,
     bandMidTemp: 0,

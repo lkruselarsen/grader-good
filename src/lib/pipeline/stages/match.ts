@@ -172,6 +172,8 @@ export interface LookParams {
     rimRadius?: number;
     bloomRadius?: number;
     interiorGuard?: number;
+    /** Entry percentile for halation eligibility (0.90–0.9999). Model 2 only. */
+    threshold?: number;
   };
   /** Refraction: shadow wheel. Six nodes { hue: 0..360°, sat: 0..3 } order: red, yellow, green, teal, blue, purple. */
   refractionShadow?: RefractionWheelEngine;
@@ -189,6 +191,12 @@ export interface LookParams {
   actuanceStrength?: number;
   /** Actuance radius (pixels or 0..1 relative). */
   actuanceRadius?: number;
+  /** Luminance above which actuance is suppressed (0.5–0.9). Avoids dark strokes at shadow–highlight edges. */
+  actuanceHighlightGuard?: number;
+  /** L below which actuance is full strength; ramps to zero at highlight guard threshold (0.2–0.75). */
+  actuanceHighlightGuardFloor?: number;
+  /** Fraction of shortest edge; highlights in regions smaller than this are drowned out (actuance applied). 0.002–0.02, default 0.005. */
+  actuanceHighlightMinSize?: number;
 }
 
 /** Six nodes: red, yellow, green, teal, blue, purple. hue 0..360 (degrees), sat 0..3 (multiplier, 1=normal). */
@@ -1123,6 +1131,20 @@ function gaussianBlurFilm(
   return gaussianBlur5(once, width, height);
 }
 
+/** Multiple passes of gaussianBlur5 for larger effective radius (~2px per pass). */
+function gaussianBlurNPasses(
+  src: Float32Array,
+  width: number,
+  height: number,
+  passes: number
+): Float32Array {
+  let cur = src;
+  for (let i = 0; i < passes; i++) {
+    cur = gaussianBlur5(cur, width, height);
+  }
+  return cur;
+}
+
 /**
  * RMS of a medium-frequency detail band on L, restricted to midtones.
  * Uses heavier blur for film-like, low-resolution microcontrast.
@@ -1193,6 +1215,9 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
     colorDensityCurve,
     contrastCurve,
     actuanceStrength = 0,
+    actuanceHighlightGuard,
+    actuanceHighlightGuardFloor,
+    actuanceHighlightMinSize,
   } = params;
   // params.actuanceRadius reserved for variable-radius actuance (future)
   const { lift, gamma, gain } = tone;
@@ -1455,16 +1480,33 @@ export function applyLook(source: ImageData, params: LookParams): ImageData {
   // Optional actuance pass: local contrast with strength and radius (uses same blur as microcontrast).
   const actuanceS = Math.max(0, Math.min(3, actuanceStrength)); // clamp 0..3 so UI can push further
   const ACTUANCE_AMP = 1.8; // amplify dL so same slider value looks noticeably stronger
+  const actuanceThreshold = Math.max(0.5, Math.min(0.9, actuanceHighlightGuard ?? 0.65));
+  const actuanceFloor = Math.min(
+    Math.max(0.2, Math.min(0.75, actuanceHighlightGuardFloor ?? 0.5)),
+    actuanceThreshold - 0.05
+  );
   if (actuanceS > 1e-3) {
     const blurredAct = gaussianBlurFilm(L_final, width, height);
+    const shortestEdge = Math.min(width, height);
+    const regionalRadius = Math.max(3, Math.floor(shortestEdge * (actuanceHighlightMinSize ?? 0.005)));
+    const regionalPasses = Math.max(2, Math.ceil(regionalRadius / 2));
+    const regionalBlurredL = gaussianBlurNPasses(L_final, width, height, regionalPasses);
     for (let idx = 0; idx < nPix; idx++) {
       if (!mask[idx]) continue;
+      const L = L_final[idx];
       const base = blurredAct[idx];
-      const dL = L_final[idx] - base;
-      let L = base + actuanceS * ACTUANCE_AMP * dL;
-      if (L < 0) L = 0;
-      else if (L > 1) L = 1;
-      L_final[idx] = L;
+      const maxL = Math.max(L, base);
+      const regionalL = regionalBlurredL[idx] ?? L;
+      let weight: number;
+      if (regionalL <= actuanceFloor) weight = 1;
+      else if (maxL <= actuanceFloor) weight = 1;
+      else if (maxL >= actuanceThreshold) weight = 0;
+      else weight = (actuanceThreshold - maxL) / (actuanceThreshold - actuanceFloor);
+      const dL = L - base;
+      let Lnew = base + weight * actuanceS * ACTUANCE_AMP * dL;
+      if (Lnew < 0) Lnew = 0;
+      else if (Lnew > 1) Lnew = 1;
+      L_final[idx] = Lnew;
     }
   }
 
@@ -1883,6 +1925,9 @@ export function applyLookFloat(source: PixelFrameF32, params: LookParams): Pixel
     colorDensityCurve,
     contrastCurve,
     actuanceStrength = 0,
+    actuanceHighlightGuard,
+    actuanceHighlightGuardFloor,
+    actuanceHighlightMinSize,
   } = params;
   const { lift, gamma, gain } = tone;
   const {
@@ -2069,13 +2114,30 @@ export function applyLookFloat(source: PixelFrameF32, params: LookParams): Pixel
 
   const actuanceS = Math.max(0, Math.min(3, actuanceStrength));
   const ACTUANCE_AMP = 1.8;
+  const actuanceThreshold = Math.max(0.5, Math.min(0.9, actuanceHighlightGuard ?? 0.65));
+  const actuanceFloor = Math.min(
+    Math.max(0.2, Math.min(0.75, actuanceHighlightGuardFloor ?? 0.5)),
+    actuanceThreshold - 0.05
+  );
   if (actuanceS > 1e-3) {
     const blurredAct = gaussianBlurFilm(L_final, width, height);
+    const shortestEdge = Math.min(width, height);
+    const regionalRadius = Math.max(3, Math.floor(shortestEdge * (actuanceHighlightMinSize ?? 0.005)));
+    const regionalPasses = Math.max(2, Math.ceil(regionalRadius / 2));
+    const regionalBlurredL = gaussianBlurNPasses(L_final, width, height, regionalPasses);
     for (let idx = 0; idx < nPix; idx++) {
       if (!mask[idx]) continue;
+      const L = L_final[idx];
       const base = blurredAct[idx];
-      const dL = L_final[idx] - base;
-      L_final[idx] = Math.max(0, Math.min(1, base + actuanceS * ACTUANCE_AMP * dL));
+      const maxL = Math.max(L, base);
+      const regionalL = regionalBlurredL[idx] ?? L;
+      let weight: number;
+      if (regionalL <= actuanceFloor) weight = 1;
+      else if (maxL <= actuanceFloor) weight = 1;
+      else if (maxL >= actuanceThreshold) weight = 0;
+      else weight = (actuanceThreshold - maxL) / (actuanceThreshold - actuanceFloor);
+      const dL = L - base;
+      L_final[idx] = Math.max(0, Math.min(1, base + weight * actuanceS * ACTUANCE_AMP * dL));
     }
   }
 

@@ -23,7 +23,10 @@ export function buildEngineParamsFromLookParams(
   engine.lumaStrength = m.lumaStrength ?? 1;
   engine.colorStrength = m.colorStrength ?? 1;
   engine.exposureStrength = m.exposureStrength ?? 1;
-  engine.refBlackL = m.blackPoint ?? finalGrading?.refBlackL ?? 0.05;
+  engine.refBlackL =
+    m.blackPoint !== undefined && m.blackPoint !== null
+      ? m.blackPoint
+      : (finalGrading?.refBlackL ?? 0.05);
   if (typeof m.blackStrength === "number") engine.blackStrength = m.blackStrength;
   if (typeof m.blackRange === "number") engine.blackRange = m.blackRange;
   engine.colorBandStrengths = {
@@ -74,6 +77,7 @@ export function buildEngineParamsFromLookParams(
     rimRadius: m.halationRimRadius ?? 0.1,
     bloomRadius: m.halationBloomRadius ?? 1.0,
     interiorGuard: m.halationInteriorGuard ?? 0.5,
+    ...(m.halationThreshold != null ? { threshold: m.halationThreshold } : {}),
   };
   engine.refractionShadow = (m.refractionShadow ?? defaultRefractionWheel()) as typeof engine.refractionShadow;
   engine.refractionHighlight = (m.refractionHighlight ?? defaultRefractionWheel()) as typeof engine.refractionHighlight;
@@ -83,5 +87,8 @@ export function buildEngineParamsFromLookParams(
   engine.contrastCurve = m.contrastCurve ?? defaultContrastCurve();
   if (m.actuanceStrength != null) engine.actuanceStrength = m.actuanceStrength;
   if (m.actuanceRadius != null) engine.actuanceRadius = m.actuanceRadius;
+  if (m.actuanceHighlightGuard != null) engine.actuanceHighlightGuard = m.actuanceHighlightGuard;
+  if (m.actuanceHighlightGuardFloor != null) engine.actuanceHighlightGuardFloor = m.actuanceHighlightGuardFloor;
+  if (m.actuanceHighlightMinSize != null) engine.actuanceHighlightMinSize = m.actuanceHighlightMinSize;
   return engine;
 }
