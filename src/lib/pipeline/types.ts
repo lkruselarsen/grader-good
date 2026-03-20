@@ -87,5 +87,14 @@ export interface PipelineParams {
    * Set from post-exposure result percentiles in phased training.
    */
   colorBandAnchors?: number[];
+  /**
+   * Match model: 1 = OKLab color engine (default), 2 = Reinhard-style transfer.
+   * When 2, model2Strength and model2RobustSampling are used.
+   */
+  matchModel?: 1 | 2;
+  /** Model 2: blend strength 0–1. Default 1 (full transfer). */
+  model2Strength?: number;
+  /** Model 2: exclude L<0.02 or L>0.98 when computing mean/std. Default true. */
+  model2RobustSampling?: boolean;
   // Extensible; no UI-specific fields.
 }

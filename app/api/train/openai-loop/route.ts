@@ -15,6 +15,7 @@ import { NextResponse } from "next/server";
 import {
   decodeBufferToLinearFloat,
   frameToPngBuffer,
+  cropFrameToPngBuffer,
 } from "@/src/lib/pipeline/decodeNode";
 import { processFramesFloat } from "@/src/lib/pipeline/processFrames";
 import {
@@ -31,6 +32,7 @@ import {
   filterNonHalationDeltas,
   filterHalationDeltas,
   filterPhaseDeltas,
+  filterPhaseDeltasModel2,
   ensureFullMatch,
   parseJsonDeltas,
 } from "@/lib/apply-grading-deltas";
@@ -43,6 +45,10 @@ import {
 import type { LookParams, LookParamsMatch } from "@/lib/look-params";
 import type { PixelFrameF32, PixelFrameRGBA } from "@/src/lib/pipeline/types";
 import { supabaseAdmin } from "@/lib/supabase/server";
+import {
+  findToneBandCropRegions,
+  TONE_BAND_NAMES,
+} from "@/lib/tone-band-crops";
 
 /** Max edge for images sent to OpenAI (evaluation prompt). At least 2048 for color accuracy. */
 const IMAGE_MAX_EDGE = 2048;
@@ -50,7 +56,7 @@ const IMAGE_MAX_EDGE = 2048;
 const EXPORT_MAX_EDGE = 8192;
 
 const OPENAI_SYSTEM_PROMPT = `
-You are a professional color grader with expert knowledge in the characteristics of color negative film. You will be grading a digital raw image to look exactly like a film reference. You compare a RESULT image to a REFERENCE image and suggest NUMERIC parameter deltas so the result looks as close as possible to the reference.
+You will be grading an source/result image to look exactly like the reference image. You compare a RESULT image to a REFERENCE image and suggest NUMERIC parameter deltas so the result looks as close as possible to the reference.
 You might receive one or two previous edit iterations that can teach you about the visual effects of your tools. You will work in one isolated phase, before the image is handed to the next professional.
 
 Output rules:
@@ -84,7 +90,7 @@ const PHASE_PROMPTS: Record<1 | 2 | 3 | 4 | 5 | 6 | 7 | 8, string> = {
 
 Parameters (adjust only these):
 - exposureCurve.L_out_0 … L_out_6: L_out_0 = blackpoint. L_out_1–6 (0–2) = exposure multipliers; 1 = neutral, >1 brightens, <1 darkens. EV: 1 = 0 EV, 1.4≈+0.5 EV, 0.7≈−0.5 EV.
-- blackPoint (0–0.2), blackRange (0.3–1.8), blackStrength (5–8): shadow depth.
+- blackPoint (0–REF_BLACK_L), blackRange (0.3–1.8), blackStrength (0.5–8): shadow depth. refBlackL comes from the reference; blackPoint overrides it when set.
 - bandLowerShadowLuma … bandUpperHighLuma (-0.2–0.2): per-band tone adjustment. 
 - exposureStrength (0–1.5): toward simplified reference exposure. 
 
@@ -92,39 +98,65 @@ If raw source is strongly underexeposed: Max out exposureCurve.L_out_1 … L_out
 
 
 Band awareness: If exposure was pushed up, "midtones" may contain lifted shadows; bands use post-adjustment L. Return JSON of deltas only. Omit keys for no change.`,
-  2: `Phase 2: Overall contrast only. Make the digital raw look exactly like the film reference.
+  2: `Phase 2: Overall contrast only. Make the digital raw look like the reference.
 
-Parameters: contrastCurve.values_0 … values_6 (-5 to +5). Filmic curve: H0 darkest shadows, H6 brightest highlights. Negative = deeper density, positive = bleach-bypass feel. Default no-change: [-5,-3.5,-1.75,0,1.75,3.5,5]. Also: bandLowerShadowLuma (only decrease, never lift), exposureCurve.L_out_0 (only decrease, never lift), blackStrength (5–8).
+Parameters: contrastCurve.values_0 … values_6 (-5 to +5). Filmic curve: H0 darkest shadows, H6 brightest highlights. Negative = deeper density, positive = bleach-bypass feel. Default no-change: [-5,-3.5,-1.75,0,1.75,3.5,5]. Also: bandLowerShadowLuma, exposureCurve.L_out_0, blackStrength (0.5–8).
 
 Return JSON of deltas only. Omit keys for no change.`,
-  3: `Phase 3: Color density curve only. Make the digital raw look exactly like the color density in film reference
+  3: `Phase 3: Color density curve only. Make the digital raw look like the color density in the reference
 
 Parameters: colorDensityCurve.scale_0 … scale_6 (0.2–2.5). Per-tonal-region chroma at 7 L anchors. >1 increases saturation at that L; <1 reduces it. Film has strong density in midtones/lower highlights.
 
 Return JSON of deltas only. Omit keys for no change.`,
-  4: `Phase 4: Overall grading (hue/temp) only. Film reference may have split colors (highlights vs shadows). Make the digital raw look exactly like the grading in thefilm reference.
+  4: `Phase 4: Overall grading (hue/temp) only. reference may have split colors (highlights vs shadows). Make the digital raw look like the grading in the reference.
 
-Parameters: colorStrength (0–1.8), bandMidTemp (-1–1), bandMidHue (-1–1), bandMidSat. Per-band temp: −1≈7500K cool, +1≈4000K warm; ±0.1≈±200K. Per-band hue: −1=−30°, +1=+30°; 0°=red, 120°=green, 240°=blue.
+Parameters: colorStrength (0–1.8), bandMidTemp (-1–1), bandMidHue (-1–1), bandMidSat. Per-band hue: −1=−30°, +1=+30°; 0°=red, 120°=green, 240°=blue.
 
 Return JSON of deltas only. Omit keys for no change.`,
-  5: `Phase 5: Per-band grading only. Film has unique color separation. Watch for individual objects' colors not matching reference. Make the digital raw look exactly like the color grading in the film reference.
+  5: `Phase 5: Per-band grading only. Film has unique color separation. Watch for individual objects' colors not matching reference. Make the digital raw look like the color grading in the reference.
+
+Distinguish halation warmth (bloom/glow around bright edges) from per-band highlight color. Band highlight controls affect the color of bright tones; do not push warmth if the reference's highlight warmth is from halation, not local color.
 
 Parameters: bandLowerShadow*, bandUpperShadow*, bandLowerHigh*, bandUpperHigh* (Hue, Sat, Temp only — no Luma). Hue: + = clockwise, − = counter-clockwise. Temp: − = cooler, + = warmer. Use bands to target shadows vs mids vs highlights.
 
 Return JSON of deltas only. Omit keys for no change.`,
-  6: `Phase 6: Refraction only. Fix specific object colors: car wrong red, tree wrong green, flower wrong pink. Fix individual, isolated colors that might have been ruined by the overall grade.
+  6: `Phase 6: Refraction only. Fix specific object colors. Fix individual, isolated colors that might have been ruined by the overall grade.
 
-Parameters: refractionShadow.<color>.hue (0–360), .sat (0–3); refractionHighlight.<color>.hue, .sat; refractionSplitL (0–1). Defaults: red=0, yellow=60, green=120, teal=180, blue=240, purple=300. Green 120→115 = more orange; 120→125 = cooler/greener. Are you getting greens right? Check current params before adjusting.
+Parameters: refractionShadow.<color>.hue (0–360), .sat (0–3); refractionHighlight.<color>.hue, .sat; refractionSplitL (0–1). Defaults: red=0, yellow=60, green=120, teal=180, blue=240, purple=300. Green 120→115 = more orange; 120→125 = cooler/greener.  Check current params before adjusting.
 
 Return JSON of deltas only. Omit keys for no change.`,
   7: `Phase 7: Actuance only. Microcontrast and sharpness.
 
-Parameters: actuanceStrength (0.75–3): higher = stronger crispness. actuanceRadius (0.5–5): lower = fine detail only, higher = coarser structures.
+Parameters: actuanceStrength (0.75–3): higher = stronger crispness. actuanceRadius (0.5–5): lower = fine detail only, higher = coarser structures. actuanceHighlightGuard (0.5–0.9, default 0.65): L above which actuance is suppressed to avoid dark strokes at shadow–highlight edges. actuanceHighlightGuardFloor (0.2–0.75, default 0.5): L below which actuance is full; ramps to zero at highlight guard. Lower = wider transition. actuanceHighlightMinSize (0.002–0.02, default 0.005): fraction of shortest edge; highlights in regions smaller than this are drowned out. Lower = more small highlights get actuance.
 
 Return JSON of deltas only. Omit keys for no change.`,
   8: `Phase 8: Halation only. Highlight bloom and rim.
 
-Parameters: highlightFillStrength (0–2), highlightFillWarmth (-1–1), halationTailGamma (2–6, default 4), halationContrastGate (0–1), halationRimStrength (0–1), halationBloomStrength (0–1), halationRimRadius (0–0.75), halationBloomRadius (0–2.5).
+Parameters: highlightFillStrength (0–2), highlightFillWarmth (-1–1), halationTailGamma (2–6, default 4)(higher value means halation only appears on super-high-exposure areas), halationContrastGate (0–1)(high value means halation only appears on the highest-contrast boundaries), halationRimStrength (0–1), halationBloomStrength (0–1), halationRimRadius (0–0.75), halationBloomRadius (0–2.5).
+
+Return JSON of deltas only. Omit keys for no change.`,
+};
+
+/** Model 2: 3 phases. Only params that work post-Model2. Phase 1 = exposure+color density+actuance; 2 = per-band hue/temp; 3 = halation. */
+const MODEL2_PHASE_PROMPTS: Record<1 | 2 | 3, string> = {
+  1: `Phase 1 (combined): Exposure, Color density, Actuance. Post-Model2: only these params apply. Make the source/result match the reference in exposure, color density, and sharpness.
+
+Parameters (adjust only these):
+- exposureCurve.L_out_0 … L_out_6: L_out_0 = blackpoint (0–1). L_out_1–6 max 1.5 each (0–1.5). 1 = neutral, >1 brightens, <1 darkens. EV: 1 = 0 EV, 1.4≈+0.5 EV.
+- colorDensityCurve.scale_0 … scale_6: min 0.8 each (0.8–2.5). Per-tonal-region chroma.
+- actuanceStrength (0–3), actuanceRadius (0.5–5), actuanceHighlightGuard (0.5–0.9, default 0.65), actuanceHighlightGuardFloor (0.2–0.75, default 0.5), actuanceHighlightMinSize (0.002–0.02, default 0.005): actuance ramps from full at floor to zero at highlight guard. actuanceHighlightMinSize: fraction of shortest edge; highlights in regions smaller than this are drowned out. Lower = more small highlights get actuance.
+
+Return JSON of deltas only. Omit keys for no change.`,
+  2: `Phase 2: Per-band hue and temperature only. Post-Model2: only hue and temp apply. Match the reference's per-band color.
+
+Distinguish halation warmth (bloom/glow around bright edges) from per-band highlight color.
+
+Parameters: bandLowerShadowHue, bandUpperShadowHue, bandMidHue, bandLowerHighHue, bandUpperHighHue; bandLowerShadowTemp, bandUpperShadowTemp, bandMidTemp, bandLowerHighTemp, bandUpperHighTemp. All max 0.5, min -0.5. Hue: + = clockwise, − = counter-clockwise. Temp: − = cooler, + = warmer.
+
+Return JSON of deltas only. Omit keys for no change.`,
+  3: `Phase 3: Halation only. Highlight bloom and rim.
+
+Parameters: highlightFillStrength (0–2), highlightFillWarmth (-1–1), halationThreshold (0.90–0.9999, default 0.98; lower = more area eligible; top 0.01% still gets strongest halation), halationTailGamma (2–6), halationContrastGate (0–1), halationRimStrength (0–1), halationBloomStrength (0–1), halationRimRadius (0–0.75), halationBloomRadius (0–2.5).
 
 Return JSON of deltas only. Omit keys for no change.`,
 };
@@ -268,6 +300,7 @@ function getPhasedSchedule(maxIter: number): {
   itersPerPhase: number;
   numRuns: number;
 } {
+  if (maxIter < 10) return { itersPerPhase: maxIter, numRuns: 1 };
   if (maxIter <= 15) return { itersPerPhase: 5, numRuns: 2 };
   if (maxIter <= 30) return { itersPerPhase: 10, numRuns: 2 };
   return { itersPerPhase: 10, numRuns: 4 };
@@ -282,19 +315,22 @@ async function runTrainingJob(options: {
     reference_base64?: string;
     source_url?: string;
     reference_url?: string;
+    ref_source_same_scene?: boolean;
   }>;
   maxIterations: number;
   cameraType: string | null;
   useLibraw?: boolean;
   phased?: boolean;
+  model2?: boolean;
 }): Promise<void> {
-  const { apiKey, requestUrl, runId, pairs, maxIterations, cameraType, useLibraw, phased } = options;
+  const { apiKey, requestUrl, runId, pairs, maxIterations, cameraType, useLibraw, phased, model2 } = options;
 
   const { itersPerPhase, numRuns } = phased
     ? getPhasedSchedule(maxIterations)
     : { itersPerPhase: 0, numRuns: 1 };
+  const numPhases = phased && model2 ? 3 : 8;
   const totalPhaseIterations = phased
-    ? numRuns * 8 * itersPerPhase
+    ? numRuns * numPhases * itersPerPhase
     : maxIterations;
 
   // Track the configured max_iterations and total pairs on the run up-front.
@@ -362,7 +398,11 @@ async function runTrainingJob(options: {
 
         const engineParams = fitLookParamsFromReference(referenceFrame);
         const fittedGrading = engineToGrading(engineParams);
-        const initialMatch = { ...DEFAULT_LOOK_PARAMS.match };
+        const refBlackL = fittedGrading.refBlackL ?? 0.2;
+        const initialMatch = {
+          ...DEFAULT_LOOK_PARAMS.match,
+          blackPoint: refBlackL,
+        };
         let currentParams: LookParams = {
           match: initialMatch,
           grading: fittedGrading,
@@ -389,15 +429,17 @@ async function runTrainingJob(options: {
           let globalIterCount = 0;
           let bandAnchors: number[] | null = null;
           let secondLastResultBase64: string | null = null;
+          let secondLastResultFrame: PixelFrameRGBA | null = null;
           let secondLastParams: Record<string, unknown> | null = null;
           for (let runIdx = 0; runIdx < numRuns; runIdx++) {
-            for (let phase = 1; phase <= 8; phase++) {
+            for (let phase = 1; phase <= numPhases; phase++) {
               for (let phaseIter = 0; phaseIter < itersPerPhase; phaseIter++) {
+                secondLastResultFrame = lastResultFrame;
                 globalIterCount++;
                 await updateTrainingRun(runId, {
                   current_iteration: globalIterCount,
                 });
-                const useHalation = phase === 8;
+                const useHalation = phase === numPhases;
                 const paramsForPhase: LookParams = useHalation
                   ? currentParams
                   : {
@@ -411,15 +453,23 @@ async function runTrainingJob(options: {
                   paramsForPhase,
                   fittedGrading
                 );
+                const pipelineParams = {
+                  strength: 1,
+                  grading: enginePhase,
+                  exposureMap: useHalation ? exposureMap : undefined,
+                  colorBandAnchors: bandAnchors ?? undefined,
+                  ...(model2
+                    ? {
+                        matchModel: 2 as const,
+                        model2Strength: 1,
+                        model2RobustSampling: true,
+                      }
+                    : {}),
+                };
                 const resultFramePhaseFloat = processFramesFloat(
                   sourceFrame,
                   referenceFrame,
-                  {
-                    strength: 1,
-                    grading: enginePhase,
-                    exposureMap: useHalation ? exposureMap : undefined,
-                    colorBandAnchors: bandAnchors ?? undefined,
-                  }
+                  pipelineParams
                 );
                 lastResultFrame = pixelFrameF32ToPixelFrameRGBA(resultFramePhaseFloat);
                 if (phase === 1 && phaseIter === itersPerPhase - 1) {
@@ -429,8 +479,13 @@ async function runTrainingJob(options: {
                   maxEdge: IMAGE_MAX_EDGE,
                 });
                 const resultBase64Phase = resultPngPhase.toString("base64");
-                const phaseName =
-                  phase === 1
+                const phaseName = model2
+                  ? (phase === 1
+                      ? "Exposure+Contrast+Density+Acutance"
+                      : phase === 2
+                        ? "Per-band"
+                        : "Halation")
+                  : phase === 1
                     ? "Exposure"
                     : phase === 2
                       ? "Contrast"
@@ -451,22 +506,43 @@ async function runTrainingJob(options: {
                 const secondLastText = hasSecondLast
                   ? `\nLast params (absolute): ${paramsBeforeDeltas}\nDeltas from second-last to last: ${JSON.stringify(lastDeltas)}\nSecond-last params (absolute): ${JSON.stringify(secondLastParams ?? {})}`
                   : "";
+                const refSourceSameScene = pair.ref_source_same_scene ?? true;
+                const hasToneCrops = model2
+                  ? ((phase === 1 && refSourceSameScene) || (phase === 2 && bandAnchors != null)) &&
+                    (phase === 1 ? true : bandAnchors != null)
+                  : ((phase === 3 || phase === 5 || phase === 6) ||
+                      (phase === 1 && refSourceSameScene)) &&
+                    (phase === 1 ? true : bandAnchors != null);
                 const imgDesc = hasSecondLast
                   ? "Images: 1=result, 2=second-last edit, 3=reference."
                   : includeSource
                     ? "Images: 1=result, 2=reference, 3=pre-edit source. Use source to see original dark vs bright."
                     : "Images: 1=result, 2=reference.";
+                const cropNote = hasToneCrops
+                  ? phase === 1 && refSourceSameScene
+                    ? " Per-band crops: same x,y for previous | current | reference, from reference exposure map. Use these to see how exposure differs at each location. Make the result match the reference's exposure at each area."
+                    : refSourceSameScene
+                      ? " Per-band crops: same x,y coordinates for all three (previous | current | reference). Coordinates are from the reference. Previous/current may not match the band at that spot yet—aim to make them look like the reference."
+                      : " Then 300×300 tone-band crops (previous, current, reference) for lower shadow, upper shadow, midtone, lower highlight, upper highlight."
+                  : "";
                 const lastRunNote =
                   runIdx + 1 === numRuns
                     ? "\nYou are in the last run. The previous agents will have attempted to get the core parameters on point. Prioritize smaller adjustments.\n"
                     : "";
-                const phaseUserText = `${PHASE_PROMPTS[phase as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8]}${lastRunNote}
+                const phasePromptRaw = model2
+                  ? MODEL2_PHASE_PROMPTS[phase as 1 | 2 | 3]
+                  : PHASE_PROMPTS[phase as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8];
+                const phasePrompt = phasePromptRaw.replace(
+                  "REF_BLACK_L",
+                  refBlackL.toFixed(3)
+                );
+                const phaseUserText = `${phasePrompt}${lastRunNote}
 
 Run ${runIdx + 1}/${numRuns}, Phase ${phase} (${phaseName}), iteration ${phaseIter + 1}/${itersPerPhase}.${secondLastText}
 
 Current match parameters: ${paramsBeforeDeltas}
 
-${imgDesc} Compare result to reference. Return JSON of parameter deltas only for this phase. Required: include a "description" field (short phrase) describing your intent, e.g. "lift shadows +0.2 EV" or "no change".`;
+${imgDesc}${cropNote} Compare result to reference. Return JSON of parameter deltas only for this phase. Required: include a "description" field (short phrase) describing your intent, e.g. "lift shadows +0.2 EV" or "no change".`;
 
                 const contentItems: Array<
                   { type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }
@@ -500,6 +576,108 @@ ${imgDesc} Compare result to reference. Return JSON of parameter deltas only for
                       url: `data:image/png;base64,${sourceBase64}`,
                     },
                   });
+                }
+
+                if (hasToneCrops) {
+                  const refBandAnchors =
+                    computeBandAnchorsFromFrame(referenceFrame);
+                  const refRgba = pixelFrameF32ToPixelFrameRGBA(referenceFrame);
+                  const refRegions = findToneBandCropRegions(
+                    refRgba,
+                    refBandAnchors,
+                    300
+                  );
+                  const currentBandAnchors =
+                    phase === 1 && refSourceSameScene
+                      ? refBandAnchors
+                      : computeBandAnchorsFromFrame(resultFramePhaseFloat);
+                  const currentRegions =
+                    refSourceSameScene
+                      ? refRegions
+                      : findToneBandCropRegions(
+                          lastResultFrame,
+                          currentBandAnchors,
+                          300
+                        );
+                  const prevCurrRegions = refSourceSameScene
+                    ? refRegions
+                    : currentRegions;
+                  contentItems.push({
+                    type: "text",
+                    text: "\n--- 300×300 tone-band crops (previous | current | reference) ---\n",
+                  });
+                  const cropPromises: Promise<string>[] = [];
+                  for (let b = 0; b < 5; b++) {
+                    const prevReg = prevCurrRegions[b];
+                    const currReg = refSourceSameScene ? refRegions[b] : currentRegions[b];
+                    const refReg = refRegions[b];
+                    if (hasSecondLast && secondLastResultFrame) {
+                      cropPromises.push(
+                        cropFrameToPngBuffer(
+                          secondLastResultFrame,
+                          prevReg.x,
+                          prevReg.y,
+                          300,
+                          300
+                        ).then((buf) =>
+                          `data:image/png;base64,${buf.toString("base64")}`
+                        )
+                      );
+                    }
+                    cropPromises.push(
+                      cropFrameToPngBuffer(
+                        lastResultFrame,
+                        currReg.x,
+                        currReg.y,
+                        300,
+                        300
+                      ).then((buf) =>
+                        `data:image/png;base64,${buf.toString("base64")}`
+                      )
+                    );
+                    cropPromises.push(
+                      cropFrameToPngBuffer(
+                        refRgba,
+                        refReg.x,
+                        refReg.y,
+                        300,
+                        300
+                      ).then((buf) =>
+                        `data:image/png;base64,${buf.toString("base64")}`
+                      )
+                    );
+                  }
+                  const cropUrls = await Promise.all(cropPromises);
+                  let idx = 0;
+                  for (let b = 0; b < 5; b++) {
+                    const label = TONE_BAND_NAMES[b];
+                    if (hasSecondLast && secondLastResultFrame) {
+                      contentItems.push({
+                        type: "text",
+                        text: `${label} - previous:`,
+                      });
+                      contentItems.push({
+                        type: "image_url",
+                        image_url: { url: cropUrls[idx++] },
+                      });
+                    }
+                    contentItems.push({
+                      type: "text",
+                      text: `${label} - current:`,
+                    });
+                    contentItems.push({
+                      type: "image_url",
+                      image_url: { url: cropUrls[idx++] },
+                    });
+                    contentItems.push({
+                      type: "text",
+                      text: `${label} - reference:`,
+                    });
+                    contentItems.push({
+                      type: "image_url",
+                      image_url: { url: cropUrls[idx++] },
+                    });
+                  }
                 }
 
                 const openaiResPhase = await fetchWithRetry(
@@ -551,10 +729,12 @@ ${imgDesc} Compare result to reference. Return JSON of parameter deltas only for
                   // ignore
                 }
                 const rawDeltas = parseJsonDeltas(contentPhase);
-                const deltasPhase = filterPhaseDeltas(
-                  phase as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8,
-                  rawDeltas
-                );
+                const deltasPhase = model2
+                  ? filterPhaseDeltasModel2(phase as 1 | 2 | 3, rawDeltas)
+                  : filterPhaseDeltas(
+                      phase as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8,
+                      rawDeltas
+                    );
                 try {
                   if (supabaseAdmin) {
                     await supabaseAdmin.from("training_iteration_logs").insert({
@@ -578,7 +758,8 @@ ${imgDesc} Compare result to reference. Return JSON of parameter deltas only for
                 if (Object.keys(deltasPhase).length > 0) {
                   currentParams = applyGradingDeltas(
                     currentParams,
-                    deltasPhase
+                    deltasPhase,
+                    model2 ? { model2: true, model2Phase: phase as 1 | 2 | 3 } : undefined
                   );
                 }
                 lastDeltas = deltasPhase;
@@ -607,11 +788,23 @@ ${imgDesc} Compare result to reference. Return JSON of parameter deltas only for
               paramsSubstep1,
               fittedGrading
             );
+            const pipelineParams1 = {
+              strength: 1,
+              grading: engine1,
+              exposureMap: undefined as ExposureMap | undefined,
+              ...(model2
+                ? {
+                    matchModel: 2 as const,
+                    model2Strength: 1,
+                    model2RobustSampling: true,
+                  }
+                : {}),
+            };
             let resultFrame1: PixelFrameRGBA = pixelFrameF32ToPixelFrameRGBA(
               processFramesFloat(
                 sourceFrame,
                 referenceFrame,
-                { strength: 1, grading: engine1, exposureMap: undefined }
+                pipelineParams1
               )
             );
 
@@ -716,7 +909,8 @@ Images: 1=result, 2=reference, 3=pre-edit source. Use the source to see what was
             if (Object.keys(nonHalationDeltas).length > 0) {
               currentParams = applyGradingDeltas(
                 currentParams,
-                nonHalationDeltas
+                nonHalationDeltas,
+                model2 ? { model2: true } : undefined
               );
             }
             // Clear substep 1 result to help GC (Phase 4).
@@ -735,12 +929,20 @@ Images: 1=result, 2=reference, 3=pre-edit source. Use the source to see what was
               currentParams,
               fittedGrading
             );
+            const pipelineParams2 = {
+              strength: 1,
+              grading: engine2,
+              exposureMap,
+              ...(model2
+                ? {
+                    matchModel: 2 as const,
+                    model2Strength: 1,
+                    model2RobustSampling: true,
+                  }
+                : {}),
+            };
             const resultFrame2 = pixelFrameF32ToPixelFrameRGBA(
-              processFramesFloat(sourceFrame, referenceFrame, {
-                strength: 1,
-                grading: engine2,
-                exposureMap,
-              })
+              processFramesFloat(sourceFrame, referenceFrame, pipelineParams2)
             );
             lastResultFrame = resultFrame2;
 
@@ -826,7 +1028,8 @@ Images: 1=result, 2=reference, 3=pre-edit source. Compare result to reference, r
             if (Object.keys(halationDeltas).length > 0) {
               currentParams = applyGradingDeltas(
                 currentParams,
-                halationDeltas
+                halationDeltas,
+                model2 ? { model2: true } : undefined
               );
             }
 
@@ -895,17 +1098,25 @@ Images: 1=result, 2=reference, 3=pre-edit source. Compare result to reference, r
                 postErr
               );
             }
+            const exportParams = {
+              strength: 1,
+              grading: buildEngineParamsFromLookParams(
+                currentParams,
+                fittedGrading
+              ),
+              exposureMap,
+              ...(model2
+                ? {
+                    matchModel: 2 as const,
+                    model2Strength: 1,
+                    model2RobustSampling: true,
+                  }
+                : {}),
+            };
             const frameToExport =
               lastResultFrame ??
               pixelFrameF32ToPixelFrameRGBA(
-                processFramesFloat(sourceFrame, referenceFrame, {
-                  strength: 1,
-                  grading: buildEngineParamsFromLookParams(
-                    currentParams,
-                    fittedGrading
-                  ),
-                  exposureMap,
-                })
+                processFramesFloat(sourceFrame, referenceFrame, exportParams)
               );
             const finalUrl = await persistTrainingImage(
               frameToExport,
@@ -972,17 +1183,25 @@ Images: 1=result, 2=reference, 3=pre-edit source. Compare result to reference, r
           throw new Error(errData.error ?? "Failed to POST correction");
         }
 
+        const finalExportParams = {
+          strength: 1,
+          grading: buildEngineParamsFromLookParams(
+            currentParams,
+            fittedGrading
+          ),
+          exposureMap,
+          ...(model2
+            ? {
+                matchModel: 2 as const,
+                model2Strength: 1,
+                model2RobustSampling: true,
+              }
+            : {}),
+        };
         const frameToExport =
           lastResultFrame ??
           pixelFrameF32ToPixelFrameRGBA(
-            processFramesFloat(sourceFrame, referenceFrame, {
-              strength: 1,
-              grading: buildEngineParamsFromLookParams(
-                currentParams,
-                fittedGrading
-              ),
-              exposureMap,
-            })
+            processFramesFloat(sourceFrame, referenceFrame, finalExportParams)
           );
         const finalPng = await frameToPngBuffer(frameToExport, {
           maxEdge: EXPORT_MAX_EDGE,
@@ -1038,11 +1257,13 @@ export async function POST(request: Request) {
       reference_base64?: string;
       source_url?: string;
       reference_url?: string;
+      ref_source_same_scene?: boolean;
     }>;
     max_iterations?: number;
     camera_type?: string | null;
     use_libraw?: boolean;
     phased?: boolean;
+    model2?: boolean;
   };
   try {
     body = await request.json();
@@ -1051,14 +1272,10 @@ export async function POST(request: Request) {
   }
 
   const phased = body.phased ?? false;
+  const model2 = body.model2 ?? false;
   const rawMaxIter = body.max_iterations ?? 20;
-  const maxIterations = phased
-    ? rawMaxIter <= 15
-      ? 10
-      : rawMaxIter <= 30
-        ? 20
-        : 40
-    : Math.max(5, Math.min(100, rawMaxIter));
+  // When phased, use raw value (clamped); getPhasedSchedule handles n<10 → 1 run, n iters/phase.
+  const maxIterations = Math.max(5, Math.min(100, rawMaxIter));
   const pairs = body.pairs;
   const cameraType = body.camera_type ?? null;
   if (!Array.isArray(pairs) || pairs.length === 0) {
@@ -1108,6 +1325,7 @@ export async function POST(request: Request) {
     cameraType,
     useLibraw: body.use_libraw ?? false,
     phased,
+    model2,
   });
 
   return NextResponse.json({

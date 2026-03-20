@@ -100,10 +100,18 @@ function clampMatchParam(key: string, value: number): number {
       return clamp(value, 0, 2);
     case "halationBloomRadius":
       return clamp(value, 0, 10);
+    case "halationThreshold":
+      return clamp(value, 0.9, 0.9999);
     case "actuanceStrength":
       return clamp(value, 0, 2);
     case "actuanceRadius":
       return clamp(value, 0.5, 5);
+    case "actuanceHighlightGuard":
+      return clamp(value, 0.5, 0.9);
+    case "actuanceHighlightGuardFloor":
+      return clamp(value, 0.2, 0.75);
+    case "actuanceHighlightMinSize":
+      return clamp(value, 0.002, 0.02);
     default:
       // Unknown numeric slider – leave as-is.
       return value;

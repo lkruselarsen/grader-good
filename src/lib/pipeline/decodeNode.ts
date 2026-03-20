@@ -58,8 +58,13 @@ async function decodeWithSharp(
   maxEdge?: number,
   options?: { limitInputPixels?: number }
 ): Promise<PixelFrameRGBA> {
-  const sharp = (await import("sharp")).default;
   const buf = toBuffer(buffer);
+  if (buf.length === 0) {
+    throw new Error(
+      "decodeWithSharp: input buffer is empty. Image may be corrupted or truncated."
+    );
+  }
+  const sharp = (await import("sharp")).default;
   const sharpOpts: { limitInputPixels?: number } = {};
   if (options?.limitInputPixels != null) sharpOpts.limitInputPixels = options.limitInputPixels;
   let pipeline = sharp(buf, sharpOpts).ensureAlpha();
@@ -723,6 +728,40 @@ export async function resizeFrame(
 }
 
 /**
+ * Crop a frame to a rectangular region and encode to PNG buffer.
+ * Bounds are clamped to frame dimensions.
+ */
+export async function cropFrameToPngBuffer(
+  frame: PixelFrameRGBA,
+  x: number,
+  y: number,
+  w: number,
+  h: number
+): Promise<Buffer> {
+  const { width, height, data } = frame;
+  const x0 = Math.max(0, Math.floor(x));
+  const y0 = Math.max(0, Math.floor(y));
+  const w0 = Math.min(width - x0, Math.max(1, Math.floor(w)));
+  const h0 = Math.min(height - y0, Math.max(1, Math.floor(h)));
+
+  const cropped = new Uint8ClampedArray(w0 * h0 * 4);
+  for (let row = 0; row < h0; row++) {
+    const srcRow = (y0 + row) * width;
+    const dstRow = row * w0;
+    for (let col = 0; col < w0; col++) {
+      const srcIdx = (srcRow + (x0 + col)) * 4;
+      const dstIdx = (dstRow + col) * 4;
+      cropped[dstIdx] = data[srcIdx] ?? 0;
+      cropped[dstIdx + 1] = data[srcIdx + 1] ?? 0;
+      cropped[dstIdx + 2] = data[srcIdx + 2] ?? 0;
+      cropped[dstIdx + 3] = data[srcIdx + 3] ?? 255;
+    }
+  }
+  const cropFrame: PixelFrameRGBA = { width: w0, height: h0, data: cropped };
+  return frameToPngBuffer(cropFrame);
+}
+
+/**
  * Encode a PixelFrameRGBA to PNG buffer.
  * Optionally resize so the result stays under a target max dimension (e.g. longest edge 1536).
  * Does not guarantee a specific file size; use maxEdge to cap dimensions for API payloads.
@@ -731,9 +770,22 @@ export async function frameToPngBuffer(
   frame: PixelFrameRGBA,
   options?: { maxEdge?: number; quality?: number }
 ): Promise<Buffer> {
-  const sharp = (await import("sharp")).default;
   const { width, height, data } = frame;
-  const buf = Buffer.from(data);
+  const expectedLen = width * height * 4;
+  if (width <= 0 || height <= 0 || !data || data.length < expectedLen) {
+    throw new Error(
+      `frameToPngBuffer: invalid frame (width=${width} height=${height} data.length=${data?.length ?? 0} expected=${expectedLen})`
+    );
+  }
+  // Make an explicit copy so sharp can't see a surprising backing store/view.
+  // (Uint8ClampedArray views can sometimes have unexpected offsets/lengths.)
+  const buf = Buffer.from(data.slice(0, expectedLen));
+  if (buf.length === 0) {
+    throw new Error(
+      `frameToPngBuffer: Buffer.from(data) produced empty buffer (width=${width} height=${height})`
+    );
+  }
+  const sharp = (await import("sharp")).default;
   let pipeline = sharp(buf, { raw: { width, height, channels: 4 } });
   if (options?.maxEdge && Math.max(width, height) > options.maxEdge) {
     const scale = options.maxEdge / Math.max(width, height);

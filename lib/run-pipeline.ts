@@ -135,6 +135,7 @@ export async function exportGradedPngBlob(
     strength: 1,
     grading: engineWithMatch,
     exposureMap,
+    matchModel: options?.matchModel ?? 1,
   });
 
   onProgress?.("Encoding PNG…");
@@ -163,6 +164,8 @@ export async function exportGradedPngBlob(
 export interface RunPipelineOptions {
   /** Called at each phase so the UI can show progress (e.g. "Decoding…", "Applying grade…"). */
   onProgress?: (phase: string) => void;
+  /** Match model: 1 = OKLab engine (default), 2 = Reinhard-style transfer. */
+  matchModel?: 1 | 2;
 }
 
 /**
@@ -208,6 +211,7 @@ export async function runPipeline(
     strength: 1,
     grading: engineWithMatch,
     exposureMap,
+    matchModel: options?.matchModel ?? 1,
   });
   const result = pixelFrameF32ToPixelFrameRGBA(resultFloat);
 
