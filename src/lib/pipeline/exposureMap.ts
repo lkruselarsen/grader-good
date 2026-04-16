@@ -143,6 +143,32 @@ export function buildExposureMapFromFloat(frame: PixelFrameF32): ExposureMap {
  * Compute dark-neighbor map: D = max(0, Y - Y_local).
  * Y_local is blurred Y (box blur 5×5). High D = bright pixel next to dark.
  */
+/**
+ * Multiply raw linear luminance Y by 2^stops and recompute percentiles + dark-neighbor map.
+ * Used so halation eligibility tracks a manually lifted exposure topology after colour match.
+ */
+export function liftExposureMapByStops(map: ExposureMap, stops: number): ExposureMap {
+  if (!Number.isFinite(stops) || stops <= 1e-8) return map;
+  const mult = 2 ** Math.min(3, Math.max(0, stops));
+  const { width, height } = map;
+  const nPix = width * height;
+  const Y = new Float32Array(nPix);
+  const opaqueVals = new Float32Array(nPix);
+  let opaqueCount = 0;
+  for (let i = 0; i < nPix; i++) {
+    const yv = (map.Y[i] ?? 0) * mult;
+    Y[i] = yv;
+    opaqueVals[opaqueCount++] = yv;
+  }
+  const sorted = opaqueVals.subarray(0, opaqueCount);
+  sorted.sort();
+  const p98 = percentileFromSorted(sorted, opaqueCount, P98);
+  const p99_9 = percentileFromSorted(sorted, opaqueCount, P99_9);
+  const p99_99 = percentileFromSorted(sorted, opaqueCount, P99_99);
+  const D = computeDarkNeighborMap(Y, width, height);
+  return { width, height, Y, p98, p99_9, p99_99, D };
+}
+
 export function computeDarkNeighborMap(
   Y: Float32Array,
   width: number,

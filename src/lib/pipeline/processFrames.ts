@@ -9,11 +9,13 @@
  * "Fatal JavaScript invalid size error 169220804" during webpack chunk processing.
  */
 
-import { buildExposureMapFromFloat } from "./exposureMap";
+import { buildExposureMapFromFloat, liftExposureMapByStops } from "./exposureMap";
 import { grain, grainFloat } from "./grain";
 import { halation, halationFloat } from "./halation";
 import { match, matchFloat } from "./match";
 import { applyExposureCurveFloat } from "./stages/exposureCurvePost";
+import { applyDevignetteFloat } from "./stages/devignette";
+import { applyRefractionPostModel2Float } from "./stages/refractionPostModel2";
 import {
   applyColorDensityCurveFloat,
   applyBandHueTempFloat,
@@ -74,6 +76,18 @@ export function processFramesFloat(
         params.grading.colorDensityCurve
       );
     }
+    const r12 = params.grading.refractionPostModel2;
+    if (r12?.length === 12) {
+      afterMatch = applyRefractionPostModel2Float(afterMatch, r12);
+    }
+    const dev = params.grading.devignette;
+    if (
+      dev &&
+      typeof dev.strengthStops === "number" &&
+      dev.strengthStops > 1e-6
+    ) {
+      afterMatch = applyDevignetteFloat(afterMatch, dev);
+    }
     const overrides = params.grading.colorBandOverrides;
     if (overrides?.hue && hasNonZeroHueOrTemp(overrides)) {
       afterMatch = applyBandHueTempFloat(
@@ -83,7 +97,14 @@ export function processFramesFloat(
       );
     }
     // Build exposure map before actuance so halation boundaries use pre-actuance topology.
-    const exposureMap = buildExposureMapFromFloat(afterMatch);
+    let exposureMap = buildExposureMapFromFloat(afterMatch);
+    const topoLift = params.grading.halationExposureTopographyLiftStops;
+    if (topoLift != null && topoLift > 1e-6) {
+      exposureMap = liftExposureMapByStops(
+        exposureMap,
+        Math.min(3, topoLift)
+      );
+    }
     halationParams = { ...params, exposureMap };
     const actuanceS = params.grading.actuanceStrength;
     if (actuanceS != null && actuanceS > 1e-3) {

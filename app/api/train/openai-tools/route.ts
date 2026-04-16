@@ -114,6 +114,8 @@ const TOOLS: Array<{
       type: "object";
       properties: Record<string, unknown>;
       required?: string[];
+      /** OpenAI JSON-schema passthrough for flexible tool args */
+      additionalProperties?: unknown;
     };
   };
 }> = [
@@ -836,7 +838,11 @@ function parseAndValidateJudgeOutput(
     }
     const conf = clampInt(confidence, 0, 100);
     const reasoning = typeof r?.reasoning === "string" ? r.reasoning : "";
-    outRegions[region] = { decision, confidence: conf, reasoning };
+    outRegions[region] = {
+      decision: decision as JudgeRegionResult["decision"],
+      confidence: conf,
+      reasoning,
+    };
   }
 
   // Validate decision choices based on expected mode.

@@ -261,7 +261,7 @@ function gaussianBlurNPasses(
 export function applyActuanceFloat(
   frame: PixelFrameF32,
   actuanceStrength: number,
-  _actuanceRadius?: number,
+  actuanceRadius?: number,
   actuanceHighlightGuard?: number,
   actuanceHighlightGuardFloor?: number,
   actuanceHighlightMinSize?: number
@@ -287,7 +287,9 @@ export function applyActuanceFloat(
     Lgrid[idx] = lab.L;
   }
 
-  const blurred = gaussianBlurFilm(Lgrid, width, height);
+  const radius = Math.max(0.5, Math.min(5, actuanceRadius ?? 2));
+  const radiusPasses = Math.max(1, Math.round(radius));
+  const blurred = gaussianBlurNPasses(Lgrid, width, height, radiusPasses);
   const ACTUANCE_AMP = 1.8;
 
   const shortestEdge = Math.min(width, height);

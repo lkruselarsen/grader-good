@@ -8,6 +8,7 @@ import {
   gradingToEngine,
   DEFAULT_LOOK_PARAMS,
   defaultExposureCurve,
+  defaultColorDensityCurve,
   defaultRefractionWheel,
   defaultContrastCurve,
 } from "./look-params";
@@ -82,13 +83,41 @@ export function buildEngineParamsFromLookParams(
   engine.refractionShadow = (m.refractionShadow ?? defaultRefractionWheel()) as typeof engine.refractionShadow;
   engine.refractionHighlight = (m.refractionHighlight ?? defaultRefractionWheel()) as typeof engine.refractionHighlight;
   engine.refractionSplitL = m.refractionSplitL ?? 0.5;
-  engine.exposureCurve = m.exposureCurve ?? defaultExposureCurve();
-  if (m.colorDensityCurve != null) engine.colorDensityCurve = m.colorDensityCurve;
+  const baseExp = m.exposureCurve ?? defaultExposureCurve();
+  const expMul = Math.max(0.25, Math.min(4, m.exposureCurveMasterMul ?? 1));
+  engine.exposureCurve = {
+    L_in: [...baseExp.L_in],
+    L_out: baseExp.L_out.map((v) =>
+      Math.max(0, Math.min(2, v * expMul))
+    ),
+  };
+  const baseDen = m.colorDensityCurve ?? defaultColorDensityCurve();
+  const denMul = Math.max(0.25, Math.min(4, m.colorDensityCurveMasterMul ?? 1));
+  engine.colorDensityCurve = {
+    L_anchors: [...baseDen.L_anchors],
+    scale: baseDen.scale.map((s) =>
+      Math.max(0.2, Math.min(2.5, s * denMul))
+    ),
+  };
   engine.contrastCurve = m.contrastCurve ?? defaultContrastCurve();
   if (m.actuanceStrength != null) engine.actuanceStrength = m.actuanceStrength;
   if (m.actuanceRadius != null) engine.actuanceRadius = m.actuanceRadius;
   if (m.actuanceHighlightGuard != null) engine.actuanceHighlightGuard = m.actuanceHighlightGuard;
   if (m.actuanceHighlightGuardFloor != null) engine.actuanceHighlightGuardFloor = m.actuanceHighlightGuardFloor;
   if (m.actuanceHighlightMinSize != null) engine.actuanceHighlightMinSize = m.actuanceHighlightMinSize;
+  engine.refractionPostModel2 =
+    m.refractionPostModel2?.length === 12
+      ? [...m.refractionPostModel2]
+      : Array.from({ length: 12 }, () => 1);
+  if (m.devignette) {
+    engine.devignette = {
+      innerDiameterNorm: m.devignette.innerDiameterNorm,
+      strengthStops: m.devignette.strengthStops,
+    };
+  }
+  if (m.halationExposureTopographyLiftStops != null) {
+    engine.halationExposureTopographyLiftStops =
+      m.halationExposureTopographyLiftStops;
+  }
   return engine;
 }
