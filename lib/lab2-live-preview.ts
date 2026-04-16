@@ -280,15 +280,15 @@ function applyApproxHalationPreviewInPlace(
   grading: GradingParams,
   state: Lab2LiveWorkState
 ) {
-  const threshold = clamp(grading.halationThreshold ?? 0.92, 0.8, 0.999);
+  const fill = grading.highlightFill;
+  const threshold = clamp(fill?.threshold ?? 0.92, 0.8, 0.999);
   const strength = clamp(
-    ((grading.halationRimStrength ?? 0.6) + (grading.halationBloomStrength ?? 0.8)) * 0.35,
+    ((fill?.rimStrength ?? 0.6) + (fill?.bloomStrength ?? 0.8)) * 0.35,
     0,
     1.2
   );
   if (strength <= 1e-4) return;
 
-  const n = width * height;
   const mask = state.halationMaskA;
   for (let i = 0, p = 0; i < data.length; i += 4, p++) {
     const r = data[i] ?? 0;
@@ -300,13 +300,13 @@ function applyApproxHalationPreviewInPlace(
 
   const blurA = state.halationMaskA;
   const blurB = state.halationMaskB;
-  const passes = Math.max(2, Math.round((grading.halationBloomRadius ?? 1) * 2));
+  const passes = Math.max(2, Math.round((fill?.bloomRadius ?? 1) * 2));
   for (let i = 0; i < passes; i++) {
     boxBlur3x3(blurA, blurB, width, height);
     blurA.set(blurB);
   }
 
-  const warmth = clamp(grading.highlightFillWarmth ?? 0, -1, 1);
+  const warmth = clamp(fill?.warmth ?? 0, -1, 1);
   const warmR = 1 + 0.2 * Math.max(0, warmth);
   const warmG = 1 + 0.07 * Math.max(0, warmth);
   const warmB = 1 - 0.1 * Math.max(0, warmth);
