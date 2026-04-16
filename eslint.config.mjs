@@ -12,7 +12,31 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Generated/vendorized assets.
+    "public/libraw-wasm/**",
   ]),
+  {
+    files: ["scripts/**/*.js", "src/lib/pipeline/decodeNode.ts"],
+    rules: {
+      "@typescript-eslint/no-require-imports": "off",
+    },
+  },
+  {
+    files: ["app/api/train/openai-tools/route.ts"],
+    rules: {
+      "@typescript-eslint/no-explicit-any": "off",
+      "prefer-const": "off",
+    },
+  },
+  {
+    files: [
+      "src/lib/pipeline/stages/match.ts",
+      "src/lib/pipeline/stages/postModel2Grading.ts",
+    ],
+    rules: {
+      "prefer-const": "off",
+    },
+  },
 ]);
 
 export default eslintConfig;
