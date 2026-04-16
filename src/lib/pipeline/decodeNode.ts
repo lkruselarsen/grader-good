@@ -49,6 +49,25 @@ function toBuffer(input: Buffer | ArrayBuffer | ArrayBufferView | Record<string,
   throw new Error("Expected Buffer, ArrayBuffer, ArrayBufferView, or object with .buffer/.data or buffer-like values");
 }
 
+type LightdriftLibRaw = {
+  loadBuffer(buf: Buffer): Promise<boolean>;
+  setOutputParams(opts: Record<string, unknown>): Promise<void>;
+  processImage(): Promise<void>;
+  createTIFFBuffer(opts: {
+    width?: number;
+    height?: number;
+  }): Promise<{ success?: boolean; buffer?: Buffer }>;
+  close?(): Promise<void>;
+};
+
+/** Native addon typings are not a valid ES module under strict TS. */
+async function importLightdriftLibraw(): Promise<{
+  default?: new () => LightdriftLibRaw;
+}> {
+  // @ts-expect-error lightdrift-libraw .d.ts is ambient-only, not importable as a module
+  return import("lightdrift-libraw");
+}
+
 /** Decode a buffer that sharp can handle (PNG, JPEG, TIFF, etc.) into PixelFrameRGBA.
  * If maxEdge is provided, resizes so the longest edge <= maxEdge before returning,
  * avoiding ever creating a full-resolution PixelFrameRGBA in JS heap.
@@ -438,9 +457,9 @@ export async function decodeBufferViaLibRaw(
   if (!looksLikeTiffBasedRaw(buf)) return null;
 
   try {
-    const mod = await import("lightdrift-libraw");
+    const mod = await importLightdriftLibraw();
     const LibRaw = mod.default ?? mod;
-    const libraw = new LibRaw();
+    const libraw = new (LibRaw as new () => LightdriftLibRaw)();
     const ok = await libraw.loadBuffer(buf);
     if (!ok) return null;
 
@@ -454,7 +473,7 @@ export async function decodeBufferViaLibRaw(
       width: maxEdge && maxEdge > 0 ? maxEdge : undefined,
       height: maxEdge && maxEdge > 0 ? maxEdge : undefined,
     });
-    await libraw.close();
+    await libraw.close?.();
 
     if (!result?.success || !result?.buffer || result.buffer.length === 0)
       return null;
@@ -483,9 +502,9 @@ export async function decodeBufferLinearViaLibRaw(
   if (!looksLikeTiffBasedRaw(buf)) return null;
 
   try {
-    const mod = await import("lightdrift-libraw");
+    const mod = await importLightdriftLibraw();
     const LibRaw = mod.default ?? mod;
-    const libraw = new LibRaw();
+    const libraw = new (LibRaw as new () => LightdriftLibRaw)();
     const ok = await libraw.loadBuffer(buf);
     if (!ok) return null;
 
@@ -499,7 +518,7 @@ export async function decodeBufferLinearViaLibRaw(
       width: maxEdge && maxEdge > 0 ? maxEdge : undefined,
       height: maxEdge && maxEdge > 0 ? maxEdge : undefined,
     });
-    await libraw.close();
+    await libraw.close?.();
 
     if (!result?.success || !result?.buffer || result.buffer.length === 0)
       return null;
@@ -602,9 +621,9 @@ export async function decodeBufferLinearViaLibRawStrict(
   }
 
   try {
-    const mod = await import("lightdrift-libraw");
+    const mod = await importLightdriftLibraw();
     const LibRaw = mod.default ?? mod;
-    const libraw = new LibRaw();
+    const libraw = new (LibRaw as new () => LightdriftLibRaw)();
     const ok = await libraw.loadBuffer(buf);
     if (!ok) {
       await libraw.close?.();
@@ -621,7 +640,7 @@ export async function decodeBufferLinearViaLibRawStrict(
       width: maxEdge && maxEdge > 0 ? maxEdge : undefined,
       height: maxEdge && maxEdge > 0 ? maxEdge : undefined,
     });
-    await libraw.close();
+    await libraw.close?.();
 
     if (!result?.success || !result?.buffer || result.buffer.length === 0) {
       throw new Error("lightdrift-libraw: createTIFFBuffer failed or returned empty. No fallback.");
@@ -632,12 +651,12 @@ export async function decodeBufferLinearViaLibRawStrict(
       );
     }
 
-    const edge = maxEdge ?? 1200;
-    const resized = await resizeTiffBufferToMaxEdge(
-      Buffer.from(result.buffer),
-      edge
-    );
-    return await decodeWithSharp(resized, maxEdge);
+    const tiffBuf = Buffer.from(result.buffer);
+    if (maxEdge != null && maxEdge > 0) {
+      const resized = await resizeTiffBufferToMaxEdge(tiffBuf, maxEdge);
+      return await decodeWithSharp(resized, maxEdge);
+    }
+    return await decodeWithSharp(tiffBuf, undefined);
   } catch (err) {
     if (err instanceof Error) throw err;
     throw new Error(

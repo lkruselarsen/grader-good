@@ -139,7 +139,7 @@ function gaussianWeight(score: number, center: number, sigma: number): number {
   return Math.exp(-0.5 * d * d);
 }
 
-const SOURCE_EXPOSURE_CENTERS: Record<BucketName, number> = {
+const SOURCE_EXPOSURE_CENTERS: Partial<Record<BucketName, number>> = {
   "exposure:under": -1,
   "exposure:normal": 0,
   "exposure:over": 1,
@@ -157,7 +157,7 @@ const SOURCE_EXPOSURE_CENTERS: Record<BucketName, number> = {
   "ref_color:unknown": 0,
 };
 
-const REF_EXPOSURE_CENTERS: Record<BucketName, number> = {
+const REF_EXPOSURE_CENTERS: Partial<Record<BucketName, number>> = {
   "ref_exposure:under": -1,
   "ref_exposure:normal": 0,
   "ref_exposure:over": 1,
@@ -195,7 +195,7 @@ const REF_EXPOSURE_BUCKETS: BucketName[] = [
  */
 function buildExposureWeights(
   score: number | null | undefined,
-  centers: Record<BucketName, number>,
+  centers: Partial<Record<BucketName, number>>,
   buckets: BucketName[],
   fallbackBucket?: BucketName
 ): Array<[BucketName, number]> {
@@ -212,7 +212,7 @@ function buildExposureWeights(
   const sigma = 0.7; // Fairly broad so regimes blend smoothly.
   const rawWeights: number[] = [];
   for (const bucket of buckets) {
-    const center = centers[bucket];
+    const center = centers[bucket] ?? 0;
     rawWeights.push(gaussianWeight(score, center, sigma));
   }
   const sum = rawWeights.reduce((acc, w) => acc + w, 0);
@@ -330,7 +330,10 @@ export function applyHeuristicsToMatch(
     }
 
     const value = baseVal + totalDelta;
-    (result as Record<string, unknown>)[key] = clampMatchParam(key, value);
+    (result as unknown as Record<string, unknown>)[key] = clampMatchParam(
+      key,
+      value
+    );
   }
 
   return result;

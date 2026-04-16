@@ -104,7 +104,9 @@ export async function POST(request: Request) {
       ...s,
       similarity: simById.get(s.id) ?? 0,
     }));
-    matches.sort((a, b) => (b.similarity ?? 0) - (a.similarity ?? 0));
+    matches.sort(
+      (a, b) => Number(b.similarity ?? 0) - Number(a.similarity ?? 0)
+    );
     return NextResponse.json({ matches });
   }
 
@@ -172,7 +174,7 @@ export async function POST(request: Request) {
     const wSemantic = 0.7;
     const wTonal = 0.3;
 
-    const scored = (semanticData ?? []).map((row) => {
+    const scored = (semanticData ?? []).map((row: unknown) => {
       const id = String((row as { id?: unknown }).id ?? "");
       const semSim =
         typeof (row as { similarity?: unknown }).similarity === "number"
@@ -184,13 +186,16 @@ export async function POST(request: Request) {
           ? (tonalRow.similarity as number)
           : 0;
       const score = wSemantic * semSim + wTonal * tonSim;
-      return { ...row, _combined_score: score };
+      const base =
+        typeof row === "object" && row !== null
+          ? (row as Record<string, unknown>)
+          : {};
+      return { ...base, _combined_score: score };
     });
 
     scored.sort(
-      (a, b) =>
-        (b as { _combined_score?: number })._combined_score! -
-        (a as { _combined_score?: number })._combined_score!
+      (a: Record<string, unknown>, b: Record<string, unknown>) =>
+        Number(b._combined_score ?? 0) - Number(a._combined_score ?? 0)
     );
 
     return NextResponse.json({ matches: scored.slice(0, limit) });

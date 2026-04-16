@@ -370,6 +370,7 @@ export default function LabPage() {
   /** Phase text during "Apply" pipeline (e.g. "Decoding…", "Applying grade…"). */
   const [applyProgress, setApplyProgress] = useState<string | null>(null);
   const [isExporting, setIsExporting] = useState(false);
+  const [isExportingLow, setIsExportingLow] = useState(false);
   const [exportProgress, setExportProgress] = useState<string | null>(null);
 
   const [compareWasmUrl, setCompareWasmUrl] = useState<string | null>(null);
@@ -954,43 +955,84 @@ export default function LabPage() {
     setIsExporting(true);
     setExportProgress("Decoding…");
     try {
-      if (matchModel2) {
-        setExportProgress("Applying (server)…");
-        const data = await callLabApplyApi(
-          source.file,
-          activeRef?.file ?? null,
-          lookParams,
-          model2Strength,
-          model2RobustSampling
-        );
-        setExportProgress("Encoding…");
-        const binary = atob(data.png_base64);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-        const blob = new Blob([bytes], { type: "image/png" });
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = `graded_${source.file.name.replace(/\.[^.]+$/, "")}.png`;
-        a.click();
-        URL.revokeObjectURL(a.href);
-      } else {
-        const blob = await exportGradedPngBlob(
-          source.file,
-          activeRef?.file ?? null,
-          lookParams,
-          { onProgress: (p) => setExportProgress(p) }
-        );
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = `graded_${source.file.name.replace(/\.[^.]+$/, "")}.png`;
-        a.click();
-        URL.revokeObjectURL(a.href);
-      }
+      const blob = await buildGradedExportBlob((p) => setExportProgress(p));
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `graded_${source.file.name.replace(/\.[^.]+$/, "")}.png`;
+      a.click();
+      URL.revokeObjectURL(a.href);
     } catch (err) {
       console.error("Export failed", err);
     } finally {
       setIsExporting(false);
       setExportProgress(null);
+    }
+  }
+
+  async function buildGradedExportBlob(
+    onProgress?: (progress: string) => void
+  ): Promise<Blob> {
+    if (!source) throw new Error("Missing source");
+    if (matchModel2) {
+      onProgress?.("Applying (server)…");
+      const data = await callLabApplyApi(
+        source.file,
+        activeRef?.file ?? null,
+        lookParams,
+        model2Strength,
+        model2RobustSampling
+      );
+      onProgress?.("Encoding…");
+      const binary = atob(data.png_base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return new Blob([bytes], { type: "image/png" });
+    }
+    return exportGradedPngBlob(source.file, activeRef?.file ?? null, lookParams, {
+      onProgress,
+    });
+  }
+
+  async function scalePngBlob(blob: Blob, scale: number): Promise<Blob> {
+    if (scale >= 1) return blob;
+    const imageBitmap = await createImageBitmap(blob);
+    const targetWidth = Math.max(1, Math.round(imageBitmap.width * scale));
+    const targetHeight = Math.max(1, Math.round(imageBitmap.height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      imageBitmap.close();
+      throw new Error("2D context unavailable");
+    }
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(imageBitmap, 0, 0, targetWidth, targetHeight);
+    imageBitmap.close();
+    return new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob(
+        (result) => (result ? resolve(result) : reject(new Error("toBlob failed"))),
+        "image/png"
+      );
+    });
+  }
+
+  async function onExportLow() {
+    if (!source) return;
+    setIsExportingLow(true);
+    try {
+      const fullResBlob = await buildGradedExportBlob();
+      const lowResBlob = await scalePngBlob(fullResBlob, 0.7);
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(lowResBlob);
+      a.download = `graded_low_${source.file.name.replace(/\.[^.]+$/, "")}.png`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (err) {
+      console.error("Low export failed", err);
+    } finally {
+      setIsExportingLow(false);
     }
   }
 
@@ -2205,10 +2247,30 @@ export default function LabPage() {
                 <Button
                   variant="secondary"
                   onClick={() => void onExport()}
-                  disabled={!source || isApplying || isUsingEmbeddings || isExporting}
+                  disabled={
+                    !source ||
+                    isApplying ||
+                    isUsingEmbeddings ||
+                    isExporting ||
+                    isExportingLow
+                  }
                   size="sm"
                 >
                   {isExporting ? (exportProgress ?? "Exporting…") : "Export full-res"}
+                </Button>
+                <Button
+                  variant="secondary"
+                  onClick={() => void onExportLow()}
+                  disabled={
+                    !source ||
+                    isApplying ||
+                    isUsingEmbeddings ||
+                    isExporting ||
+                    isExportingLow
+                  }
+                  size="sm"
+                >
+                  {isExportingLow ? "Exporting low…" : "Export low (70%)"}
                 </Button>
                 <Button
                   variant="outline"

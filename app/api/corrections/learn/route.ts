@@ -148,7 +148,9 @@ export async function GET() {
       : null;
 
     for (const [key, autoVal] of Object.entries(autoMatch)) {
-      const correctedVal = (correctedMatch as Record<string, unknown>)[key];
+      const correctedVal = (correctedMatch as unknown as Record<string, unknown>)[
+        key
+      ];
       if (
         typeof autoVal !== "number" ||
         typeof correctedVal !== "number" ||
@@ -185,10 +187,10 @@ export async function GET() {
   > = {};
 
   for (const [param, buckets] of Object.entries(paramStats)) {
-    const bucketSummary: Record<
+    const bucketSummary = {} as Record<
       BucketName,
       { meanDelta: number; count: number }
-    > = {};
+    >;
     for (const [bucketName, agg] of Object.entries(buckets) as [
       BucketName,
       ParamDeltaAgg

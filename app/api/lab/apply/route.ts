@@ -24,6 +24,7 @@ import type { LookParams, LookParamsGrading } from "@/lib/look-params";
 import { engineToGrading, DEFAULT_LOOK_PARAMS } from "@/lib/look-params";
 import { buildEngineParamsFromLookParams } from "@/lib/build-engine-params";
 
+/** Default cap for server memory; pass fullResolution=true for uncapped libraw decode (same as client full export). */
 const PROCESS_MAX_EDGE = 4096;
 
 export async function POST(request: Request) {
@@ -34,6 +35,7 @@ export async function POST(request: Request) {
     const paramsStr = formData.get("params") as string | null;
     const model2StrengthRaw = formData.get("model2Strength");
     const model2RobustSamplingRaw = formData.get("model2RobustSampling");
+    const fullResolutionRaw = formData.get("fullResolution");
 
     if (!sourceFile || !(sourceFile instanceof File)) {
       return NextResponse.json(
@@ -43,16 +45,18 @@ export async function POST(request: Request) {
     }
 
     const sourceBuf = Buffer.from(await sourceFile.arrayBuffer());
-    const decodedSource = await decodeBufferToLinearFloat(
-      sourceBuf,
-      PROCESS_MAX_EDGE
-    );
+    const fullRes =
+      fullResolutionRaw === "true" ||
+      fullResolutionRaw === "1" ||
+      fullResolutionRaw === "yes";
+    const maxEdge = fullRes ? undefined : PROCESS_MAX_EDGE;
+    const decodedSource = await decodeBufferToLinearFloat(sourceBuf, maxEdge);
 
     let decodedRef: Awaited<ReturnType<typeof decodeBufferToLinearFloat>> | null =
       null;
     if (referenceFile && referenceFile instanceof File) {
       const refBuf = Buffer.from(await referenceFile.arrayBuffer());
-      decodedRef = await decodeBufferToLinearFloat(refBuf, PROCESS_MAX_EDGE);
+      decodedRef = await decodeBufferToLinearFloat(refBuf, maxEdge);
     }
 
     const exposureMap = buildExposureMapFromFloat(decodedSource);

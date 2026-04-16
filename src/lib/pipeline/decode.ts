@@ -10,13 +10,25 @@
 
 import type { DecodeInput, PixelFrameF32, PixelFrameRGBA } from "./types";
 
-let librawPromise: Promise<{ default: unknown }> | null = null;
+let librawPromise: Promise<{ default: new () => LibRawInstance }> | null = null;
+
+/** Minimal libraw-wasm instance surface used by decodeDng. */
+interface LibRawInstance {
+  open(buf: Uint8Array, opts: Record<string, unknown>): Promise<void>;
+  metadata(): Promise<unknown>;
+  imageData(): Promise<unknown>;
+}
 
 /** Load LibRaw from public/libraw-wasm (not bundled by webpack). */
-function loadLibRaw(): Promise<{ default: unknown }> {
+function loadLibRaw(): Promise<{ default: new () => LibRawInstance }> {
   if (librawPromise) return librawPromise;
   // Literal path so webpackIgnore applies; browser resolves against origin.
-  librawPromise = import(/* webpackIgnore: true */ "/libraw-wasm/index.js");
+  // Not a Node-resolvable module; served from /public at runtime.
+  librawPromise = import(
+    /* webpackIgnore: true */
+    // @ts-expect-error URL import — no TS project file at this path
+    "/libraw-wasm/index.js"
+  ) as Promise<{ default: new () => LibRawInstance }>;
   return librawPromise;
 }
 

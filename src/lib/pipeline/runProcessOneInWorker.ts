@@ -52,14 +52,15 @@ export async function runProcessOneInWorker(
       >
     ) => {
       worker.terminate();
-      if (e.data.error) {
+      if ("error" in e.data && e.data.error) {
         reject(new Error(e.data.error));
         return;
       }
+      const ok = e.data as { data: ArrayBuffer; width: number; height: number };
       resolve({
-        width: e.data.width!,
-        height: e.data.height!,
-        data: new Uint8ClampedArray(e.data.data!),
+        width: ok.width,
+        height: ok.height,
+        data: new Uint8ClampedArray(ok.data),
       });
     };
 

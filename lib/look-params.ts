@@ -175,6 +175,21 @@ export interface LookParamsMatch {
   bandMidTemp?: number;
   bandLowerHighTemp?: number;
   bandUpperHighTemp?: number;
+  /** Post–Model 2: twelve sat multipliers; hues fixed at 30° (see pipeline refractionPostModel2). */
+  refractionPostModel2?: number[];
+  /** De-vignette: inner diameter / min(w,h), and corner lift in stops. */
+  devignette?: { innerDiameterNorm: number; strengthStops: number };
+  /** Halation: lift exposure topology map by 0..3 stops before halation. */
+  halationExposureTopographyLiftStops?: number;
+  /**
+   * Lab2: multiply all 7 exposure-curve L_out handles (0.25–4, 1 = neutral).
+   * Applied in engine build so sliders stay independent of this master.
+   */
+  exposureCurveMasterMul?: number;
+  /**
+   * Lab2: multiply all 7 colour-density scale handles (0.25–4, 1 = neutral).
+   */
+  colorDensityCurveMasterMul?: number;
 }
 
 /** Flat grading params for UI; converted to EngineLookParams for pipeline. */
@@ -298,6 +313,11 @@ export const DEFAULT_LOOK_PARAMS: LookParams = {
     bandMidTemp: 0,
     bandLowerHighTemp: 0,
     bandUpperHighTemp: 0,
+    refractionPostModel2: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    devignette: { innerDiameterNorm: 0.65, strengthStops: 0 },
+    halationExposureTopographyLiftStops: 0,
+    exposureCurveMasterMul: 1,
+    colorDensityCurveMasterMul: 1,
   },
   grading: defaultGrading(),
 };
