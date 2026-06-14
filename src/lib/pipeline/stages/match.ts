@@ -197,6 +197,8 @@ export interface LookParams {
   actuanceHighlightGuardFloor?: number;
   /** Fraction of shortest edge; highlights in regions smaller than this are drowned out (actuance applied). 0.002–0.02, default 0.005. */
   actuanceHighlightMinSize?: number;
+  /** Post–Model 2: highlight-zone smoothing (0..1). */
+  highlightSmoothing?: number;
   /**
    * Post–Model 2 only: twelve saturation multipliers (0..3), hues fixed every 30°.
    * Applied after colour density; Model 1 shadow/highlight refraction is separate.

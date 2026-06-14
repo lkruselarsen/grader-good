@@ -5,7 +5,10 @@
  */
 
 import { imageToSemanticEmbedding } from "@/src/lib/semanticEmbeddings";
-import { imageToEmbedding } from "@/src/lib/embeddings";
+import {
+  imageToChromaticEmbedding,
+  imageToEmbedding,
+} from "@/src/lib/embeddings";
 
 export const COLCLIP_TILE_DIM = 384; // Same as DINOv2 for now
 const TILE_MODEL_INPUT_SIZE = 224;
@@ -110,6 +113,23 @@ export function imageToTonalTileEmbeddings(
   for (let ti = 0; ti < numTiles; ti++) {
     const tile = getTile(imageData, ti, gridCols, gridRows);
     results.push(imageToEmbedding(tile));
+  }
+  return results;
+}
+
+/**
+ * Per-tile OKLab chroma histogram (16-dim): 8×a + 8×b only, same semantics as `imageToChromaticEmbedding`.
+ */
+export function imageToChromaticTileEmbeddings(
+  imageData: ImageData,
+  gridCols: number = 10,
+  gridRows: number = 10
+): number[][] {
+  const numTiles = gridCols * gridRows;
+  const results: number[][] = [];
+  for (let ti = 0; ti < numTiles; ti++) {
+    const tile = getTile(imageData, ti, gridCols, gridRows);
+    results.push(imageToChromaticEmbedding(tile));
   }
   return results;
 }

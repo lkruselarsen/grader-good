@@ -54,8 +54,8 @@ export function defaultExposureCurve(): { L_in: number[]; L_out: number[] } {
 /** Default 7-handle color density: same L anchors, scale all 1. */
 export function defaultColorDensityCurve(): { L_anchors: number[]; scale: number[] } {
   const L = [0, 1 / 6, 2 / 6, 3 / 6, 4 / 6, 5 / 6, 1];
-  // Default scales: handles 0–4 = 1.4, handle 5 = 1.2, handle 6 = 1.0.
-  return { L_anchors: [...L], scale: [1.4, 1.4, 1.4, 1.4, 1.4, 1.2, 1.0] };
+  // Neutral defaults: all handles at 1.0.
+  return { L_anchors: [...L], scale: [1, 1, 1, 1, 1, 1, 1] };
 }
 
 /**
@@ -165,6 +165,8 @@ export interface LookParamsMatch {
   actuanceHighlightGuardFloor?: number;
   /** Fraction of shortest edge; highlights in regions smaller than this are drowned out (actuance applied). Range 0.002–0.02, default 0.005. */
   actuanceHighlightMinSize?: number;
+  /** Post–Model 2: highlight-zone smoothing/soft shoulder (0..1, default 0). */
+  highlightSmoothing?: number;
   /**
    * Per-band colour temperature (cold ↔ warm) controls (-1..1, 0 = neutral).
    * Negative values push the band cooler (towards blue/cyan), positive values
@@ -302,12 +304,12 @@ export const DEFAULT_LOOK_PARAMS: LookParams = {
     halationBloomRadius: 1.0,
     halationInteriorGuard: 0.5,
     halationThreshold: 0.92,
-    // Default actuance is slightly on so local contrast is visible by default.
-    actuanceStrength: 1.3,
-    actuanceRadius: 2,
-    actuanceHighlightGuard: 0.65,
-    actuanceHighlightGuardFloor: 0.35,
-    actuanceHighlightMinSize: 0.02,
+    actuanceStrength: 0,
+    actuanceRadius: 0,
+    actuanceHighlightGuard: 0,
+    actuanceHighlightGuardFloor: 0,
+    actuanceHighlightMinSize: 0,
+    highlightSmoothing: 0,
     bandLowerShadowTemp: 0,
     bandUpperShadowTemp: 0,
     bandMidTemp: 0,

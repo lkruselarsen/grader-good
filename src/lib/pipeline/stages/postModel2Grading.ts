@@ -229,6 +229,113 @@ function gaussianBlur5(
   return out;
 }
 
+function smoothstep(edge0: number, edge1: number, x: number): number {
+  const t = Math.max(0, Math.min(1, (x - edge0) / Math.max(1e-6, edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
+
+function percentileFromHistogram(
+  hist: Uint32Array,
+  total: number,
+  p: number
+): number {
+  if (total <= 0) return 1;
+  const target = Math.max(0, Math.min(total - 1, Math.floor(total * p)));
+  let acc = 0;
+  for (let i = 0; i < hist.length; i++) {
+    acc += hist[i] ?? 0;
+    if (acc > target) {
+      return i / (hist.length - 1);
+    }
+  }
+  return 1;
+}
+
+export function buildHighlightZoneMasksFromCurrentL(
+  Lgrid: Float32Array,
+  width: number,
+  height: number
+): { microMask: Float32Array; bleedMask: Float32Array } {
+  const nPix = width * height;
+  const microMask = new Float32Array(nPix);
+  const bleedMask = new Float32Array(nPix);
+  const bins = 1024;
+  const hist = new Uint32Array(bins);
+  for (let i = 0; i < nPix; i++) {
+    const L = Math.max(0, Math.min(1, Lgrid[i] ?? 0));
+    const bi = Math.max(0, Math.min(bins - 1, Math.floor(L * (bins - 1))));
+    hist[bi] = (hist[bi] ?? 0) + 1;
+  }
+  // Tight top-end zone (~top 0.5-2%).
+  const p98 = percentileFromHistogram(hist, nPix, 0.98);
+  const p995 = percentileFromHistogram(hist, nPix, 0.995);
+  const microStart = Math.max(0.8, Math.min(0.99, p98));
+  const microEnd = Math.max(microStart + 1e-4, Math.min(1, p995));
+  const bleedStart = Math.max(0.72, microStart - 0.06);
+  const bleedEnd = Math.max(bleedStart + 1e-4, microEnd);
+  for (let i = 0; i < nPix; i++) {
+    const L = Math.max(0, Math.min(1, Lgrid[i] ?? 0));
+    microMask[i] = smoothstep(microStart, microEnd, L);
+    bleedMask[i] = smoothstep(bleedStart, bleedEnd, L);
+  }
+  const bleedBlur = gaussianBlur5(bleedMask, width, height);
+  for (let i = 0; i < nPix; i++) {
+    bleedMask[i] = Math.max(0, Math.min(1, bleedBlur[i] ?? 0));
+  }
+  return { microMask, bleedMask };
+}
+
+export function applyHighlightSmoothingFloat(
+  frame: PixelFrameF32,
+  highlightSmoothing?: number
+): PixelFrameF32 {
+  const smoothing = Math.max(0, Math.min(1, highlightSmoothing ?? 0));
+  if (smoothing < 1e-4) return frame;
+
+  const { width, height, data } = frame;
+  const nPix = width * height;
+  const Lgrid = new Float32Array(nPix);
+  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+    const r = data[i] ?? 0;
+    const g = data[i + 1] ?? 0;
+    const b = data[i + 2] ?? 0;
+    Lgrid[p] = linearRgbToOklab(r, g, b).L;
+  }
+  const { microMask, bleedMask } = buildHighlightZoneMasksFromCurrentL(
+    Lgrid,
+    width,
+    height
+  );
+  const localBase = gaussianBlur5(Lgrid, width, height);
+  const out = allocPixelFrameF32(width, height);
+  const outData = out.data;
+  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+    const r = data[i] ?? 0;
+    const g = data[i + 1] ?? 0;
+    const b = data[i + 2] ?? 0;
+    const a = data[i + 3];
+    const lab = linearRgbToOklab(r, g, b);
+    const micro = (microMask[p] ?? 0) * smoothing;
+    const bleed = (bleedMask[p] ?? 0) * smoothing;
+    const baseL = localBase[p] ?? lab.L;
+    const dL = lab.L - baseL;
+    const suppressedDL = dL * (1 - 0.7 * micro);
+    const shoulder = 1 - Math.exp(-2.4 * Math.max(0, lab.L));
+    let Lnew =
+      baseL + suppressedDL * (1 - 0.35 * micro) + shoulder * (0.35 * micro);
+    Lnew += bleed * (1 - Lnew) * 0.05;
+    Lnew = Math.max(0, Math.min(1, Lnew));
+    const aLab = lab.a;
+    const bLab = lab.b;
+    const rgb = oklabToLinearRgb(Lnew, aLab, bLab);
+    outData[i] = rgb.r;
+    outData[i + 1] = rgb.g;
+    outData[i + 2] = rgb.b;
+    outData[i + 3] = Number.isFinite(a) ? a : 1;
+  }
+  return out;
+}
+
 function gaussianBlurFilm(
   src: Float32Array,
   width: number,
@@ -254,9 +361,15 @@ function gaussianBlurNPasses(
 
 /**
  * Apply actuance (local contrast) on L in OKLab.
- * L_new = base + weight * actuanceS * 1.8 * (L - base), where base = blurred L.
- * actuanceHighlightGuard: L above which actuance is 0. actuanceHighlightGuardFloor: L below which actuance is full.
- * Linear ramp between floor and threshold.
+ *
+ * This variant is "film-shadow focused":
+ * - It boosts local micro-contrast mainly inside lower shadows using a smooth shadow-zone mask.
+ * - It biases darker-side detail to be stronger than lighter-side detail (asymmetric polarity).
+ * - It fades out before normal midtones by blending between the original L and the boosted target.
+ *
+ * The existing highlight guard is preserved via `weight`:
+ * - Below `actuanceHighlightGuardFloor`, actuance is fully eligible.
+ * - Above `actuanceHighlightGuard`, actuance is suppressed (and output moves toward the blurred base).
  */
 export function applyActuanceFloat(
   frame: PixelFrameF32,
@@ -300,6 +413,28 @@ export function applyActuanceFloat(
   const out = allocPixelFrameF32(width, height);
   const outData = out.data;
 
+  // Shadow-zone parameters derived from the existing highlight guard controls,
+  // so actuance tuning remains consistent without adding new UI knobs.
+  //
+  // Typical default (guardFloor ~0.35): center ~0.14, sigma ~0.12
+  // which peaks in lower shadows and fades before midtones.
+  const shadowCenter = Math.max(0.05, Math.min(0.22, floor * 0.4));
+  const shadowSigma = Math.max(0.06, Math.min(0.12, floor * 0.33));
+  const twoSigma2 = 2 * shadowSigma * shadowSigma;
+
+  // Fine-to-medium detail mix (two different blur bases are already computed above).
+  const detailFineWeight = 0.75;
+  const detailMedWeight = 1 - detailFineWeight;
+
+  // Asymmetric polarity gain: dark-side detail stronger than light-side detail.
+  // These are intentionally conservative to avoid "clarity glow".
+  const darkGain = 1.55;
+  const lightGain = 0.85;
+
+  // Optional deterministic "film irregularity" (low-frequency).
+  // Kept intentionally small; only applied in the shadowMask zone.
+  const stochasticAmount = 0.18; // relative multiplier (1.0 +- ~0.18)
+
   for (let i = 0, idx = 0; i < data.length; i += 4, idx++) {
     const r = data[i] ?? 0;
     const g = data[i + 1] ?? 0;
@@ -307,16 +442,49 @@ export function applyActuanceFloat(
     const a = data[i + 3];
     const lab = linearRgbToOklab(r, g, b);
     const L = Lgrid[idx]!;
-    const base = blurred[idx] ?? lab.L;
-    const maxL = Math.max(L, base);
-    const regionalL = regionalBlurredL[idx] ?? L;
+    const baseFine = blurred[idx] ?? lab.L;
+    const maxL = Math.max(L, baseFine);
+    const baseMed = regionalBlurredL[idx] ?? L;
     let weight: number;
-    if (regionalL <= floor) weight = 1;
+
+    // Preserve existing guard logic (which uses both pixel L and regional blur).
+    if (baseMed <= floor) weight = 1;
     else if (maxL <= floor) weight = 1;
     else if (maxL >= threshold) weight = 0;
     else weight = (threshold - maxL) / (threshold - floor);
-    const dL = L - base;
-    const Lnew = Math.max(0, Math.min(1, base + weight * actuanceS * ACTUANCE_AMP * dL));
+
+    const dFine = L - baseFine;
+    const dMed = L - baseMed;
+    const d = detailFineWeight * dFine + detailMedWeight * dMed;
+
+    const polarityGain = d < 0 ? darkGain : lightGain;
+
+    // Smooth bell-shaped shadow mask: peaks in deep shadows, fades out before midtones.
+    const deltaC = L - shadowCenter;
+    const shadowMask = Math.exp(-(deltaC * deltaC) / twoSigma2);
+
+    // Blend factor:
+    // - When weight is near 1, actuance is allowed, but only in the shadowMask zone.
+    // - When weight is near 0 (highlight suppression), we still move toward the blurred base.
+    const blend = (1 - weight) + weight * shadowMask;
+
+    // Deterministic low-frequency irregularity. Only apply when we are actually in the
+    // shadow-mask zone (keeps export stable and avoids extra work everywhere).
+    let stochastic = 1;
+    if (stochasticAmount > 1e-6 && shadowMask > 0.05 && actuanceS > 0.5) {
+      const x = idx % width;
+      const y = ((idx / width) | 0) as number;
+      const f1 = 0.015;
+      const f2 = 0.017;
+      const n =
+        0.5 * Math.sin((x * f1) + (y * f2)) +
+        0.5 * Math.sin((x * f2) - (y * f1));
+      stochastic = 1 + n * stochasticAmount;
+    }
+
+    const Ltarget = baseFine + weight * actuanceS * ACTUANCE_AMP * d * polarityGain * stochastic;
+    const Lnew = Math.max(0, Math.min(1, L + blend * (Ltarget - L)));
+
     const rgb = oklabToLinearRgb(Lnew, lab.a, lab.b);
     outData[i] = rgb.r;
     outData[i + 1] = rgb.g;

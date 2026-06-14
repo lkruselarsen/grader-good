@@ -5,6 +5,8 @@
  */
 
 import type { PixelFrameF32, PixelFrameRGBA } from "./types";
+import { normalizeDngBaselineLinear } from "./dngBaselineLinear";
+import { pixelFrameRgbaSrgb8ToLinearFloat } from "./srgb8ToLinearFloatFrame";
 
 /** Polyfill ImageData in Node so pipeline code (frameToImageData, applyLook, computeImageStats) works. */
 if (typeof globalThis.ImageData === "undefined") {
@@ -535,6 +537,65 @@ export async function decodeBufferLinearViaLibRaw(
   }
 }
 
+/** Longest edge cap for R-D1 pipeline decode (6MP fits without downsample). */
+const RD1_PIPELINE_MAX_EDGE = 8192;
+
+/**
+ * Epson R-D1 / problematic DNG: native LibRaw (no WASM), full-res cap, sRGB→linear float,
+ * then same linear baseline as browser `decodeDngToLinearFloat` with R-D1 gainBias 1.6.
+ * Falls back to `decodeBuffer` (dcraw/sharp) if LibRaw cannot load the buffer.
+ */
+export async function decodeBufferRd1ToLinearFloat(
+  buffer: Buffer | ArrayBuffer | ArrayBufferView
+): Promise<PixelFrameF32> {
+  const buf = toBuffer(buffer);
+  const rgba =
+    (await decodeBufferRd1ViaLibRawToSrgbRgba(buf)) ??
+    (await decodeBuffer(buf, RD1_PIPELINE_MAX_EDGE));
+  const frame = pixelFrameRgbaSrgb8ToLinearFloat(rgba);
+  normalizeDngBaselineLinear(frame.data, frame.width, frame.height, 1.6);
+  return frame;
+}
+
+async function decodeBufferRd1ViaLibRawToSrgbRgba(
+  buf: Buffer
+): Promise<PixelFrameRGBA | null> {
+  try {
+    const mod = await importLightdriftLibraw();
+    const LibRaw = mod.default ?? mod;
+    const libraw = new (LibRaw as new () => LightdriftLibRaw)();
+    const ok = await libraw.loadBuffer(buf);
+    if (!ok) {
+      await libraw.close?.();
+      return null;
+    }
+
+    await libraw.setOutputParams({
+      output_color: 1, // sRGB
+      no_auto_bright: true,
+      output_tiff: true,
+    });
+    await libraw.processImage();
+    const result = await libraw.createTIFFBuffer({
+      width: RD1_PIPELINE_MAX_EDGE,
+      height: RD1_PIPELINE_MAX_EDGE,
+    });
+    await libraw.close?.();
+
+    if (!result?.success || !result?.buffer || result.buffer.length === 0)
+      return null;
+    if (result.buffer.length > RAW_TIFF_MAX_BYTES) return null;
+
+    const resized = await resizeTiffBufferToMaxEdge(
+      Buffer.from(result.buffer),
+      RD1_PIPELINE_MAX_EDGE
+    );
+    return await decodeWithSharp(resized, RD1_PIPELINE_MAX_EDGE);
+  } catch {
+    return null;
+  }
+}
+
 /** TIFF-based (II/MM + magic 42). DNG, CR2, NEF, etc. Skip sharp probe; go straight to dcraw. */
 function looksLikeTiffBasedRaw(buf: Buffer): boolean {
   if (!buf || buf.length < 4) return false;
@@ -546,29 +607,6 @@ function looksLikeTiffBasedRaw(buf: Buffer): boolean {
       ? buf.readUInt16LE(2)
       : buf.readUInt16BE(2);
   return magic === 42;
-}
-
-/** sRGB 0-255 to linear 0-1. */
-function srgb8ToLinear(c8: number): number {
-  const c = c8 / 255;
-  if (c <= 0.04045) return c / 12.92;
-  return ((c + 0.055) / 1.055) ** 2.4;
-}
-
-/**
- * Convert PixelFrameRGBA (8-bit sRGB) to PixelFrameF32 (linear float).
- */
-function rgbaToLinearFloat(rgba: PixelFrameRGBA): PixelFrameF32 {
-  const { width, height, data } = rgba;
-  const n = width * height * 4;
-  const floatData = new Float32Array(n);
-  for (let i = 0; i < data.length; i += 4) {
-    floatData[i] = srgb8ToLinear(data[i] ?? 0);
-    floatData[i + 1] = srgb8ToLinear(data[i + 1] ?? 0);
-    floatData[i + 2] = srgb8ToLinear(data[i + 2] ?? 0);
-    floatData[i + 3] = (data[i + 3] ?? 255) / 255;
-  }
-  return { width, height, data: floatData };
 }
 
 /**
@@ -604,7 +642,7 @@ export async function decodeBufferToLinearFloat(
   }
 
   const rgba = await decodeBuffer(buf, maxEdge);
-  return rgbaToLinearFloat(rgba);
+  return pixelFrameRgbaSrgb8ToLinearFloat(rgba);
 }
 
 /**

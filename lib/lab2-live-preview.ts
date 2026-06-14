@@ -1,6 +1,7 @@
 /**
  * Lab2: linear-float live preview chain after Model 2 match.
- * Canvas scaling is display-only; all ops run on full-resolution Float32Array RGB.
+ * Live pass runs on preview-resolution linear float (~1600px long edge).
+ * Export / apply use full-res decode via processFramesFloat.
  */
 
 import type { PixelFrameF32 } from "@/src/lib/pipeline/types";
@@ -8,6 +9,7 @@ import type { PipelineParams } from "@/src/lib/pipeline/types";
 import type { LookParams as GradingParams } from "@/src/lib/pipeline/stages/match";
 import { matchFloat } from "@/src/lib/pipeline/match";
 import { linearRgbToOklab, oklabToLinearRgb } from "@/src/lib/pipeline/stages/oklab";
+import { applyHighlightSmoothingFloat } from "@/src/lib/pipeline/stages/postModel2Grading";
 
 export function clonePixelFrameF32(frame: PixelFrameF32): PixelFrameF32 {
   return {
@@ -33,10 +35,14 @@ export interface Lab2LiveWorkState {
   workB: Float32Array;
   halationMaskA: Float32Array;
   halationMaskB: Float32Array;
+  oklabBase: Float32Array;
+  oklabBaseSrcRef: Float32Array | null;
 }
 
 export interface Lab2LivePreviewOptions {
   halationPreview?: boolean;
+  interactiveMode?: boolean;
+  interactivePreviewScale?: number;
 }
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -153,6 +159,8 @@ export function createLab2LiveWorkState(width: number, height: number): Lab2Live
     workB: new Float32Array(n),
     halationMaskA: new Float32Array(width * height),
     halationMaskB: new Float32Array(width * height),
+    oklabBase: new Float32Array(n),
+    oklabBaseSrcRef: null,
   };
 }
 
@@ -184,7 +192,6 @@ export function applyLivePostModel2OnlyWithState(
   }
   const src = postM2Base.data;
   const out = state.workA;
-  out.set(src);
 
   const expCurve = grading.exposureCurve;
   const denCurve = grading.colorDensityCurve;
@@ -195,16 +202,26 @@ export function applyLivePostModel2OnlyWithState(
   const doOklab = hasExp || hasDen || applyRef12;
 
   if (doOklab) {
+    const baseLab = state.oklabBase;
+    if (state.oklabBaseSrcRef !== src) {
+      for (let i = 0; i < out.length; i += 4) {
+        const r = src[i] ?? 0;
+        const g = src[i + 1] ?? 0;
+        const b = src[i + 2] ?? 0;
+        const a = src[i + 3];
+        const lab = linearRgbToOklab(r, g, b);
+        baseLab[i] = lab.L;
+        baseLab[i + 1] = lab.a;
+        baseLab[i + 2] = lab.b;
+        baseLab[i + 3] = Number.isFinite(a) ? a : 1;
+      }
+      state.oklabBaseSrcRef = src;
+    }
     for (let i = 0; i < out.length; i += 4) {
-      const r = out[i] ?? 0;
-      const g = out[i + 1] ?? 0;
-      const b = out[i + 2] ?? 0;
-      const a = out[i + 3];
-
-      const lab = linearRgbToOklab(r, g, b);
-      let L = lab.L;
-      let aLab = lab.a;
-      let bLab = lab.b;
+      const a = baseLab[i + 3];
+      let L = baseLab[i] ?? 0;
+      let aLab = baseLab[i + 1] ?? 0;
+      let bLab = baseLab[i + 2] ?? 0;
 
       if (hasExp && expCurve) {
         const expMul = clamp(piecewiseLinear(L, expCurve.L_in, expCurve.L_out), 0, 2);
@@ -227,13 +244,26 @@ export function applyLivePostModel2OnlyWithState(
       out[i + 2] = rgb.b;
       out[i + 3] = Number.isFinite(a) ? a : 1;
     }
+  } else {
+    out.set(src);
   }
 
   applyDevignetteInPlace(out, width, height, grading.devignette);
+  let currentFrame: PixelFrameF32 = { width, height, data: out };
+  if ((grading.highlightSmoothing ?? 0) > 1e-4) {
+    currentFrame = applyHighlightSmoothingFloat(
+      currentFrame,
+      grading.highlightSmoothing
+    );
+    if (currentFrame.data !== out) {
+      out.set(currentFrame.data);
+      currentFrame = { width, height, data: out };
+    }
+  }
   if (options?.halationPreview) {
     applyApproxHalationPreviewInPlace(out, width, height, grading, state);
   }
-  return { width, height, data: out };
+  return currentFrame;
 }
 
 /**
@@ -269,6 +299,12 @@ function boxBlur3x3(src: Float32Array, dst: Float32Array, width: number, height:
   }
 }
 
+function percentileFromSorted(vals: ArrayLike<number>, len: number, p: number): number {
+  if (len === 0) return 1;
+  const idx = Math.min(len - 1, Math.max(0, Math.floor(p * len)));
+  return (vals[idx] as number | undefined) ?? (vals[len - 1] as number | undefined) ?? 1;
+}
+
 /**
  * Preview-only approximation. This is intentionally non-canonical and must never
  * be used for export/apply/training outputs.
@@ -281,39 +317,101 @@ function applyApproxHalationPreviewInPlace(
   state: Lab2LiveWorkState
 ) {
   const fill = grading.highlightFill;
-  const threshold = clamp(fill?.threshold ?? 0.92, 0.8, 0.999);
-  const strength = clamp(
-    ((fill?.rimStrength ?? 0.6) + (fill?.bloomStrength ?? 0.8)) * 0.35,
-    0,
-    1.2
-  );
+  const threshold = clamp(fill?.threshold ?? 0.92, 0.9, 0.9999);
+  const strength = clamp(fill?.strength ?? 0, 0, 2);
+  const rimStrength = clamp(fill?.rimStrength ?? 0.6, 0, 1);
+  const bloomStrength = clamp(fill?.bloomStrength ?? 0.8, 0, 1);
   if (strength <= 1e-4) return;
 
+  const nPix = width * height;
   const mask = state.halationMaskA;
+  const tmp = state.halationMaskB;
+  const vals = new Float32Array(nPix);
+  let count = 0;
   for (let i = 0, p = 0; i < data.length; i += 4, p++) {
     const r = data[i] ?? 0;
     const g = data[i + 1] ?? 0;
     const b = data[i + 2] ?? 0;
     const luma = 0.2627 * r + 0.678 * g + 0.0593 * b;
-    mask[p] = Math.max(0, (luma - threshold) / Math.max(1e-5, 1 - threshold));
+    mask[p] = luma;
+    vals[count++] = luma;
+  }
+  const sorted = vals.subarray(0, count);
+  sorted.sort();
+  const pThreshold = percentileFromSorted(sorted, count, threshold);
+  const p99_99 = percentileFromSorted(sorted, count, 0.9999);
+  const span = Math.max(1e-6, p99_99 - pThreshold);
+  const rescueSpan = Math.max(span, Math.max(1e-5, p99_99 * 0.02));
+  const rescueStart = pThreshold - rescueSpan * 0.35;
+
+  // Approximate topography lift in preview domain only (canonical remains in pipeline).
+  const topoLift = clamp(
+    (grading as { halationExposureTopographyLiftStops?: number })
+      .halationExposureTopographyLiftStops ?? 0,
+    0,
+    3
+  );
+  const topoMul = 2 ** (topoLift * 0.25);
+  for (let p = 0; p < nPix; p++) {
+    const lifted = Math.min(1.5, (mask[p] ?? 0) * topoMul);
+    const soft = Math.min(
+      1,
+      Math.max(0, (lifted - rescueStart) / Math.max(1e-6, rescueSpan * 1.35))
+    );
+    mask[p] = soft;
   }
 
-  const blurA = state.halationMaskA;
-  const blurB = state.halationMaskB;
-  const passes = Math.max(2, Math.round((fill?.bloomRadius ?? 1) * 2));
-  for (let i = 0; i < passes; i++) {
-    boxBlur3x3(blurA, blurB, width, height);
-    blurA.set(blurB);
+  // Cheap dark-neighbor gate for likely halation boundaries.
+  boxBlur3x3(mask, tmp, width, height);
+  let gateMax = 1e-6;
+  for (let p = 0; p < nPix; p++) {
+    const edge = Math.max(0, (mask[p] ?? 0) - (tmp[p] ?? 0));
+    tmp[p] = edge;
+    if (edge > gateMax) gateMax = edge;
+  }
+  const contrastGate = clamp(fill?.contrastGate ?? 1, 0, 1);
+  for (let p = 0; p < nPix; p++) {
+    tmp[p] = contrastGate * Math.min(1, (tmp[p] ?? 0) / gateMax);
+  }
+
+  // Rim: mask minus local average gives thin-ish line estimation.
+  boxBlur3x3(mask, state.halationMaskB, width, height);
+  for (let p = 0; p < nPix; p++) {
+    state.halationMaskB[p] = Math.max(0, (mask[p] ?? 0) - (state.halationMaskB[p] ?? 0));
+  }
+  let rimSrc = state.halationMaskB;
+  let rimDst = state.halationMaskA;
+  const rimPasses = Math.max(1, Math.round((fill?.rimRadius ?? 0.1) * 5));
+  for (let i = 0; i < rimPasses; i++) {
+    boxBlur3x3(rimSrc, rimDst, width, height);
+    const t = rimSrc;
+    rimSrc = rimDst;
+    rimDst = t;
+  }
+
+  // Bloom: blurred gated highlight mask controls halo thickness.
+  for (let p = 0; p < nPix; p++) {
+    state.halationMaskA[p] = (mask[p] ?? 0) * (tmp[p] ?? 0);
+  }
+  let bloomSrc = state.halationMaskA;
+  let bloomDst = state.halationMaskB;
+  const bloomPasses = Math.max(2, Math.round((fill?.bloomRadius ?? 1) * 2));
+  for (let i = 0; i < bloomPasses; i++) {
+    boxBlur3x3(bloomSrc, bloomDst, width, height);
+    const t = bloomSrc;
+    bloomSrc = bloomDst;
+    bloomDst = t;
   }
 
   const warmth = clamp(fill?.warmth ?? 0, -1, 1);
-  const warmR = 1 + 0.2 * Math.max(0, warmth);
-  const warmG = 1 + 0.07 * Math.max(0, warmth);
-  const warmB = 1 - 0.1 * Math.max(0, warmth);
+  const warmR = 1 + 0.3 * Math.max(0, warmth);
+  const warmG = 1 + 0.1 * Math.max(0, warmth);
+  const warmB = 1 - 0.12 * Math.max(0, warmth);
   for (let i = 0, p = 0; i < data.length; i += 4, p++) {
-    const glow = strength * (blurA[p] ?? 0);
-    data[i] = (data[i] ?? 0) + glow * 0.28 * warmR;
-    data[i + 1] = (data[i + 1] ?? 0) + glow * 0.16 * warmG;
-    data[i + 2] = (data[i + 2] ?? 0) + glow * 0.08 * warmB;
+    const rimGlow = strength * rimStrength * (rimSrc[p] ?? 0);
+    const bloomGlow = strength * bloomStrength * (bloomSrc[p] ?? 0);
+    data[i] = (data[i] ?? 0) + rimGlow * 0.6 * warmR + bloomGlow * 0.26 * warmR;
+    data[i + 1] = (data[i + 1] ?? 0) + rimGlow * 0.2 * warmG + bloomGlow * 0.12 * warmG;
+    data[i + 2] = (data[i + 2] ?? 0) + rimGlow * 0.05 * warmB + bloomGlow * 0.06 * warmB;
   }
 }

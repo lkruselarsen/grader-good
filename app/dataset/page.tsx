@@ -9,7 +9,11 @@ import { decode } from "@/src/lib/pipeline/decode";
 import { fitLookParamsFromReference } from "@/src/lib/pipeline/stages/match";
 import { imageToEmbedding } from "@/src/lib/embeddings";
 import { imageToSemanticEmbedding } from "@/src/lib/semanticEmbeddings";
-import { imageToColClipTileEmbeddings, imageToTonalTileEmbeddings } from "@/src/lib/colclipEmbeddings";
+import {
+  imageToChromaticTileEmbeddings,
+  imageToColClipTileEmbeddings,
+  imageToTonalTileEmbeddings,
+} from "@/src/lib/colclipEmbeddings";
 import Link from "next/link";
 
 type UploadResult = {
@@ -98,10 +102,12 @@ export default function DatasetPage() {
               })
           );
           const tonalTiles = imageToTonalTileEmbeddings(imageData, GRID_COLS, GRID_ROWS);
+          const chromaTiles = imageToChromaticTileEmbeddings(imageData, GRID_COLS, GRID_ROWS);
           const tileEmbeddings = colclipTiles.map((vec, idx) => ({
             tile_index: idx,
             embedding_colclip: vec,
             embedding_tonal: tonalTiles[idx],
+            embedding_tonal_chroma: chromaTiles[idx],
           }));
           formData.append("tileEmbeddings", JSON.stringify(tileEmbeddings));
         }
@@ -154,8 +160,9 @@ export default function DatasetPage() {
       <h1 className="text-2xl font-semibold mb-2">Dataset Builder</h1>
       <p className="text-sm text-muted-foreground mb-6">
         Upload reference photos to build your grading embeddings database. Each
-        image is analyzed, LookParams are fitted, and 32-dim tonal + 384-dim
-        semantic embeddings are stored for similarity search.
+        image is analyzed, LookParams are fitted, and 32-dim tonal + 16-dim
+        per-tile chroma + 384-dim semantic embeddings are stored for similarity
+        search (when tiles are enabled).
       </p>
 
       <Card className="p-6 space-y-4">
