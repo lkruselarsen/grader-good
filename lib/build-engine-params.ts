@@ -105,6 +105,7 @@ export function buildEngineParamsFromLookParams(
   if (m.actuanceHighlightGuard != null) engine.actuanceHighlightGuard = m.actuanceHighlightGuard;
   if (m.actuanceHighlightGuardFloor != null) engine.actuanceHighlightGuardFloor = m.actuanceHighlightGuardFloor;
   if (m.actuanceHighlightMinSize != null) engine.actuanceHighlightMinSize = m.actuanceHighlightMinSize;
+  if (m.highlightSmoothing != null) engine.highlightSmoothing = m.highlightSmoothing;
   engine.refractionPostModel2 =
     m.refractionPostModel2?.length === 12
       ? [...m.refractionPostModel2]

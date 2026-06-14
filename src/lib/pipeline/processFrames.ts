@@ -20,6 +20,7 @@ import {
   applyColorDensityCurveFloat,
   applyBandHueTempFloat,
   applyActuanceFloat,
+  applyHighlightSmoothingFloat,
 } from "./stages/postModel2Grading";
 import type { PipelineParams, PixelFrameF32, PixelFrameRGBA } from "./types";
 import type { ColorBandOverrides } from "./stages/match";
@@ -96,7 +97,15 @@ export function processFramesFloat(
         params.colorBandAnchors
       );
     }
-    // Build exposure map before actuance so halation boundaries use pre-actuance topology.
+    if ((params.grading.highlightSmoothing ?? 0) > 1e-4) {
+      afterMatch = applyHighlightSmoothingFloat(
+        afterMatch,
+        params.grading.highlightSmoothing
+      );
+    }
+    // Build exposure map before actuance so halation hierarchy/topography is taken
+    // from post-Model2 + post-adjustment (pre-actuance) luminance. Trigger
+    // boundaries are still computed later inside halation from post-grade Y.
     let exposureMap = buildExposureMapFromFloat(afterMatch);
     const topoLift = params.grading.halationExposureTopographyLiftStops;
     if (topoLift != null && topoLift > 1e-6) {

@@ -200,6 +200,7 @@ export async function POST(request: Request) {
         tile_index: number;
         embedding_colclip: number[];
         embedding_tonal?: number[];
+        embedding_tonal_chroma?: number[];
       }>;
       if (Array.isArray(tileEmbeddings) && tileEmbeddings.length > 0) {
         const rows = tileEmbeddings.map((t) => ({
@@ -207,6 +208,7 @@ export async function POST(request: Request) {
           tile_index: t.tile_index,
           embedding_colclip: t.embedding_colclip,
           embedding_tonal: t.embedding_tonal ?? null,
+          embedding_tonal_chroma: t.embedding_tonal_chroma ?? null,
         }));
         const { error: tilesErr } = await supabaseAdmin
           .from("grading_tiles")

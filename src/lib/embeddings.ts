@@ -7,6 +7,8 @@
 import { srgb8ToOklab } from "@/src/lib/pipeline/stages/oklab";
 
 export const EMBEDDING_DIM = 32;
+/** OKLab a/b histogram only (8 + 8), unit-normalized for cosine distance; no L bins. */
+export const EMBEDDING_CHROMA_DIM = 16;
 const L_BINS = 16;
 const A_BINS = 8;
 const B_BINS = 8;
@@ -51,6 +53,37 @@ export function imageToEmbedding(img: ImageData): number[] {
   const vec = [...norm(histL), ...norm(histA), ...norm(histB)];
 
   // Unit-normalize for cosine similarity
+  let sumSq = 0;
+  for (const v of vec) sumSq += v * v;
+  const mag = Math.sqrt(sumSq) || 1;
+  return vec.map((v) => v / mag);
+}
+
+/**
+ * 16-dim embedding from OKLab a/b bins only (no lightness). Same bin ranges as `imageToEmbedding`.
+ */
+export function imageToChromaticEmbedding(img: ImageData): number[] {
+  const d = img.data;
+  const histA = new Array<number>(A_BINS).fill(0);
+  const histB = new Array<number>(B_BINS).fill(0);
+  let count = 0;
+
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i + 3] < 128) continue;
+    const { a, b } = srgb8ToOklab(d[i], d[i + 1], d[i + 2]);
+    const biA = Math.min(A_BINS - 1, Math.floor(toBin01(a, -0.4, 0.4) * A_BINS));
+    const biB = Math.min(B_BINS - 1, Math.floor(toBin01(b, -0.4, 0.4) * B_BINS));
+    histA[biA]++;
+    histB[biB]++;
+    count++;
+  }
+
+  if (count === 0) {
+    return new Array(EMBEDDING_CHROMA_DIM).fill(0);
+  }
+
+  const scale = 1 / count;
+  const vec = [...histA.map((v) => v * scale), ...histB.map((v) => v * scale)];
   let sumSq = 0;
   for (const v of vec) sumSq += v * v;
   const mag = Math.sqrt(sumSq) || 1;

@@ -1,7 +1,8 @@
 /**
  * Halation stage: two-component (thin red rim + soft bloom), RAW-aware.
- * Uses ExposureMap from initial RAW when present; never uses post-match luminance for boundaries.
- * Tail-weighted (99.99% >> 98%), contrast-gated (highlight vs shadow, not upper vs lower highlight).
+ * Trigger boundaries are computed from post-grade luminance (what the user sees),
+ * while ExposureMap from RAW/source is used as hierarchy modulation.
+ * Tail-weighted (99.99% >> 98%), contrast-gated (highlight vs shadow).
  */
 
 import {
@@ -195,6 +196,11 @@ export function halation(
   const postP_threshold = percentileFromSorted(postSorted, postCount, threshold);
   const postP99_99 = percentileFromSorted(postSorted, postCount, 0.9999);
   const postSpan = Math.max(1e-6, postP99_99 - postP_threshold);
+  // Underexposed/compressed highlight scenes can collapse postSpan and make the
+  // hard threshold effectively unreachable. Add a small adaptive rescue span so
+  // near-threshold highlights can still contribute.
+  const rescueSpan = Math.max(postSpan, Math.max(1e-5, postP99_99 * 0.02));
+  const rescueStart = postP_threshold - rescueSpan * 0.35;
 
   // --- Contrast gate: dark-neighbor map from graded luminance ---
   const Dgraded = computeDarkNeighborMap(Ypost, width, height);
@@ -209,17 +215,22 @@ export function halation(
 
   for (let i = 0; i < nPix; i++) {
     const yPost = Ypost[i] ?? 0;
-    // Gate: must look like a highlight in the post-grade image
-    if (yPost <= postP_threshold) {
+    // Gate: must remain in post-grade highlight neighborhood, but with a
+    // low-tail rescue window for underexposed scenes.
+    if (yPost <= rescueStart) {
       W[i] = 0;
       continue;
     }
-    // Base weight from post-grade tail curve
-    const wPost = Math.pow(Math.min(1, (yPost - postP_threshold) / postSpan), tailGamma);
+    // Base weight from post-grade tail curve with softened entry.
+    const softPost = Math.min(
+      1,
+      Math.max(0, (yPost - rescueStart) / Math.max(1e-6, rescueSpan * 1.35))
+    );
+    const wPost = Math.pow(softPost, tailGamma);
 
     // Post-grade percentile rank: drives halation strength for lifted highlights.
-    const postRank = Math.min(1, (yPost - postP_threshold) / postSpan);
-    const postMod = 0.3 + 1.2 * postRank;
+    const postRank = Math.min(1, Math.max(0, (yPost - postP_threshold) / rescueSpan));
+    const postMod = 0.45 + 1.05 * postRank;
 
     // RAW hierarchy boost: extreme RAW highlights (3 stops over) get more halation
     // than moderate ones; pixels below rawP98 get no boost (rawBoost = 1).
@@ -402,6 +413,8 @@ export function halationFloat(
   const postP_threshold = percentileFromSorted(postSorted, postCount, threshold);
   const postP99_99 = percentileFromSorted(postSorted, postCount, 0.9999);
   const postSpan = Math.max(1e-6, postP99_99 - postP_threshold);
+  const rescueSpan = Math.max(postSpan, Math.max(1e-5, postP99_99 * 0.02));
+  const rescueStart = postP_threshold - rescueSpan * 0.35;
 
   const Dgraded = computeDarkNeighborMap(Ypost, width, height);
 
@@ -412,13 +425,17 @@ export function halationFloat(
 
   for (let i = 0; i < nPix; i++) {
     const yPost = Ypost[i] ?? 0;
-    if (yPost <= postP_threshold) {
+    if (yPost <= rescueStart) {
       W[i] = 0;
       continue;
     }
-    const wPost = Math.pow(Math.min(1, (yPost - postP_threshold) / postSpan), tailGamma);
-    const postRank = Math.min(1, (yPost - postP_threshold) / postSpan);
-    const postMod = 0.3 + 1.2 * postRank;
+    const softPost = Math.min(
+      1,
+      Math.max(0, (yPost - rescueStart) / Math.max(1e-6, rescueSpan * 1.35))
+    );
+    const wPost = Math.pow(softPost, tailGamma);
+    const postRank = Math.min(1, Math.max(0, (yPost - postP_threshold) / rescueSpan));
+    const postMod = 0.45 + 1.05 * postRank;
     let rawBoost = 1.0;
     if (rawMap !== null) {
       const yRaw = Yraw[i] ?? 0;
