@@ -8,13 +8,28 @@ cd "$ROOT"
 
 LIBRAW_HEADER="/usr/local/include/libraw/libraw.h"
 
+ensure_autotools_compat() {
+  # Bundled LibRaw was generated with automake 1.15; AL2023 ships 1.16.
+  local aclocal_16 automake_16
+  aclocal_16="$(command -v aclocal-1.16 2>/dev/null || true)"
+  if [[ -n "$aclocal_16" ]] && ! command -v aclocal-1.15 >/dev/null 2>&1; then
+    ln -sf "$aclocal_16" /usr/local/bin/aclocal-1.15
+  fi
+  automake_16="$(command -v automake-1.16 2>/dev/null || true)"
+  if [[ -n "$automake_16" ]] && ! command -v automake-1.15 >/dev/null 2>&1; then
+    ln -sf "$automake_16" /usr/local/bin/automake-1.15
+  fi
+}
+
 ensure_build_tools() {
   if ! command -v dnf >/dev/null 2>&1; then
     return 0
   fi
   # LibRaw-devel is not in AL2023 repos; install compiler toolchain only.
-  dnf install -y gcc-c++ make autoconf automake libtool pkgconf-pkg-config || \
+  # coreutils provides cmp/diff used by LibRaw's configure script.
+  dnf install -y gcc-c++ make autoconf automake libtool pkgconf-pkg-config coreutils || \
     dnf install -y gcc-c++ make
+  ensure_autotools_compat
 }
 
 find_bundled_libraw_src() {
