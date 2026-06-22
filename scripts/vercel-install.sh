@@ -89,6 +89,10 @@ install_with_bundled_libraw() {
   npm install --ignore-scripts
   build_bundled_libraw
   echo "vercel-install: rebuilding lightdrift-libraw..."
+  # binding.gyp lists /usr/include/libraw but not /usr/local/include/libraw
+  export CPPFLAGS="-I/usr/local/include/libraw ${CPPFLAGS:-}"
+  export CXXFLAGS="-I/usr/local/include/libraw ${CXXFLAGS:-}"
+  export LDFLAGS="-L/usr/local/lib ${LDFLAGS:-}"
   npm rebuild lightdrift-libraw
   run_postinstall
   verify_lightdrift
