@@ -1,5 +1,5 @@
 {
-  "installCommand": "dnf install -y libraw-devel gcc-c++ make python3 pkgconf-pkg-config && npm install",
+  "installCommand": "bash scripts/vercel-install.sh",
   "build": {
     "env": {
       "NODE_OPTIONS": "--max-old-space-size=8192"
