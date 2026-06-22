@@ -47,7 +47,7 @@ build_bundled_libraw() {
   local jobs="${VERCEL_BUILD_CPUS:-2}"
   (
     cd "$libraw_src"
-    ./configure --prefix=/usr/local
+    bash configure --prefix=/usr/local
     make -j"$jobs"
     make install
   )
