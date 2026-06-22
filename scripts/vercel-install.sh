@@ -84,16 +84,34 @@ verify_lightdrift() {
   node -e "require('lightdrift-libraw')"
 }
 
+rebuild_lightdrift() {
+  local pkg="$ROOT/node_modules/lightdrift-libraw"
+  local addon="$pkg/build/Release/libraw_addon.node"
+
+  # binding.gyp lists /usr/include/libraw but not /usr/local/include/libraw
+  export CPPFLAGS="-I/usr/local/include/libraw ${CPPFLAGS:-}"
+  export CXXFLAGS="-I/usr/local/include/libraw ${CXXFLAGS:-}"
+  export LDFLAGS="-L/usr/local/lib -Wl,-rpath,/usr/local/lib ${LDFLAGS:-}"
+  export LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH:-}"
+
+  echo "vercel-install: compiling lightdrift-libraw native addon..."
+  (
+    cd "$pkg"
+    npx --yes node-gyp rebuild
+  )
+
+  if [[ ! -f "$addon" ]]; then
+    echo "vercel-install: libraw_addon.node missing after node-gyp rebuild" >&2
+    ls -la "$pkg/build/Release/" 2>/dev/null || ls -la "$pkg/build/" 2>/dev/null || true
+    return 1
+  fi
+}
+
 install_with_bundled_libraw() {
   echo "vercel-install: installing npm deps (skip native scripts)..."
   npm install --ignore-scripts
   build_bundled_libraw
-  echo "vercel-install: rebuilding lightdrift-libraw..."
-  # binding.gyp lists /usr/include/libraw but not /usr/local/include/libraw
-  export CPPFLAGS="-I/usr/local/include/libraw ${CPPFLAGS:-}"
-  export CXXFLAGS="-I/usr/local/include/libraw ${CXXFLAGS:-}"
-  export LDFLAGS="-L/usr/local/lib ${LDFLAGS:-}"
-  npm rebuild lightdrift-libraw
+  rebuild_lightdrift
   run_postinstall
   verify_lightdrift
   echo "vercel-install: lightdrift-libraw OK"
