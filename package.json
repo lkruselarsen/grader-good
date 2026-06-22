@@ -14,6 +14,7 @@
   "dependencies": {
     "@huggingface/transformers": "^3.8.1",
     "@supabase/supabase-js": "^2.95.3",
+    "@tanstack/react-table": "^8.21.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "dcraw": "^1.0.3",
@@ -22,10 +23,13 @@
     "lightdrift-libraw": "^1.0.0-alpha.3",
     "lucide-react": "^0.563.0",
     "next": "16.1.6",
-    "radix-ui": "^1.4.3",
+    "next-themes": "^0.4.6",
+    "radix-ui": "^1.5.0",
     "react": "19.2.3",
     "react-dom": "19.2.3",
+    "react-resizable-panels": "^4.11.2",
     "sharp": "^0.34.5",
+    "sonner": "^2.0.7",
     "tailwind-merge": "^3.4.0"
   },
   "devDependencies": {

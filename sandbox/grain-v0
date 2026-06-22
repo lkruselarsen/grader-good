@@ -1,0 +1,3944 @@
+"use client"
+
+import { Button } from "@/components/ui/button"
+import { Switch } from "@/components/ui/switch"
+import { Label } from "@/components/ui/label"
+import { Loader2, X } from "lucide-react"
+import type React from "react"
+import { useState, useRef, useEffect, useCallback } from "react"
+import { Slider } from "@/components/ui/slider"
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog"
+
+interface ImageProcessorProps {
+  originalImage: string
+  processedImage: string | null
+  setProcessedImage: (image: string | null) => void
+}
+
+// Interface for circle data
+interface CircleData {
+  x: number
+  y: number
+  size: number
+  r: number
+  g: number
+  b: number
+  a: number
+}
+
+// Interface for boundary analysis
+interface BoundaryAnalysis {
+  colorDiscontinuity: number
+  patternDiscontinuity: number
+  densityChange: number
+  alignmentScore: number
+  textureCoherence: number
+  boundaryProbability: number
+}
+
+// Interface for circle statistics
+interface CircleStatistics {
+  avgSize: number
+  sizeVariance: number
+  avgColor: { r: number; g: number; b: number }
+  colorVariance: number
+  density: number
+  avgOpacity: number
+  opacityVariance: number
+  dominantDirection: number | null
+}
+
+// Interface for processing progress
+interface ProcessingProgress {
+  stage: string
+  tilesProcessed: number
+  totalTiles: number
+  percentage: number
+}
+
+// Interface for halation settings
+interface HalationSettings {
+  enabled: boolean
+  highlightThreshold: number
+  shadowThreshold: number
+  halationDepth: number
+  halationColor: number // 0 = red, 0.5 = orange, 1 = white
+  halationOpacity: number // 1-20%, scales down the halation intensity
+}
+
+// Calculate dynamic circle sizes based on image resolution
+const calculateCircleSizes = (width: number, height: number) => {
+  const longestEdge = Math.max(width, height)
+
+  // Base reference: 5000px longest edge = 2-9px diameter
+  // Scale linearly based on resolution
+  const scaleFactor = longestEdge / 5000
+
+  const minSize = Math.max(1, Math.round(2 * scaleFactor))
+  const maxSize = Math.max(minSize + 1, Math.round(9 * scaleFactor))
+
+  return { minSize, maxSize, scaleFactor }
+}
+
+export default function ImageProcessor({ originalImage, processedImage, setProcessedImage }: ImageProcessorProps) {
+  const [isProcessing, setIsProcessing] = useState(false)
+  const [detailPosition, setDetailPosition] = useState({ x: 0, y: 0 })
+  const [detailSize] = useState(150)
+  const [progress, setProgress] = useState<ProcessingProgress | null>(null)
+  const [useTopoOpacity, setUseTopoOpacity] = useState(true) // Default to enabled
+  const [highlightOpacity, setHighlightOpacity] = useState(3) // Default to 3%
+  const [midtoneOpacity, setMidtoneOpacity] = useState(69) // Default to 69%
+  const [shadowOpacity, setShadowOpacity] = useState(84) // Default to 84%
+  const [highlightThreshold, setHighlightThreshold] = useState(200) // Default to 200
+  const [midtoneThreshold, setMidtoneThreshold] = useState(25) // Default to 25 (below this is shadow)
+  const [shadowOvalSize, setShadowOvalSize] = useState(120) // Default to 120%
+  const [shadowColorDensity, setShadowColorDensity] = useState(130) // Default to 130%
+  const [shadowBrightness, setShadowBrightness] = useState(70) // Default to 70%
+  const [halationModalOpen, setHalationModalOpen] = useState(false)
+  const [halationSettings, setHalationSettings] = useState<HalationSettings>({
+    enabled: true, // Enabled by default
+    highlightThreshold: 190,
+    shadowThreshold: 100,
+    halationDepth: 9, // Base value calibrated for 3040x2024 - scales with image size
+    halationColor: 0.4, // Toward red
+    halationOpacity: 20,
+  })
+  const [contourHalationEnabled, setContourHalationEnabled] = useState(true) // Default on
+  const [contourHalationStrength, setContourHalationStrength] = useState<1 | 2 | 3>(2) // Default strength 2
+  const [fineGrainEnabled, setFineGrainEnabled] = useState(true) // Default on
+  const [fineGrainStrength, setFineGrainStrength] = useState<"normal" | "strong">("normal") // Default normal
+  const [fineGrainExtraChroma, setFineGrainExtraChroma] = useState(false) // Default off
+  const [useAlgo2, setUseAlgo2] = useState(false) // Additive RGB algorithm
+  const halationPreviewCanvasRef = useRef<HTMLCanvasElement>(null)
+  const [settingsChangedSinceProcess, setSettingsChangedSinceProcess] = useState(false)
+  const mainImageRef = useRef<HTMLImageElement>(null)
+  const mainCanvasRef = useRef<HTMLCanvasElement>(null)
+  const detailCanvasRef = useRef<HTMLCanvasElement>(null)
+  const originalImageObj = useRef<HTMLImageElement | null>(null)
+
+  // Initialize the image and set a random detail position
+  useEffect(() => {
+    const img = new Image()
+    img.crossOrigin = "anonymous"
+    img.src = originalImage
+
+    img.onload = () => {
+      originalImageObj.current = img
+
+      // Set a random position for the detail view
+      const randomX = Math.floor(Math.random() * (img.width - detailSize))
+      const randomY = Math.floor(Math.random() * (img.height - detailSize))
+      setDetailPosition({ x: randomX, y: randomY })
+
+      // Draw the original image
+      drawOriginalImage()
+    }
+  }, [originalImage])
+
+  // Update the detail view when position changes
+  useEffect(() => {
+    if (originalImageObj.current) {
+      if (useTopoOpacity) {
+        drawHighlightVisualization()
+      } else {
+        drawDetailView()
+      }
+    }
+  }, [detailPosition, useTopoOpacity, highlightThreshold, midtoneThreshold])
+
+  // Draw the original image on the main canvas
+  const drawOriginalImage = () => {
+    if (!mainCanvasRef.current || !originalImageObj.current) return
+
+    const canvas = mainCanvasRef.current
+    const ctx = canvas.getContext("2d")
+    if (!ctx) return
+
+    const img = originalImageObj.current
+
+    // Set canvas dimensions to match image
+    canvas.width = img.width
+    canvas.height = img.height
+
+    // Draw the image
+    ctx.drawImage(img, 0, 0)
+  }
+
+  // Get halation color based on slider value (0 = red, 0.5 = orange, 1 = white)
+  const getHalationColor = useCallback((colorValue: number): { r: number; g: number; b: number } => {
+    if (colorValue <= 0.5) {
+      // Interpolate from red to orange
+      const t = colorValue / 0.5
+      return {
+        r: 255,
+        g: Math.round(165 * t), // 0 to 165 (orange green component)
+        b: 0,
+      }
+    } else {
+      // Interpolate from orange to white
+      const t = (colorValue - 0.5) / 0.5
+      return {
+        r: 255,
+        g: Math.round(165 + (255 - 165) * t), // 165 to 255
+        b: Math.round(255 * t), // 0 to 255
+      }
+    }
+  }, [])
+
+  // Draw halation preview in the modal
+  const drawHalationPreview = useCallback(() => {
+    if (!halationPreviewCanvasRef.current || !originalImageObj.current) return
+
+    const canvas = halationPreviewCanvasRef.current
+    const ctx = canvas.getContext("2d")
+    if (!ctx) return
+
+    const img = originalImageObj.current
+
+    // Calculate scaled dimensions to fit in preview
+    const maxWidth = 800
+    const maxHeight = 600
+    const scale = Math.min(maxWidth / img.width, maxHeight / img.height, 1)
+    const scaledWidth = Math.round(img.width * scale)
+    const scaledHeight = Math.round(img.height * scale)
+
+    // Scale halation depth for preview
+    const scaledDepth = Math.round(halationSettings.halationDepth * scale)
+
+    canvas.width = scaledWidth
+    canvas.height = scaledHeight
+
+    // Draw scaled original image
+    ctx.drawImage(img, 0, 0, scaledWidth, scaledHeight)
+
+    // Get image data to find highlight and shadow edges
+    const imageData = ctx.getImageData(0, 0, scaledWidth, scaledHeight)
+    const data = imageData.data
+
+    // Create brightness map
+    const brightnessMap: number[][] = []
+    for (let y = 0; y < scaledHeight; y++) {
+      brightnessMap[y] = []
+      for (let x = 0; x < scaledWidth; x++) {
+        const idx = (y * scaledWidth + x) * 4
+        brightnessMap[y][x] = Math.round(0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2])
+      }
+    }
+
+    // First pass: collect all highlight and shadow edge pixels
+    const highlightEdges: { x: number; y: number }[] = []
+    const shadowEdges: { x: number; y: number }[] = []
+
+    for (let y = 1; y < scaledHeight - 1; y++) {
+      for (let x = 1; x < scaledWidth - 1; x++) {
+        const brightness = brightnessMap[y][x]
+        const isHighlight = brightness > halationSettings.highlightThreshold
+        const isShadow = brightness < halationSettings.shadowThreshold
+
+        // Check neighbors for edge detection
+        let hasAdjacentDifferent = false
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dy === 0) continue
+            const neighborBrightness = brightnessMap[y + dy][x + dx]
+
+            if (isHighlight && neighborBrightness <= halationSettings.highlightThreshold) {
+              hasAdjacentDifferent = true
+            }
+            if (isShadow && neighborBrightness >= halationSettings.shadowThreshold) {
+              hasAdjacentDifferent = true
+            }
+          }
+        }
+
+        if (hasAdjacentDifferent) {
+          if (isHighlight) {
+            highlightEdges.push({ x, y })
+          } else if (isShadow) {
+            shadowEdges.push({ x, y })
+          }
+        }
+      }
+    }
+
+    // Create overlay canvas
+    const overlayCanvas = document.createElement("canvas")
+    overlayCanvas.width = scaledWidth
+    overlayCanvas.height = scaledHeight
+    const overlayCtx = overlayCanvas.getContext("2d")
+    if (!overlayCtx) return
+
+    // Second pass: find shadow edges that are within halation depth of highlight edges
+    // Create a set for fast lookup of active halation zones
+    const activeHalationZones = new Set<string>()
+
+    for (const highlightEdge of highlightEdges) {
+      for (const shadowEdge of shadowEdges) {
+        const dx = highlightEdge.x - shadowEdge.x
+        const dy = highlightEdge.y - shadowEdge.y
+        const distance = Math.sqrt(dx * dx + dy * dy)
+
+        if (distance <= scaledDepth) {
+          // Mark both as active halation zones
+          activeHalationZones.add(`${highlightEdge.x},${highlightEdge.y}`)
+          activeHalationZones.add(`${shadowEdge.x},${shadowEdge.y}`)
+        }
+      }
+    }
+
+    // Draw all edges with appropriate colors
+    for (const edge of highlightEdges) {
+      const isActive = activeHalationZones.has(`${edge.x},${edge.y}`)
+      if (isActive) {
+        // Active halation zone - yellow/gold
+        overlayCtx.fillStyle = "rgba(255, 215, 0, 0.9)"
+        overlayCtx.fillRect(edge.x - 1, edge.y - 1, 3, 3)
+      } else {
+        // Highlight edge - cyan
+        overlayCtx.fillStyle = "rgba(0, 255, 255, 0.8)"
+        overlayCtx.fillRect(edge.x, edge.y, 2, 2)
+      }
+    }
+
+    for (const edge of shadowEdges) {
+      const isActive = activeHalationZones.has(`${edge.x},${edge.y}`)
+      if (isActive) {
+        // Active halation zone - yellow/gold
+        overlayCtx.fillStyle = "rgba(255, 215, 0, 0.9)"
+        overlayCtx.fillRect(edge.x - 1, edge.y - 1, 3, 3)
+      } else {
+        // Shadow edge - magenta
+        overlayCtx.fillStyle = "rgba(255, 0, 255, 0.8)"
+        overlayCtx.fillRect(edge.x, edge.y, 2, 2)
+      }
+    }
+
+    // Draw the overlay on top of the original
+    ctx.drawImage(overlayCanvas, 0, 0)
+
+    // Add legend
+    ctx.fillStyle = "rgba(0, 0, 0, 0.8)"
+    ctx.fillRect(10, scaledHeight - 80, 260, 70)
+    ctx.font = "12px sans-serif"
+    ctx.fillStyle = "cyan"
+    ctx.fillRect(20, scaledHeight - 68, 12, 12)
+    ctx.fillStyle = "white"
+    ctx.fillText("Highlight edges", 40, scaledHeight - 58)
+    ctx.fillStyle = "magenta"
+    ctx.fillRect(20, scaledHeight - 48, 12, 12)
+    ctx.fillStyle = "white"
+    ctx.fillText("Shadow edges", 40, scaledHeight - 38)
+    ctx.fillStyle = "gold"
+    ctx.fillRect(20, scaledHeight - 28, 12, 12)
+    ctx.fillStyle = "white"
+    ctx.fillText("Active halation zone", 40, scaledHeight - 18)
+  }, [halationSettings])
+
+  // Update halation preview when settings change
+  useEffect(() => {
+    if (halationModalOpen) {
+      drawHalationPreview()
+    }
+  }, [halationModalOpen, halationSettings, drawHalationPreview])
+
+  // Track settings changes to re-enable the Apply button
+  useEffect(() => {
+    if (processedImage) {
+      setSettingsChangedSinceProcess(true)
+    }
+  }, [useTopoOpacity, highlightOpacity, midtoneOpacity, shadowOpacity, highlightThreshold, midtoneThreshold, shadowOvalSize, shadowColorDensity, shadowBrightness, halationSettings, useAlgo2])
+
+  // Draw the detail view
+  const drawDetailView = () => {
+    if (!detailCanvasRef.current || !originalImageObj.current) return
+
+    const canvas = detailCanvasRef.current
+    const ctx = canvas.getContext("2d")
+    if (!ctx) return
+
+    const img = originalImageObj.current
+
+    // Set canvas dimensions
+    canvas.width = detailSize
+    canvas.height = detailSize
+
+    // Draw the detail area
+    ctx.drawImage(img, detailPosition.x, detailPosition.y, detailSize, detailSize, 0, 0, detailSize, detailSize)
+
+    // If we're showing the processed image, apply the effect to the detail view
+    if (processedImage) {
+      applyEffectToDetail(ctx)
+    }
+  }
+
+  // Draw highlight visualization on the detail view
+  const drawHighlightVisualization = () => {
+    if (!detailCanvasRef.current || !originalImageObj.current) return
+
+    const canvas = detailCanvasRef.current
+    const ctx = canvas.getContext("2d")
+    if (!ctx) return
+
+    const img = originalImageObj.current
+
+    // Set canvas dimensions
+    canvas.width = detailSize
+    canvas.height = detailSize
+
+    // Draw the detail area
+    ctx.drawImage(img, detailPosition.x, detailPosition.y, detailSize, detailSize, 0, 0, detailSize, detailSize)
+
+    // Get image data to analyze brightness
+    const imageData = ctx.getImageData(0, 0, detailSize, detailSize)
+    const data = imageData.data
+
+    // Create overlay for highlight visualization
+    const overlayData = ctx.createImageData(detailSize, detailSize)
+    const overlay = overlayData.data
+
+      for (let i = 0; i < data.length; i += 4) {
+        const brightness = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2])
+        
+        // Set overlay color based on brightness zone
+        if (brightness > highlightThreshold) {
+          // Highlights - red overlay with varying intensity
+          const intensity = Math.min(255, ((brightness - highlightThreshold) / (255 - highlightThreshold)) * 150 + 100)
+          overlay[i] = intensity // Red
+          overlay[i + 1] = 0 // Green
+          overlay[i + 2] = 0 // Blue
+          overlay[i + 3] = 80 // Alpha
+        } else if (brightness > midtoneThreshold) {
+          // Midtones - yellow overlay with varying intensity
+          const intensity = Math.min(255, ((brightness - midtoneThreshold) / (highlightThreshold - midtoneThreshold)) * 100 + 80)
+          overlay[i] = intensity // Red
+          overlay[i + 1] = intensity // Green
+          overlay[i + 2] = 0 // Blue
+          overlay[i + 3] = 60 // Alpha
+        } else {
+          // Shadows - blue overlay with varying intensity
+          const intensity = Math.min(255, ((midtoneThreshold - brightness) / midtoneThreshold) * 100 + 80)
+          overlay[i] = 0 // Red
+          overlay[i + 1] = 0 // Green
+          overlay[i + 2] = intensity // Blue
+          overlay[i + 3] = 50 // Alpha
+        }
+      }
+
+    // Draw the overlay
+    ctx.putImageData(overlayData, 0, 0)
+
+    // If we're showing the processed image, apply the effect to the detail view
+    if (processedImage) {
+      applyEffectToDetail(ctx)
+    }
+  }
+
+  // Handle double tap on the main image
+  const handleDoubleTap = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!mainImageRef.current || !originalImageObj.current) return
+
+    // Get the click position relative to the image
+    const rect = mainImageRef.current.getBoundingClientRect()
+    const scaleX = originalImageObj.current.width / rect.width
+    const scaleY = originalImageObj.current.height / rect.height
+
+    const x = (e.clientX - rect.left) * scaleX
+    const y = (e.clientY - rect.top) * scaleY
+
+    // Center the detail view on the click position
+    const newX = Math.max(0, Math.min(x - detailSize / 2, originalImageObj.current.width - detailSize))
+    const newY = Math.max(0, Math.min(y - detailSize / 2, originalImageObj.current.height - detailSize))
+
+    setDetailPosition({ x: newX, y: newY })
+  }
+
+  // Apply the effect to the detail view
+  const applyEffectToDetail = (ctx: CanvasRenderingContext2D) => {
+    // This is a simplified version of the effect
+    // In a real implementation, we would apply the full effect as described
+
+    const imageData = ctx.getImageData(0, 0, detailSize, detailSize)
+    const data = imageData.data
+
+    // Apply a simple effect for demonstration
+    // In the real implementation, this would be the tile-by-tile deconstruction
+    for (let y = 0; y < detailSize; y += 5) {
+      for (let x = 0; x < detailSize; x += 5) {
+        const idx = (y * detailSize + x) * 4
+
+        // Create a circle effect
+        ctx.beginPath()
+        ctx.arc(x, y, 2.5, 0, Math.PI * 2)
+        ctx.fillStyle = `rgba(${data[idx]}, ${data[idx + 1]}, ${data[idx + 2]}, 0.7)`
+        ctx.fill()
+      }
+    }
+  }
+
+  // Process the entire image with the effect
+  const processImage = () => {
+    if (!originalImageObj.current) return
+    setIsProcessing(true)
+    setSettingsChangedSinceProcess(false) // Reset settings change flag
+    setProgress({
+      stage: "Initializing",
+      tilesProcessed: 0,
+      totalTiles: 0,
+      percentage: 0,
+    })
+
+    // Create an offscreen canvas for processing
+    const canvas = document.createElement("canvas")
+    const ctx = canvas.getContext("2d")
+    if (!ctx) {
+      setIsProcessing(false)
+      return
+    }
+
+    const img = originalImageObj.current
+    canvas.width = img.width
+    canvas.height = img.height
+
+    // Draw the original image
+    ctx.drawImage(img, 0, 0)
+    
+    // For algo2: fill the entire canvas with black backdrop ONCE at the start
+    // This prevents any black grid lines between macro tiles
+    if (useAlgo2) {
+      // Store the original image data before filling with black
+      const originalData = ctx.getImageData(0, 0, img.width, img.height)
+      ;(ctx as any)._algo2FullSourceData = originalData
+      ctx.fillStyle = "rgb(2, 2, 2)"
+      ctx.fillRect(0, 0, img.width, img.height)
+    }
+
+    // Process the image in chunks to avoid blocking the UI
+    setTimeout(() => {
+      applyFullEffect(ctx, img.width, img.height)
+        .then(() => {
+          // Make sure we're setting the processed image with the final canvas data
+          const processedImageUrl = canvas.toDataURL("image/png")
+          setProcessedImage(processedImageUrl)
+          setIsProcessing(false)
+          setProgress(null)
+          console.log("Processing complete, image URL generated:", processedImageUrl.substring(0, 50) + "...")
+        })
+        .catch((error) => {
+          console.error("Error during image processing:", error)
+          setIsProcessing(false)
+          setProgress(null)
+        })
+    }, 100)
+  }
+
+  // Apply the full effect to the image
+  const applyFullEffect = async (ctx: CanvasRenderingContext2D, width: number, height: number) => {
+    // Calculate dynamic circle sizes based on image resolution
+    const circleSizes = calculateCircleSizes(width, height)
+    console.log(
+      `Image resolution: ${width}x${height}, Circle sizes: ${circleSizes.minSize}-${circleSizes.maxSize}px, Scale factor: ${circleSizes.scaleFactor.toFixed(2)}`,
+    )
+
+    const tileSize = 150
+    const gridSize = 3 // 3x3 grid of tiles
+    const macroTileSize = tileSize * gridSize // 450x450 pixels
+    const transitionZoneWidth = 25 // Width of transition zone around boundaries
+
+    // Limit the maximum number of circles to prevent stack overflow
+    const MAX_CIRCLES = 100000
+
+    // Calculate total number of tiles for progress tracking
+    const totalMacroTilesX = Math.ceil(width / macroTileSize)
+    const totalMacroTilesY = Math.ceil(height / macroTileSize)
+    const totalMacroTiles = totalMacroTilesX * totalMacroTilesY
+    let macroTilesProcessed = 0
+
+    // Update progress
+    setProgress({
+      stage: "Preparing",
+      tilesProcessed: 0,
+      totalTiles: totalMacroTiles,
+      percentage: 0,
+    })
+
+    // Store a copy of the original image for reference
+    const originalCanvasEl = document.createElement("canvas")
+    originalCanvasEl.width = width
+    originalCanvasEl.height = height
+    const originalCtx = originalCanvasEl.getContext("2d")
+    if (!originalCtx) return
+    originalCtx.drawImage(ctx.canvas, 0, 0)
+
+    // Create a result canvas to build the final image
+    const resultCanvas = document.createElement("canvas")
+    resultCanvas.width = width
+    resultCanvas.height = height
+    const resultCtx = resultCanvas.getContext("2d")
+    if (!resultCtx) return
+
+    // For algo2: fill resultCtx with near-black backdrop and store source data
+    if (useAlgo2) {
+      resultCtx.fillStyle = "rgb(2, 2, 2)"
+      resultCtx.fillRect(0, 0, width, height)
+      // Store the original source data for algo2 to reference
+      ;(resultCtx as any)._algo2SourceData = (ctx as any)._algo2FullSourceData
+    }
+
+    // Create a verification canvas to track processed areas
+    const verificationCanvas = document.createElement("canvas")
+    verificationCanvas.width = width
+    verificationCanvas.height = height
+    const verificationCtx = verificationCanvas.getContext("2d")
+    if (!verificationCtx) return
+    verificationCtx.fillStyle = "rgba(255, 0, 0, 0.5)" // Red for unprocessed areas
+
+    // Fill the verification canvas with red (unprocessed)
+    verificationCtx.fillRect(0, 0, width, height)
+
+    // Create a heat map for boundary probability
+    const boundaryHeatMap: number[][] = []
+    for (let y = 0; y < height; y++) {
+      boundaryHeatMap[y] = new Array(width).fill(0)
+    }
+
+    // Store all circles for later analysis
+    const allCircles: CircleData[] = []
+
+    // Process the image in chunks to avoid memory issues
+    const chunkSize = 1 // Process 1x1 macro tiles at a time to reduce memory usage
+    const totalChunksX = Math.ceil(totalMacroTilesX / chunkSize)
+    const totalChunksY = Math.ceil(totalMacroTilesY / chunkSize)
+    const totalChunks = totalChunksX * totalChunksY
+
+    setProgress({
+      stage: "Processing image in chunks",
+      tilesProcessed: 0,
+      totalTiles: totalChunks,
+      percentage: 0,
+    })
+
+    let chunksProcessed = 0
+
+    // Process in chunks to manage memory
+    for (let chunkY = 0; chunkY < totalChunksY; chunkY++) {
+      for (let chunkX = 0; chunkX < totalChunksX; chunkX++) {
+        // Process this chunk of macro tiles
+        const startMacroX = chunkX * chunkSize * macroTileSize
+        const startMacroY = chunkY * chunkSize * macroTileSize
+        const chunkWidth = Math.min(chunkSize * macroTileSize, width - startMacroX)
+        const chunkHeight = Math.min(chunkSize * macroTileSize, height - startMacroY)
+
+        // Update progress
+        setProgress({
+          stage: "Processing chunk",
+          tilesProcessed: chunksProcessed,
+          totalTiles: totalChunks,
+          percentage: Math.round((chunksProcessed / totalChunks) * 100),
+        })
+
+        // Process macro tiles within this chunk
+        const chunkCircles = await processChunk(
+          originalCtx,
+          resultCtx,
+          verificationCtx,
+          boundaryHeatMap,
+          startMacroX,
+          startMacroY,
+          chunkWidth,
+          chunkHeight,
+          tileSize,
+          macroTileSize,
+          (processed) => {
+            macroTilesProcessed += processed
+            setProgress({
+              stage: "Processing tiles",
+              tilesProcessed: macroTilesProcessed,
+              totalTiles: totalMacroTiles,
+              percentage: Math.round((macroTilesProcessed / totalMacroTiles) * 100),
+            })
+          },
+          MAX_CIRCLES,
+          circleSizes,
+          useAlgo2 ? (ctx as any)._algo2FullSourceData : undefined,
+        )
+
+        // Add circles from this chunk to the global collection, but limit total count
+        if (allCircles.length < MAX_CIRCLES) {
+          const spaceLeft = MAX_CIRCLES - allCircles.length
+          if (chunkCircles.length <= spaceLeft) {
+            allCircles.push(...chunkCircles)
+          } else {
+            allCircles.push(...chunkCircles.slice(0, spaceLeft))
+          }
+        }
+
+        // Release memory by clearing references
+        chunksProcessed++
+
+        // Yield to browser to prevent UI freezing and allow garbage collection
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+    }
+
+    // Skip verification and boundary fixing for algo2 - these would lift shadows
+    // Algo2 relies on the random sampling to achieve coverage
+    if (!useAlgo2) {
+      // Check for unprocessed areas and fix them
+      setProgress({
+        stage: "Verifying complete coverage",
+        tilesProcessed: chunksProcessed,
+        totalTiles: totalChunks + 1, // +1 for verification step
+        percentage: Math.round((chunksProcessed / (totalChunks + 1)) * 100),
+      })
+
+      await verifyAndFixUnprocessedAreas(originalCtx, resultCtx, verificationCtx, width, height, tileSize, circleSizes)
+
+      // Fix boundaries between tiles
+      setProgress({
+        stage: "Fixing boundaries",
+        tilesProcessed: chunksProcessed + 1,
+        totalTiles: totalChunks + 2, // +2 for verification and boundary fixing
+        percentage: Math.round(((chunksProcessed + 1) / (totalChunks + 2)) * 100),
+      })
+
+      // Create a circles canvas for boundary analysis
+      const circlesCanvas = document.createElement("canvas")
+      circlesCanvas.width = width
+      circlesCanvas.height = height
+      const circlesCtx = circlesCanvas.getContext("2d")
+      if (circlesCtx) {
+        // Draw all circles to the circles canvas
+        drawCirclesToCanvas(circlesCtx, allCircles)
+
+        // Fix boundaries
+        await fixGlobalBoundaries(
+          resultCtx,
+        circlesCtx,
+        originalCtx,
+        boundaryHeatMap,
+        allCircles,
+        width,
+        height,
+        tileSize,
+        macroTileSize,
+        transitionZoneWidth,
+      )
+    }
+    } // End of !useAlgo2 block for verification and boundary fixing
+
+    // Final progress update
+    setProgress({
+      stage: "Finalizing",
+      tilesProcessed: chunksProcessed + 2,
+      totalTiles: totalChunks + 2,
+      percentage: 100,
+    })
+
+    // Copy the result back to the main canvas
+    ctx.clearRect(0, 0, width, height)
+    ctx.drawImage(resultCanvas, 0, 0)
+
+    // FINAL STEP: Layer the processed image on top of the original image
+    // This eliminates "see through" gridlines by ensuring transparent areas blend with the original
+    const finalCanvas = document.createElement("canvas")
+    finalCanvas.width = width
+    finalCanvas.height = height
+    const finalCtx = finalCanvas.getContext("2d")
+
+    if (finalCtx) {
+      if (useAlgo2) {
+        // Algo2: Blend pointillist output with original using exposure-based opacity
+        // Darker areas show more pointillist effect, brighter areas show more original
+        setProgress({
+          stage: "Applying exposure-based blend",
+          tilesProcessed: chunksProcessed + 2,
+          totalTiles: totalChunks + 3,
+          percentage: 95,
+        })
+
+        // Get pixel data from ORIGINAL SOURCE (for exposure zone calculation)
+        // For algo2, the original is stored in _algo2FullSourceData since ctx was filled with black
+        const originalImageData = (ctx as any)._algo2FullSourceData as ImageData
+        const originalPixels = originalImageData.data
+        
+        // Get pixel data from PROCESSED pointillist output
+        const processedImageData = ctx.getImageData(0, 0, width, height)
+        const processedPixels = processedImageData.data
+        
+        // Create output image data
+        const finalImageData = finalCtx.createImageData(width, height)
+        const finalPixels = finalImageData.data
+
+        // Exposure zones and their opacity values for the pointillist layer
+        // These are based on the ORIGINAL source image brightness
+        // Lower exposure = higher opacity (show more pointillist)
+        // Higher exposure = lower opacity (show more original)
+        const exposureZones = [
+          { threshold: 0, opacity: 0.63 },        // Darkest
+          { threshold: 1 / 50, opacity: 0.63 },   // Lower 1/50th
+          { threshold: 1 / 20, opacity: 0.45 },   // Lower 1/20th
+          { threshold: 1 / 10, opacity: 0.35 },   // Lower 1/10th
+          { threshold: 1 / 5, opacity: 0.17 },    // Lower 1/5th
+          { threshold: 0.5, opacity: 0.11 },      // Midtones
+          { threshold: 1.0, opacity: 0.04 },      // Top Highlights
+        ]
+
+        // Function to get interpolated opacity based on brightness from ORIGINAL source
+        const getOpacityForBrightness = (brightness: number): number => {
+          const normalizedBrightness = brightness / 255
+          
+          // Find the two zones we're between and interpolate
+          for (let i = 0; i < exposureZones.length - 1; i++) {
+            if (normalizedBrightness <= exposureZones[i + 1].threshold) {
+              const lowerZone = exposureZones[i]
+              const upperZone = exposureZones[i + 1]
+              // Handle case where thresholds are equal
+              if (upperZone.threshold === lowerZone.threshold) {
+                return lowerZone.opacity
+              }
+              const t = (normalizedBrightness - lowerZone.threshold) / (upperZone.threshold - lowerZone.threshold)
+              // Smooth interpolation using smoothstep
+              const smoothT = t * t * (3 - 2 * t)
+              return lowerZone.opacity + (upperZone.opacity - lowerZone.opacity) * smoothT
+            }
+          }
+          return exposureZones[exposureZones.length - 1].opacity
+        }
+
+        // Debug: log sample values
+        let debugCount = 0
+        const debugSamples: { brightness: number; opacity: number; origR: number; procR: number; finalR: number }[] = []
+
+        // Blend each pixel
+        for (let i = 0; i < finalPixels.length; i += 4) {
+          // Get brightness from ORIGINAL source image (not processed)
+          const origR = originalPixels[i]
+          const origG = originalPixels[i + 1]
+          const origB = originalPixels[i + 2]
+          const brightness = (origR + origG + origB) / 3
+
+          // Get opacity for pointillist layer based on exposure zone of ORIGINAL
+          const pointillistOpacity = getOpacityForBrightness(brightness)
+
+          // Blend: final = original * (1 - opacity) + processed * opacity
+          const finalR = Math.round(origR * (1 - pointillistOpacity) + processedPixels[i] * pointillistOpacity)
+          const finalG = Math.round(origG * (1 - pointillistOpacity) + processedPixels[i + 1] * pointillistOpacity)
+          const finalB = Math.round(origB * (1 - pointillistOpacity) + processedPixels[i + 2] * pointillistOpacity)
+          
+          finalPixels[i] = finalR
+          finalPixels[i + 1] = finalG
+          finalPixels[i + 2] = finalB
+          finalPixels[i + 3] = 255 // Full alpha
+
+          // Collect debug samples for bright pixels
+          if (debugCount < 10 && brightness > 200) {
+            debugSamples.push({ brightness, opacity: pointillistOpacity, origR, procR: processedPixels[i], finalR })
+            debugCount++
+          }
+        }
+
+        console.log("[v0] Exposure-based blend applied. Sample bright pixels:", debugSamples)
+        console.log("[v0] Expected: high brightness -> low opacity (~0.04), final should be close to original")
+
+        finalCtx.putImageData(finalImageData, 0, 0)
+      } else if (useTopoOpacity) {
+        // Create topographic opacity map based on original image brightness
+        setProgress({
+          stage: "Creating topographic opacity map",
+          tilesProcessed: chunksProcessed + 2,
+          totalTiles: totalChunks + 3,
+          percentage: 95,
+        })
+
+        // Generate the opacity map
+        const opacityMap = await createTopoOpacityMap(originalCtx, width, height)
+
+        // Apply the processed image with variable opacity based on the map
+        await applyProcessedImageWithTopoMap(finalCtx, ctx.canvas, originalCtx, opacityMap, width, height)
+
+        console.log("Applied topographic opacity map to final image")
+      } else {
+        // Standard layering without topographic opacity
+        // First draw the original image as the background layer
+        finalCtx.drawImage(originalCtx.canvas, 0, 0)
+
+        // Then draw the processed image on top with normal composition
+        finalCtx.drawImage(ctx.canvas, 0, 0)
+      }
+
+      // Apply halation effect if enabled (skip for algo2 - it doesn't use halation)
+      if (!useAlgo2) {
+        // Apply contour halation first (fine edge detail)
+        if (contourHalationEnabled) {
+          setProgress({
+            stage: "Applying contour halation",
+            tilesProcessed: chunksProcessed + 3,
+            totalTiles: totalChunks + 5,
+            percentage: 94,
+          })
+          
+          await applyContourHalationEffect(finalCtx, originalCtx, width, height, contourHalationStrength)
+        }
+        
+        // Apply main halation effect (soft glow)
+        if (halationSettings.enabled) {
+          setProgress({
+            stage: "Applying halation glow",
+            tilesProcessed: chunksProcessed + 4,
+            totalTiles: totalChunks + 5,
+            percentage: 97,
+          })
+          
+          await applyHalationEffect(finalCtx, originalCtx, width, height, circleSizes)
+        }
+      }
+  
+  // Apply fine grain effect (ISO 800 film grain simulation)
+  if (fineGrainEnabled) {
+  setProgress({
+  stage: "Applying fine grain",
+  tilesProcessed: chunksProcessed + 5,
+  totalTiles: totalChunks + 6,
+  percentage: 99,
+  })
+  
+  await applyFineGrainEffect(finalCtx, width, height, fineGrainStrength, fineGrainExtraChroma)
+  }
+  
+  // Copy the final result back to the main canvas
+  ctx.clearRect(0, 0, width, height)
+  ctx.drawImage(finalCanvas, 0, 0)
+    }
+  }
+
+  // Apply contour halation effect - organic, randomized edge effect at highlight/shadow boundaries
+  // Creates a fine, splotchy, organic edge on the shadow side of highlight boundaries
+  const applyContourHalationEffect = async (
+    ctx: CanvasRenderingContext2D,
+    originalCtx: CanvasRenderingContext2D,
+    width: number,
+    height: number,
+    strength: 1 | 2 | 3,
+  ) => {
+    const originalData = originalCtx.getImageData(0, 0, width, height)
+    const data = originalData.data
+    
+    // Create brightness map
+    const brightnessMap = new Uint8Array(width * height)
+    for (let i = 0; i < width * height; i++) {
+      const idx = i * 4
+      brightnessMap[i] = Math.round(0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2])
+    }
+    
+    // Use halation settings for thresholds as BASE, then EXPAND the range for higher strength
+    // Higher strength = finds MORE contours by lowering the highlight bar and raising the shadow ceiling
+    // This ensures all major halation areas are always covered, plus additional areas at higher strengths
+    const sensitivityAdjust = [0, 10, 25][strength - 1] // mode 1 = base, mode 2 = bit more, mode 3 = most
+    // Lower highlight threshold = more pixels count as highlights (easier to find)
+    // Higher shadow threshold = more pixels count as shadows (wider shadow range)
+    const highlightThresh = halationSettings.highlightThreshold - sensitivityAdjust
+    const shadowThresh = Math.min(180, halationSettings.shadowThreshold + sensitivityAdjust * 1.5)
+    
+    // Get processed image data to modify
+    const processedData = ctx.getImageData(0, 0, width, height)
+    const pixels = processedData.data
+    
+    // Strength affects: depth, opacity, and color intensity
+    // Scale with image size for consistent appearance
+    const referenceSize = 3040
+    const longestEdge = Math.max(width, height)
+    const imageScale = longestEdge / referenceSize
+    
+    const baseDepth = [2, 4, 8][strength - 1] // pixels of edge depth - mode 3 now stronger
+    const depthMultiplier = Math.max(baseDepth, Math.round(baseDepth * imageScale))
+    const opacityMultiplier = [0.3, 0.5, 0.85][strength - 1] // mode 3 now stronger
+    const colorVariation = [0.15, 0.25, 0.4][strength - 1] // mode 3 now stronger
+    
+    // Find highlight/shadow boundary pixels (shadow pixels adjacent to highlights)
+    // and apply organic, randomized halation
+    for (let y = 1; y < height - 1; y++) {
+      for (let x = 1; x < width - 1; x++) {
+        const idx = y * width + x
+        const brightness = brightnessMap[idx]
+        
+        // Only process shadow pixels
+        if (brightness >= shadowThresh) continue
+        
+        // Check if this shadow pixel is near a highlight
+        let nearHighlight = false
+        let minDistToHighlight = depthMultiplier + 1
+        
+        // Check in a small radius for highlights
+        const searchRadius = depthMultiplier + 2
+        for (let dy = -searchRadius; dy <= searchRadius && !nearHighlight; dy++) {
+          for (let dx = -searchRadius; dx <= searchRadius; dx++) {
+            const nx = x + dx
+            const ny = y + dy
+            if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue
+            
+            const nIdx = ny * width + nx
+            if (brightnessMap[nIdx] > highlightThresh) {
+              const dist = Math.sqrt(dx * dx + dy * dy)
+              if (dist < minDistToHighlight) {
+                minDistToHighlight = dist
+                nearHighlight = true
+              }
+            }
+          }
+        }
+        
+        if (!nearHighlight || minDistToHighlight > depthMultiplier) continue
+        
+        // Calculate effect intensity based on distance (closer = stronger)
+        const distanceFactor = 1 - (minDistToHighlight / depthMultiplier)
+        
+        // Add randomness for organic look
+        const random1 = Math.random()
+        const random2 = Math.random()
+        const random3 = Math.random()
+        
+        // Randomize whether this pixel gets the effect (creates splotchy look)
+        // More likely near the edge, less likely further away
+        const splotchThreshold = 0.3 + distanceFactor * 0.5
+        if (random1 > splotchThreshold) continue
+        
+        // Randomize the intensity for organic variation
+        const intensityVariation = 0.5 + random2 * 0.5
+        const finalIntensity = distanceFactor * opacityMultiplier * intensityVariation
+        
+        // Randomize color between orange-red shades
+        // Base: warm red-orange, varies per pixel for organic look
+        const colorShift = (random3 - 0.5) * colorVariation
+        const baseHue = halationSettings.halationColor + colorShift // Shift within orange-red range
+        const clampedHue = Math.max(0, Math.min(1, baseHue))
+        
+        // Convert hue-like value to RGB (red to orange to amber range)
+        // 0 = deep red (255, 80, 40), 1 = warm white (255, 220, 180)
+        const warmR = 255
+        const warmG = 80 + clampedHue * 140 // 80-220
+        const warmB = 40 + clampedHue * 140 // 40-180
+        
+        // Apply to pixel with additive blend
+        const pixelIdx = idx * 4
+        const baseR = pixels[pixelIdx]
+        const baseG = pixels[pixelIdx + 1]
+        const baseB = pixels[pixelIdx + 2]
+        
+        // Additive blend with warm color
+        pixels[pixelIdx] = Math.min(255, Math.round(baseR + warmR * finalIntensity * 0.5))
+        pixels[pixelIdx + 1] = Math.min(255, Math.round(baseG + warmG * finalIntensity * 0.3))
+        pixels[pixelIdx + 2] = Math.min(255, Math.round(baseB + warmB * finalIntensity * 0.15))
+      }
+    }
+    
+    ctx.putImageData(processedData, 0, 0)
+  }
+
+  // Apply fine grain effect - simulates ISO 800 film grain with chrominance
+  // Key characteristics: fine luminance grain, larger chrominance grain, more visible in shadows
+  const applyFineGrainEffect = async (
+    ctx: CanvasRenderingContext2D,
+    width: number,
+    height: number,
+    strength: "normal" | "strong",
+    extraChroma: boolean,
+  ) => {
+    const processedData = ctx.getImageData(0, 0, width, height)
+    const pixels = processedData.data
+    
+    // Create brightness map for shadow detection
+    const brightnessMap = new Uint8Array(width * height)
+    for (let i = 0; i < width * height; i++) {
+      const idx = i * 4
+      brightnessMap[i] = Math.round(0.299 * pixels[idx] + 0.587 * pixels[idx + 1] + 0.114 * pixels[idx + 2])
+    }
+    
+    // Grain size scales with image size - calibrated for 3040x2024 reference
+    // For ISO 800, grain should be visible but not overwhelming
+    // The grain "cluster" size should be proportional to image resolution
+    // so grain appears the same relative size on any image
+    const referenceSize = 3040
+    const longestEdge = Math.max(width, height)
+    const imageScale = longestEdge / referenceSize
+    
+    // Base grain size for ISO 800 at reference resolution is ~2px
+    // Scale proportionally with image size so grain looks same relative size
+    const baseGrainSize = Math.max(1, Math.round(2 * imageScale))
+    
+    // Strength multipliers - scale DOWN for larger images to maintain consistent visual appearance
+    // Normal mode is more subtle, strong mode is more pronounced
+    const sizeNormalization = 1 / Math.sqrt(imageScale) // Inverse square root scaling
+    const strengthMultiplier = (strength === "strong" ? 1.4 : 0.45) * sizeNormalization
+    const chromaMultiplier = extraChroma ? 2.0 : 1.0
+    
+    // Generate grain at a smaller resolution then scale up (more realistic)
+    const grainWidth = Math.ceil(width / baseGrainSize)
+    const grainHeight = Math.ceil(height / baseGrainSize)
+    
+    // Luminance grain - fine, subtle
+    const luminanceGrain = new Float32Array(grainWidth * grainHeight)
+    // Chrominance grain - larger, blurrier (separate for R and B channels)
+    const chromaGrainR = new Float32Array(grainWidth * grainHeight)
+    const chromaGrainB = new Float32Array(grainWidth * grainHeight)
+    
+    // Generate random grain patterns
+    for (let i = 0; i < grainWidth * grainHeight; i++) {
+      // Luminance: Gaussian-ish distribution centered at 0
+      luminanceGrain[i] = (Math.random() - 0.5) * 2
+      // Chroma: Also centered at 0, affects color
+      chromaGrainR[i] = (Math.random() - 0.5) * 2
+      chromaGrainB[i] = (Math.random() - 0.5) * 2
+    }
+    
+    // Apply a simple blur to chroma grain for more realistic look
+    // Real film has larger chroma grain clusters
+    const blurredChromaR = new Float32Array(grainWidth * grainHeight)
+    const blurredChromaB = new Float32Array(grainWidth * grainHeight)
+    
+    for (let y = 0; y < grainHeight; y++) {
+      for (let x = 0; x < grainWidth; x++) {
+        const idx = y * grainWidth + x
+        let sumR = 0, sumB = 0, count = 0
+        
+        // Simple 3x3 blur for chroma
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const nx = x + dx
+            const ny = y + dy
+            if (nx >= 0 && nx < grainWidth && ny >= 0 && ny < grainHeight) {
+              const nIdx = ny * grainWidth + nx
+              sumR += chromaGrainR[nIdx]
+              sumB += chromaGrainB[nIdx]
+              count++
+            }
+          }
+        }
+        
+        blurredChromaR[idx] = sumR / count
+        blurredChromaB[idx] = sumB / count
+      }
+    }
+    
+    // Apply grain to image pixels
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const pixelIdx = (y * width + x) * 4
+        const brightness = brightnessMap[y * width + x]
+        
+        // Grain visibility: strong in shadows, weak in highlights
+        // ISO 800 film: grain very visible in shadows (0-80), moderate in midtones, almost invisible in highlights (200+)
+        let grainVisibility: number
+        if (brightness < 60) {
+          // Deep shadows - maximum grain
+          grainVisibility = 1.0
+        } else if (brightness < 120) {
+          // Lower midtones - still visible
+          grainVisibility = 1.0 - ((brightness - 60) / 60) * 0.4
+        } else if (brightness < 180) {
+          // Upper midtones - reduced
+          grainVisibility = 0.6 - ((brightness - 120) / 60) * 0.35
+        } else {
+          // Highlights - very subtle
+          grainVisibility = 0.25 - ((brightness - 180) / 75) * 0.2
+          grainVisibility = Math.max(0.05, grainVisibility)
+        }
+        
+        // Sample grain at scaled position
+        const gx = Math.floor(x / baseGrainSize)
+        const gy = Math.floor(y / baseGrainSize)
+        const grainIdx = gy * grainWidth + gx
+        
+        // Get grain values
+        const lumGrain = luminanceGrain[grainIdx]
+        const chrR = blurredChromaR[grainIdx]
+        const chrB = blurredChromaB[grainIdx]
+        
+        // Calculate grain amounts
+        // Luminance grain: affects all channels equally
+        const lumAmount = lumGrain * 15 * strengthMultiplier * grainVisibility
+        
+        // Chroma grain: affects R and B differently for color shifts
+        // Real film grain has slight color variations
+        const chromaAmount = 8 * strengthMultiplier * chromaMultiplier * grainVisibility
+        
+        // Apply grain
+        const baseR = pixels[pixelIdx]
+        const baseG = pixels[pixelIdx + 1]
+        const baseB = pixels[pixelIdx + 2]
+        
+        // Add luminance + chroma grain
+        // R channel: luminance + red chroma
+        // G channel: luminance only (less chroma in green for realism)
+        // B channel: luminance + blue chroma
+        pixels[pixelIdx] = Math.max(0, Math.min(255, Math.round(baseR + lumAmount + chrR * chromaAmount)))
+        pixels[pixelIdx + 1] = Math.max(0, Math.min(255, Math.round(baseG + lumAmount * 0.9)))
+        pixels[pixelIdx + 2] = Math.max(0, Math.min(255, Math.round(baseB + lumAmount + chrB * chromaAmount)))
+      }
+    }
+    
+    ctx.putImageData(processedData, 0, 0)
+  }
+
+  // Apply halation effect - EDGE-BASED approach for realistic film halation
+  // Real halation: harsh red fringe at boundaries, grainy texture, white-red transition
+  const applyHalationEffect = async (
+    ctx: CanvasRenderingContext2D,
+    originalCtx: CanvasRenderingContext2D,
+    width: number,
+    height: number,
+    circleSizes: { small: number; mid: number; large: number; scaleFactor: number },
+  ) => {
+    const originalData = originalCtx.getImageData(0, 0, width, height).data
+    
+    // Create brightness map from original image
+    const brightnessMap = new Uint8Array(width * height)
+    for (let i = 0; i < width * height; i++) {
+      const idx = i * 4
+      brightnessMap[i] = Math.round(0.299 * originalData[idx] + 0.587 * originalData[idx + 1] + 0.114 * originalData[idx + 2])
+    }
+    
+    // Scale based on image size
+    const referenceSize = 3040
+    const longestEdge = Math.max(width, height)
+    const imageScaleFactor = longestEdge / referenceSize
+    const halationDepth = Math.max(3, Math.round(halationSettings.halationDepth * imageScaleFactor))
+    
+    // Find highlight and shadow edges
+    const highlightThresh = halationSettings.highlightThreshold
+    const shadowThresh = halationSettings.shadowThreshold
+    
+    // Create local contrast map to detect hard edges vs gradual gradients
+    // High contrast = hard edge (apply halation), low contrast = gradient (skip)
+    const localContrast = new Float32Array(width * height)
+    const sampleRadius = Math.max(2, Math.round(3 * imageScaleFactor))
+    
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const idx = y * width + x
+        const centerBrightness = brightnessMap[idx]
+        
+        let maxDiff = 0
+        // Sample in a small radius to find maximum brightness difference
+        for (let dy = -sampleRadius; dy <= sampleRadius; dy++) {
+          for (let dx = -sampleRadius; dx <= sampleRadius; dx++) {
+            if (dx === 0 && dy === 0) continue
+            const nx = x + dx
+            const ny = y + dy
+            if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue
+            
+            const nIdx = ny * width + nx
+            const diff = Math.abs(brightnessMap[nIdx] - centerBrightness)
+            if (diff > maxDiff) maxDiff = diff
+          }
+        }
+        localContrast[idx] = maxDiff
+      }
+    }
+    
+    // Create distance-to-highlight map for shadow pixels
+    // This tells us how far each shadow pixel is from the nearest highlight
+    const distanceToHighlight = new Float32Array(width * height)
+    distanceToHighlight.fill(999999)
+    
+    // Also track the intensity of the nearest highlight (how far above threshold)
+    const nearestHighlightIntensity = new Float32Array(width * height)
+    
+    // First pass: mark highlight pixels and store their intensity
+    const highlightPixels: {idx: number, intensity: number}[] = []
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const idx = y * width + x
+        const brightness = brightnessMap[idx]
+        if (brightness > highlightThresh) {
+          // Intensity: how much above threshold (0-1 scale where 1 = pure white 255)
+          const intensity = (brightness - highlightThresh) / (255 - highlightThresh)
+          highlightPixels.push({idx, intensity})
+          distanceToHighlight[idx] = 0
+          nearestHighlightIntensity[idx] = intensity
+        }
+      }
+    }
+    
+    if (highlightPixels.length === 0) return
+    
+    // BFS to calculate distance from each pixel to nearest highlight
+    // Also propagate highlight intensity for thickness calculation
+    const maxDist = halationDepth + 6
+    const queue: {idx: number, dist: number, intensity: number}[] = highlightPixels.map(h => ({idx: h.idx, dist: 0, intensity: h.intensity}))
+    const visited = new Set<number>(highlightPixels.map(h => h.idx))
+    
+    while (queue.length > 0) {
+      const {idx, dist, intensity} = queue.shift()!
+      if (dist >= maxDist) continue
+      
+      const x = idx % width
+      const y = Math.floor(idx / width)
+      
+      // Check 8 neighbors
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue
+          const nx = x + dx
+          const ny = y + dy
+          if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue
+          
+          const nIdx = ny * width + nx
+          if (visited.has(nIdx)) continue
+          
+          const newDist = dist + (dx !== 0 && dy !== 0 ? 1.414 : 1)
+          if (newDist < distanceToHighlight[nIdx]) {
+            distanceToHighlight[nIdx] = newDist
+            nearestHighlightIntensity[nIdx] = intensity // Propagate highlight intensity
+            visited.add(nIdx)
+            queue.push({idx: nIdx, dist: newDist, intensity})
+          }
+        }
+      }
+    }
+    
+    // Get processed image data to modify
+    const processedData = ctx.getImageData(0, 0, width, height)
+    const pixels = processedData.data
+    
+    // Opacity and color settings
+    const baseOpacity = (halationSettings.halationOpacity / 100) * 2.5
+    const colorSetting = halationSettings.halationColor // 0 = red, 1 = white
+    
+    // Create shadow proximity map - halation only appears where shadows meet highlights
+    // This prevents false halation in sky gradients where there are no dark objects
+    const nearShadow = new Uint8Array(width * height)
+    const shadowCheckRadius = Math.max(3, Math.round(halationDepth * 1.5))
+    
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const idx = y * width + x
+        // Check if this pixel or nearby pixels are shadows
+        let foundShadow = false
+        for (let dy = -shadowCheckRadius; dy <= shadowCheckRadius && !foundShadow; dy++) {
+          for (let dx = -shadowCheckRadius; dx <= shadowCheckRadius && !foundShadow; dx++) {
+            const nx = x + dx
+            const ny = y + dy
+            if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue
+            const nIdx = ny * width + nx
+            if (brightnessMap[nIdx] < shadowThresh) {
+              foundShadow = true
+            }
+          }
+        }
+        nearShadow[idx] = foundShadow ? 1 : 0
+      }
+    }
+    
+    // Apply halation effect
+    for (let i = 0; i < width * height; i++) {
+      const dist = distanceToHighlight[i]
+      if (dist === 0 || dist > maxDist) continue
+      
+      // CHECK 1: Must be near a shadow area - real halation only appears where dark objects meet bright areas
+      // This prevents false halation in sky gradients
+      if (nearShadow[i] === 0) continue
+      
+      // CHECK 2: Skip very gradual gradients - only apply on hard edges
+      const contrast = localContrast[i]
+      const contrastThreshold = 40
+      if (contrast < contrastThreshold) continue
+      
+      // Reduce effect on medium-contrast areas (soft edges)
+      const contrastFactor = Math.min(1, (contrast - contrastThreshold) / 60)
+      
+      // CHECK 2: Get highlight intensity - affects thickness and strength
+      // Blown-out highlights (intensity ~1) get full thick halation
+      // Weaker highlights (intensity ~0.2) get thinner, less pronounced halation
+      const highlightIntensity = nearestHighlightIntensity[i]
+      const intensityThicknessFactor = 0.3 + highlightIntensity * 0.7 // 0.3-1.0 based on highlight strength
+      
+      const brightness = brightnessMap[i]
+      const pixelIdx = i * 4
+      
+      const baseR = pixels[pixelIdx]
+      const baseG = pixels[pixelIdx + 1]
+      const baseB = pixels[pixelIdx + 2]
+      
+      // Calculate effect intensity based on distance
+      // Adjust effective edge zone based on highlight intensity
+      const effectiveEdgeZone = 6 * imageScaleFactor * intensityThicknessFactor
+      const effectiveDepth = halationDepth * intensityThicknessFactor
+      
+      // Strongest at edge (dist ~1), fading outward
+      let intensity: number
+      const isEdgeZone = dist <= effectiveEdgeZone
+      
+      if (isEdgeZone) {
+        // HARSH EDGE ZONE - first ~6 pixels (scaled by highlight intensity)
+        // Very strong, concentrated red/orange effect
+        intensity = 1.0 - (dist / effectiveEdgeZone) * 0.3
+      } else if (dist <= effectiveDepth) {
+        // TRANSITION ZONE - between edge and depth
+        intensity = 0.7 * (1 - (dist - effectiveEdgeZone) / (effectiveDepth - effectiveEdgeZone + 0.1))
+      } else if (dist <= maxDist) {
+        // SOFT BLOOM ZONE - beyond depth setting (only for strong highlights)
+        intensity = 0.15 * highlightIntensity * (1 - (dist - effectiveDepth) / 6)
+      } else {
+        intensity = 0
+      }
+      
+      if (intensity <= 0) continue
+      
+      // Apply contrast factor - reduce effect on softer edges
+      intensity *= contrastFactor
+      
+      // Adjust intensity based on pixel brightness
+      // More visible in shadows, less in midtones/highlights
+      let brightnessMultiplier: number
+      if (brightness < shadowThresh) {
+        // Shadow - full effect
+        brightnessMultiplier = 1.0
+      } else if (brightness < 150) {
+        // Midtone - reduced
+        brightnessMultiplier = 1.0 - ((brightness - shadowThresh) / (150 - shadowThresh)) * 0.5
+      } else if (brightness < highlightThresh) {
+        // Upper midtone - subtle warm glow on highlight side
+        brightnessMultiplier = 0.5 - ((brightness - 150) / (highlightThresh - 150)) * 0.3
+      } else {
+        // Inside highlight - add bright white/warm fringe
+        brightnessMultiplier = 0.4
+      }
+      
+      const finalIntensity = intensity * baseOpacity * brightnessMultiplier
+      
+      // Add randomness for grainy texture (like real film)
+      const random = Math.random()
+      const grainFactor = 0.7 + random * 0.6 // 0.7-1.3 random variation
+      const grainedIntensity = finalIntensity * grainFactor
+      
+      // Determine color based on zone and settings
+      let addR: number, addG: number, addB: number
+      
+      if (brightness >= highlightThresh) {
+        // ON HIGHLIGHT SIDE - bright white/warm fringe interspersed
+        // This creates the white-red boundary effect
+        if (random > 0.5) {
+          // Bright warm white
+          addR = 255 * grainedIntensity * 0.4
+          addG = 240 * grainedIntensity * 0.35
+          addB = 200 * grainedIntensity * 0.25
+        } else {
+          // Warm orange-red
+          addR = 255 * grainedIntensity * 0.5
+          addG = 140 * grainedIntensity * 0.3
+          addB = 80 * grainedIntensity * 0.15
+        }
+      } else if (isEdgeZone) {
+        // EDGE ZONE on shadow side - harsh red/orange, color varies with setting
+        // colorSetting: 0 = more red, 1 = more warm/amber
+        const redShift = 1 - colorSetting * 0.4
+        addR = 255 * grainedIntensity * 0.9 * redShift
+        addG = (100 + colorSetting * 80) * grainedIntensity * 0.5
+        addB = (40 + colorSetting * 60) * grainedIntensity * 0.2
+      } else {
+        // OUTER ZONE - softer amber glow
+        addR = 255 * grainedIntensity * 0.7
+        addG = (160 + colorSetting * 40) * grainedIntensity * 0.45
+        addB = (100 + colorSetting * 50) * grainedIntensity * 0.25
+      }
+      
+      // Apply additively - this "warms" existing warm pixels further
+      pixels[pixelIdx] = Math.min(255, Math.round(baseR + addR))
+      pixels[pixelIdx + 1] = Math.min(255, Math.round(baseG + addG))
+      pixels[pixelIdx + 2] = Math.min(255, Math.round(baseB + addB))
+    }
+    
+    ctx.putImageData(processedData, 0, 0)
+  }
+
+  // Create a topographic opacity map based on the brightness of the original image
+  const createTopoOpacityMap = async (
+    originalCtx: CanvasRenderingContext2D,
+    width: number,
+    height: number,
+  ): Promise<Uint8ClampedArray> => {
+    // Get the image data from the original image
+    const imageData = originalCtx.getImageData(0, 0, width, height)
+    const data = imageData.data
+
+    // Create an opacity map with the same dimensions
+    const opacityMap = new Uint8ClampedArray(width * height)
+
+    // Process in chunks to avoid UI freezing
+    const chunkSize = 1000000 // Process 1M pixels at a time
+    const totalPixels = width * height
+    const totalChunks = Math.ceil(totalPixels / chunkSize)
+
+    for (let chunk = 0; chunk < totalChunks; chunk++) {
+      const start = chunk * chunkSize
+      const end = Math.min(start + chunkSize, totalPixels)
+
+      // Process this chunk of pixels
+      for (let i = start; i < end; i++) {
+        const idx = i * 4
+
+        // Calculate brightness (0-255)
+        // Using the luminance formula: 0.299R + 0.587G + 0.114B
+        const brightness = Math.round(0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2])
+
+        // Map brightness to opacity with smooth interpolation:
+        // - Highlights (brightness > highlightThreshold): interpolate from highlightOpacity% to midtoneOpacity% opacity
+        // - Midtones (brightness midtoneThreshold-highlightThreshold): interpolate from midtoneOpacity% to shadowOpacity%
+        // - Shadows (brightness < midtoneThreshold): shadowOpacity%
+        let opacity: number
+
+        if (brightness > highlightThreshold) {
+          // Highlights: smoothly interpolate between highlightOpacity% and midtoneOpacity% opacity
+          // Map brightness 255-highlightThreshold to opacity highlightOpacity%-midtoneOpacity%
+          const t = (255 - brightness) / (255 - highlightThreshold) // 0 at brightness 255, 1 at brightness highlightThreshold
+          const minOpacity = Math.round((highlightOpacity / 100) * 255) // Convert percentage to 0-255
+          const maxOpacity = Math.round((midtoneOpacity / 100) * 255) // Convert percentage to 0-255
+          opacity = Math.round(minOpacity + t * (maxOpacity - minOpacity))
+        } else if (brightness > midtoneThreshold) {
+          // Midtones: interpolate between midtoneOpacity% and shadowOpacity%
+          // Map brightness highlightThreshold-midtoneThreshold to opacity midtoneOpacity%-shadowOpacity%
+          const t = (highlightThreshold - brightness) / (highlightThreshold - midtoneThreshold) // 0 at brightness highlightThreshold, 1 at brightness midtoneThreshold
+          const minOpacity = Math.round((midtoneOpacity / 100) * 255) // Convert percentage to 0-255
+          const maxOpacity = Math.round((shadowOpacity / 100) * 255) // Convert percentage to 0-255
+          opacity = Math.round(minOpacity + t * (maxOpacity - minOpacity))
+        } else {
+          // Shadows: shadowOpacity%
+          opacity = Math.round((shadowOpacity / 100) * 255)
+        }
+
+        // Store the opacity value
+        opacityMap[i] = opacity
+      }
+
+      // Yield to browser to prevent UI freezing
+      if (chunk % 5 === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      }
+    }
+
+    return opacityMap
+  }
+
+  // Apply the processed image with variable opacity based on the topographic map
+  const applyProcessedImageWithTopoMap = async (
+    targetCtx: CanvasRenderingContext2D,
+    processedCanvas: HTMLCanvasElement,
+    originalCtx: CanvasRenderingContext2D,
+    opacityMap: Uint8ClampedArray,
+    width: number,
+    height: number,
+  ) => {
+    // Create a temporary canvas for the opacity-adjusted processed image
+    const adjustedCanvas = document.createElement("canvas")
+    adjustedCanvas.width = width
+    adjustedCanvas.height = height
+    const adjustedCtx = adjustedCanvas.getContext("2d", { willReadFrequently: true })
+    if (!adjustedCtx) return
+
+    // Get the processed image data
+    const processedCtx = processedCanvas.getContext("2d", { willReadFrequently: true })
+    if (!processedCtx) return
+
+    // Draw the processed image to the adjusted canvas
+    adjustedCtx.drawImage(processedCanvas, 0, 0)
+
+    // Get the image data from the processed image
+    const processedData = adjustedCtx.getImageData(0, 0, width, height)
+    const data = processedData.data
+
+    // Process in chunks to avoid UI freezing
+    const chunkSize = 1000000 // Process 1M pixels at a time
+    const totalPixels = width * height
+    const totalChunks = Math.ceil(totalPixels / chunkSize)
+
+    for (let chunk = 0; chunk < totalChunks; chunk++) {
+      const start = chunk * chunkSize
+      const end = Math.min(start + chunkSize, totalPixels)
+
+      // Process this chunk of pixels
+      for (let i = start; i < end; i++) {
+        const idx = i * 4
+
+        // Get the opacity for this pixel (0-255)
+        const opacity = opacityMap[i] / 255 // Convert to 0-1 range
+
+        // Apply the opacity to the alpha channel of the processed image
+        // Keep RGB values unchanged, only modify alpha
+        data[idx + 3] = Math.round(data[idx + 3] * opacity)
+      }
+
+      // Yield to browser occasionally to prevent UI freezing
+      if (chunk % 5 === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      }
+    }
+
+    // Put the opacity-adjusted image data back to the adjusted canvas
+    adjustedCtx.putImageData(processedData, 0, 0)
+
+    // First draw the original image as the background layer
+    targetCtx.drawImage(originalCtx.canvas, 0, 0)
+
+    // Then draw the opacity-adjusted processed image on top
+    targetCtx.drawImage(adjustedCanvas, 0, 0)
+
+    console.log("Applied topographic opacity map to processed image and layered over original")
+  }
+
+  // Process a chunk of the image
+  const processChunk = async (
+    originalCtx: CanvasRenderingContext2D,
+    resultCtx: CanvasRenderingContext2D,
+    verificationCtx: CanvasRenderingContext2D,
+    boundaryHeatMap: number[][],
+    startX: number,
+    startY: number,
+    chunkWidth: number,
+    chunkHeight: number,
+    tileSize: number,
+    macroTileSize: number,
+    onProgress: (tilesProcessed: number) => void,
+    MAX_CIRCLES: number,
+    circleSizes: { minSize: number; maxSize: number; scaleFactor: number },
+    algo2SourceData?: ImageData,
+  ): Promise<CircleData[]> => {
+    const chunkCircles: CircleData[] = []
+    let macroTilesProcessed = 0
+
+    // Process each macro tile in this chunk
+    for (let macroY = startY; macroY < startY + chunkHeight; macroY += macroTileSize) {
+      for (let macroX = startX; macroX < startX + chunkWidth; macroX += macroTileSize) {
+        try {
+          // Get the actual macro tile dimensions (handling edge cases)
+          const actualMacroWidth = Math.min(macroTileSize, originalCtx.canvas.width - macroX)
+          const actualMacroHeight = Math.min(macroTileSize, originalCtx.canvas.height - macroY)
+
+          // Skip if dimensions are invalid
+          if (actualMacroWidth <= 0 || actualMacroHeight <= 0) {
+            break
+          }
+
+          // Create a canvas for this macro tile
+          const macroCanvas = document.createElement("canvas")
+          macroCanvas.width = actualMacroWidth
+          macroCanvas.height = actualMacroHeight
+          const macroCtx = macroCanvas.getContext("2d")
+          if (!macroCtx) {
+            break
+          }
+
+          // For algo2: draw directly to resultCtx (skip macro tile canvas to avoid seams)
+          // For normal: copy from original context to macro tile canvas
+          if (useAlgo2 && algo2SourceData) {
+            // Store the full source data on resultCtx for direct drawing
+            ;(resultCtx as any)._algo2SourceData = algo2SourceData
+            ;(resultCtx as any)._algo2MacroOffset = { x: macroX, y: macroY }
+          } else if (!useAlgo2) {
+            // Copy the original image data for this macro tile
+            macroCtx.drawImage(
+              originalCtx.canvas,
+              macroX,
+              macroY,
+              actualMacroWidth,
+              actualMacroHeight,
+              0,
+              0,
+              actualMacroWidth,
+              actualMacroHeight,
+            )
+          }
+
+          // Store circles for each tile
+          const macroTileCircles: { [key: string]: CircleData[] } = {}
+
+          // Process each tile within the macro tile
+          for (let tileY = 0; tileY < actualMacroHeight; tileY += tileSize) {
+            for (let tileX = 0; tileX < actualMacroWidth; tileX += tileSize) {
+              // Get the actual tile dimensions (handling edge cases)
+              const actualTileWidth = Math.min(tileSize, actualMacroWidth - tileX)
+              const actualTileHeight = Math.min(tileSize, actualMacroHeight - tileY)
+
+              // Skip if dimensions are invalid
+              if (actualTileWidth <= 0 || actualTileHeight <= 0) {
+                break
+              }
+
+              // Process this individual tile and get the circles
+              // For algo2: draw directly to resultCtx with global coordinates
+              // For normal: draw to macroCtx with local coordinates
+              const tileCircles = useAlgo2
+                ? processTileAlgo2(resultCtx, macroX + tileX, macroY + tileY, actualTileWidth, actualTileHeight, circleSizes, resultCtx)
+                : processTile(macroCtx, tileX, tileY, actualTileWidth, actualTileHeight, circleSizes, midtoneThreshold, shadowOvalSize / 100, shadowColorDensity / 100, shadowBrightness / 100)
+
+              // Store the circles for this tile
+              const tileKey = `${tileX},${tileY}`
+              macroTileCircles[tileKey] = tileCircles
+
+              // Add circles to chunk collection with adjusted coordinates, but limit the total
+              if (chunkCircles.length < MAX_CIRCLES) {
+                const spaceLeft = MAX_CIRCLES - chunkCircles.length
+                if (tileCircles.length <= spaceLeft) {
+                  tileCircles.forEach((circle) => {
+                    chunkCircles.push({
+                      ...circle,
+                      x: circle.x + tileX + macroX,
+                      y: circle.y + tileY + macroY,
+                    })
+                  })
+                } else {
+                  tileCircles.slice(0, spaceLeft).forEach((circle) => {
+                    chunkCircles.push({
+                      ...circle,
+                      x: circle.x + tileX + macroX,
+                      y: circle.y + tileY + macroY,
+                    })
+                  })
+                }
+              }
+
+              // Mark this tile as processed in the verification canvas
+              verificationCtx.clearRect(macroX + tileX, macroY + tileY, actualTileWidth, actualTileHeight)
+            }
+          }
+
+          // Analyze boundaries between tiles within this macro tile
+          analyzeTileBoundaries(
+            macroCtx,
+            macroTileCircles,
+            boundaryHeatMap,
+            macroX,
+            macroY,
+            actualMacroWidth,
+            actualMacroHeight,
+          )
+
+          // Draw the processed macro tile onto the result canvas
+          // Skip for algo2 since we draw directly to resultCtx
+          if (!useAlgo2) {
+            resultCtx.drawImage(macroCanvas, macroX, macroY)
+          }
+
+          macroTilesProcessed++
+
+          // Update progress
+          onProgress(1)
+
+          // Yield to browser occasionally to prevent UI freezing
+          if (macroTilesProcessed % 4 === 0) {
+            await new Promise((resolve) => setTimeout(resolve, 0))
+          }
+        } catch (error) {
+          console.error(`Error processing macro tile at ${macroX},${macroY}:`, error)
+          // Continue with other tiles even if one fails
+        }
+      }
+    }
+
+    return chunkCircles
+  }
+
+  // Verify and fix any unprocessed areas
+  const verifyAndFixUnprocessedAreas = async (
+    originalCtx: CanvasRenderingContext2D,
+    resultCtx: CanvasRenderingContext2D,
+    verificationCtx: CanvasRenderingContext2D,
+    width: number,
+    height: number,
+    tileSize: number,
+    circleSizes: { minSize: number; maxSize: number; scaleFactor: number },
+  ) => {
+    // Get the verification image data to check for unprocessed areas (red pixels)
+    const verificationData = verificationCtx.getImageData(0, 0, width, height)
+    const data = verificationData.data
+
+    // Scan for unprocessed areas (red pixels)
+    const unprocessedAreas: { x: number; y: number; width: number; height: number }[] = []
+    const scanSize = tileSize
+
+    for (let y = 0; y < height; y += scanSize) {
+      for (let x = 0; x < width; x += scanSize) {
+        // Check if this area is unprocessed
+        const idx = (y * width + x) * 4
+        if (data[idx] > 200 && data[idx + 1] < 50 && data[idx + 2] < 50) {
+          // This is an unprocessed area (red)
+          const areaWidth = Math.min(scanSize, width - x)
+          const areaHeight = Math.min(scanSize, height - y)
+          unprocessedAreas.push({ x, y, width: areaWidth, height: areaHeight })
+        }
+      }
+    }
+
+    console.log(`Found ${unprocessedAreas.length} unprocessed areas to fix`)
+
+    // Limit the number of areas to process
+    const MAX_AREAS = 50
+    const areasToProcess = unprocessedAreas.slice(0, MAX_AREAS)
+    console.log(`Processing ${areasToProcess.length} of ${unprocessedAreas.length} unprocessed areas`)
+
+    // Process each unprocessed area
+    for (const area of areasToProcess) {
+      try {
+        // Create a canvas for this area
+        const areaCanvas = document.createElement("canvas")
+        areaCanvas.width = area.width
+        areaCanvas.height = area.height
+        const areaCtx = areaCanvas.getContext("2d")
+        if (!areaCtx) {
+          break
+        }
+
+        // Copy the original image data for this area
+        areaCtx.drawImage(originalCtx.canvas, area.x, area.y, area.width, area.height, 0, 0, area.width, area.height)
+
+  // Process this area with a simplified version of the effect
+  const areaCircles = useAlgo2
+    ? processTileAlgo2(areaCtx, 0, 0, area.width, area.height, circleSizes, areaCtx)
+    : processTile(areaCtx, 0, 0, area.width, area.height, circleSizes, midtoneThreshold, shadowOvalSize / 100, shadowColorDensity / 100, shadowBrightness / 100)
+
+        // Draw the processed area onto the result canvas
+        resultCtx.drawImage(areaCanvas, area.x, area.y)
+
+        // Mark this area as processed in the verification canvas
+        verificationCtx.clearRect(area.x, area.y, area.width, area.height)
+
+        // Yield to browser occasionally to prevent UI freezing
+        if (areasToProcess.indexOf(area) % 10 === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 0))
+        }
+      } catch (error) {
+        console.error(`Error fixing unprocessed area at ${area.x},${area.y}:`, error)
+        // Continue with other areas even if one fails
+      }
+    }
+  }
+
+  // Draw circles to a canvas
+  const drawCirclesToCanvas = (ctx: CanvasRenderingContext2D, circles: CircleData[]) => {
+    // Process circles in batches to avoid memory issues
+    const batchSize = 1000
+    const totalBatches = Math.ceil(circles.length / batchSize)
+
+    for (let batch = 0; batch < totalBatches; batch++) {
+      const start = batch * batchSize
+      const end = Math.min(start + batchSize, circles.length)
+      const batchCircles = circles.slice(start, end)
+
+      batchCircles.forEach((circle) => {
+        ctx.beginPath()
+        ctx.arc(circle.x + circle.size / 2, circle.y + circle.size / 2, circle.size / 2, 0, Math.PI * 2)
+        ctx.fillStyle = `rgba(${circle.r}, ${circle.g}, ${circle.b}, ${circle.a})`
+        ctx.fill()
+      })
+    }
+  }
+
+  // Process a single tile with randomized parameters and return the circles
+  const processTile = (
+    ctx: CanvasRenderingContext2D,
+    tileX: number,
+    tileY: number,
+    width: number,
+    height: number,
+    circleSizes: { minSize: number; maxSize: number; scaleFactor: number },
+    shadowThreshold: number,
+    shadowSizeMultiplier: number,
+    shadowColorDensityMultiplier: number,
+    shadowBrightnessMultiplier: number,
+  ): CircleData[] => {
+    try {
+      // Get the image data for this tile
+      const tileData = ctx.getImageData(tileX, tileY, width, height)
+
+      // Create a temporary canvas for this tile
+      const tileCanvas = document.createElement("canvas")
+      tileCanvas.width = width
+      tileCanvas.height = height
+      const tileCtx = tileCanvas.getContext("2d")
+
+      if (!tileCtx) return []
+
+      // Draw the original tile data
+      const tempImageData = new ImageData(new Uint8ClampedArray(tileData.data), width, height)
+      tileCtx.putImageData(tempImageData, 0, 0)
+
+      // Arrays to store circles from both passes
+      const firstPassCircles: CircleData[] = []
+      const secondPassCircles: CircleData[] = []
+
+      // Calculate dynamic step sizes based on scale factor
+      const minStep = Math.max(1, Math.round(1 * circleSizes.scaleFactor))
+      const maxStep = Math.max(minStep + 1, Math.round(6 * circleSizes.scaleFactor))
+
+      // First pass - start from top left with randomized parameters
+      let y = 0
+      while (y < height) {
+        let x = 0
+        while (x < width) {
+          // Choose random area size between minSize and maxSize
+          let areaSize =
+            circleSizes.minSize + Math.floor(Math.random() * (circleSizes.maxSize - circleSizes.minSize + 1))
+
+          // Get average color of the area
+          const circleData = getAverageColor(tileCtx, x, y, areaSize)
+          if (circleData) {
+            // Check if this is a shadow pixel and scale size/color accordingly
+            const brightness = 0.299 * circleData.r + 0.587 * circleData.g + 0.114 * circleData.b
+            let finalR = circleData.r
+            let finalG = circleData.g
+            let finalB = circleData.b
+            
+            if (brightness < shadowThreshold) {
+              areaSize = Math.round(areaSize * shadowSizeMultiplier)
+              
+              // First apply brightness reduction (darkens overall)
+              let r = circleData.r * shadowBrightnessMultiplier
+              let g = circleData.g * shadowBrightnessMultiplier
+              let b = circleData.b * shadowBrightnessMultiplier
+              
+              // Then boost color density (increases saturation)
+              // Convert to grayscale, then push colors away from gray
+              const gray = 0.299 * r + 0.587 * g + 0.114 * b
+              finalR = Math.min(255, Math.max(0, Math.round(gray + (r - gray) * shadowColorDensityMultiplier)))
+              finalG = Math.min(255, Math.max(0, Math.round(gray + (g - gray) * shadowColorDensityMultiplier)))
+              finalB = Math.min(255, Math.max(0, Math.round(gray + (b - gray) * shadowColorDensityMultiplier)))
+            }
+            
+            // Store circle in memory
+            firstPassCircles.push({
+              x,
+              y,
+              size: areaSize,
+              r: finalR,
+              g: finalG,
+              b: finalB,
+              a: circleData.a,
+            })
+          }
+
+          // Move right by random amount (scaled)
+          x += minStep + Math.floor(Math.random() * (maxStep - minStep + 1))
+        }
+
+        // Move down by random amount (scaled)
+        y += minStep + Math.floor(Math.random() * (maxStep - minStep + 1))
+      }
+
+      // Second pass - start with scaled offset and randomized parameters
+      const offsetX = Math.max(1, Math.round(3 * circleSizes.scaleFactor))
+      const offsetY = Math.max(1, Math.round(2 * circleSizes.scaleFactor))
+
+      y = offsetY
+      while (y < height) {
+        let x = offsetX
+        while (x < width) {
+          // Choose random area size between minSize and maxSize
+          let areaSize =
+            circleSizes.minSize + Math.floor(Math.random() * (circleSizes.maxSize - circleSizes.minSize + 1))
+
+          // Get average color of the area
+          const circleData = getAverageColor(tileCtx, x, y, areaSize)
+          if (circleData) {
+            // Check if this is a shadow pixel and scale size/color accordingly
+            const brightness = 0.299 * circleData.r + 0.587 * circleData.g + 0.114 * circleData.b
+            let finalR = circleData.r
+            let finalG = circleData.g
+            let finalB = circleData.b
+            
+            if (brightness < shadowThreshold) {
+              areaSize = Math.round(areaSize * shadowSizeMultiplier)
+              
+              // First apply brightness reduction (darkens overall)
+              let r = circleData.r * shadowBrightnessMultiplier
+              let g = circleData.g * shadowBrightnessMultiplier
+              let b = circleData.b * shadowBrightnessMultiplier
+              
+              // Then boost color density (increases saturation)
+              // Convert to grayscale, then push colors away from gray
+              const gray = 0.299 * r + 0.587 * g + 0.114 * b
+              finalR = Math.min(255, Math.max(0, Math.round(gray + (r - gray) * shadowColorDensityMultiplier)))
+              finalG = Math.min(255, Math.max(0, Math.round(gray + (g - gray) * shadowColorDensityMultiplier)))
+              finalB = Math.min(255, Math.max(0, Math.round(gray + (b - gray) * shadowColorDensityMultiplier)))
+            }
+            
+            // Store circle in memory
+            secondPassCircles.push({
+              x,
+              y,
+              size: areaSize,
+              r: finalR,
+              g: finalG,
+              b: finalB,
+              a: circleData.a,
+            })
+          }
+
+          // Move right by random amount (scaled)
+          x += minStep + Math.floor(Math.random() * (maxStep - minStep + 1))
+        }
+
+        // Move down by random amount (scaled)
+        y += minStep + Math.floor(Math.random() * (maxStep - minStep + 1))
+      }
+
+      // Reduce opacity of all circles by half
+      firstPassCircles.forEach((circle) => {
+        circle.a *= 0.5
+      })
+
+      secondPassCircles.forEach((circle) => {
+        circle.a *= 0.5
+      })
+
+      // Clear the tile area on the main canvas
+      ctx.clearRect(tileX, tileY, width, height)
+
+      // Combine all circles and make adjustments
+      const allCircles = [...firstPassCircles, ...secondPassCircles]
+
+      // Adjust some circles for better interpretation (whole circles at a time)
+      allCircles.forEach((circle) => {
+        // Randomly adjust about 30% of circles
+        if (Math.random() < 0.3) {
+          // Adjust color
+          const colorAdjust = Math.random() * 30 - 15
+          circle.r = Math.max(0, Math.min(255, circle.r + colorAdjust))
+          circle.g = Math.max(0, Math.min(255, circle.g + colorAdjust))
+          circle.b = Math.max(0, Math.min(255, circle.b + colorAdjust))
+
+          // Adjust transparency (but keep within reasonable bounds)
+          const alphaAdjust = Math.random() * 0.2 - 0.1
+          circle.a = Math.max(0.1, Math.min(0.9, circle.a + alphaAdjust))
+        }
+      })
+
+      // Draw all circles onto the main canvas
+      allCircles.forEach((circle) => {
+        ctx.beginPath()
+        ctx.arc(tileX + circle.x + circle.size / 2, tileY + circle.y + circle.size / 2, circle.size / 2, 0, Math.PI * 2)
+        ctx.fillStyle = `rgba(${circle.r}, ${circle.g}, ${circle.b}, ${circle.a})`
+        ctx.fill()
+      })
+
+      // Return all circles for boundary analysis
+      return allCircles
+    } catch (error) {
+      console.error(`Error processing tile at ${tileX},${tileY}:`, error)
+      return [] // Return empty array if processing fails
+    }
+  }
+
+  // ALGO2: Additive RGB light mixing algorithm
+  // Paints on black backdrop using only R, G, B ovals with additive blending
+  const processTileAlgo2 = (
+    ctx: CanvasRenderingContext2D,
+    tileX: number,
+    tileY: number,
+    width: number,
+    height: number,
+    circleSizes: { minSize: number; maxSize: number; scaleFactor: number },
+    sourceCtx: CanvasRenderingContext2D,
+  ): CircleData[] => {
+    try {
+      // Get the source image data for this tile region
+      // Use the pre-stored full source data (avoids reading black backdrop)
+      let sourcePixels: Uint8ClampedArray
+      const storedSourceData = (ctx as any)._algo2SourceData as ImageData | undefined
+      if (storedSourceData) {
+        // Extract the tile region from the stored full source data
+        // tileX and tileY are now global coordinates
+        const fullWidth = storedSourceData.width
+        const tilePixels = new Uint8ClampedArray(width * height * 4)
+        for (let y = 0; y < height; y++) {
+          const srcStart = ((tileY + y) * fullWidth + tileX) * 4
+          const dstStart = y * width * 4
+          tilePixels.set(storedSourceData.data.subarray(srcStart, srcStart + width * 4), dstStart)
+        }
+        sourcePixels = tilePixels
+      } else {
+        const sourceData = sourceCtx.getImageData(tileX, tileY, width, height)
+        sourcePixels = sourceData.data
+      }
+
+      // Store all ovals we'll draw
+      const allCircles: CircleData[] = []
+
+      // Base oval size
+      const baseOvalSize = (circleSizes.minSize + circleSizes.maxSize) / 2 / 1.5
+      
+      // Use tight grid for good coverage (non-shadows)
+      const tightStep = Math.max(1, baseOvalSize * 0.2)
+      
+      // Exposure thresholds
+      const shadowThreshold = 38 // Bottom 15% of spectrum
+      const transitionEnd = 51 // ~20% - end of transition zone
+      
+      // === SIMPLEX-LIKE NOISE FOR CLUSTERED SHADOW PATTERN ===
+      // Generates a "clump field" that determines where grain is more likely
+      const noiseScales = [0.015, 0.04, 0.1] // Large, medium, fine clumps
+      const noiseWeights = [0.5, 0.3, 0.2]
+      
+      // Simple hash function for deterministic randomness
+      const hash = (x: number, y: number, seed: number): number => {
+        const n = Math.sin(x * 12.9898 + y * 78.233 + seed * 43.12) * 43758.5453
+        return n - Math.floor(n)
+      }
+      
+      // Smooth noise with bilinear interpolation
+      const smoothNoise = (x: number, y: number, seed: number): number => {
+        const ix = Math.floor(x)
+        const iy = Math.floor(y)
+        const fx = x - ix
+        const fy = y - iy
+        
+        // Smoothstep interpolation
+        const sx = fx * fx * (3 - 2 * fx)
+        const sy = fy * fy * (3 - 2 * fy)
+        
+        const n00 = hash(ix, iy, seed)
+        const n10 = hash(ix + 1, iy, seed)
+        const n01 = hash(ix, iy + 1, seed)
+        const n11 = hash(ix + 1, iy + 1, seed)
+        
+        const nx0 = n00 * (1 - sx) + n10 * sx
+        const nx1 = n01 * (1 - sx) + n11 * sx
+        return nx0 * (1 - sy) + nx1 * sy
+      }
+      
+      // Multi-octave fractal noise (FBM)
+      const clumpNoise = (x: number, y: number): number => {
+        let value = 0
+        for (let i = 0; i < noiseScales.length; i++) {
+          value += smoothNoise(x * noiseScales[i], y * noiseScales[i], i * 100) * noiseWeights[i]
+        }
+        return value
+      }
+      
+      // === PRE-GENERATE CLUMP FIELD FOR SHADOW AREAS ===
+      // This creates the clustered stochastic "meta-pattern"
+      // Sample points are generated based on clump probability, not a regular grid
+      
+      // First pass: Non-shadow areas (brightness >= shadowThreshold) use regular grid
+      for (let gridY = 0; gridY < height; gridY += tightStep) {
+        for (let gridX = 0; gridX < width; gridX += tightStep) {
+          const jitterX = (Math.random() - 0.5) * tightStep * 0.8
+          const jitterY = (Math.random() - 0.5) * tightStep * 0.8
+          const x = gridX + jitterX
+          const y = gridY + jitterY
+          
+          const sampleX = Math.max(0, Math.min(Math.floor(x), width - 1))
+          const sampleY = Math.max(0, Math.min(Math.floor(y), height - 1))
+          const pixelIdx = (sampleY * width + sampleX) * 4
+
+          const targetR = sourcePixels[pixelIdx]
+          const targetG = sourcePixels[pixelIdx + 1]
+          const targetB = sourcePixels[pixelIdx + 2]
+          const brightness = (targetR + targetG + targetB) / 3
+          
+          // Skip shadows - handled in second pass
+          if (brightness < shadowThreshold) continue
+          if (brightness < 2) continue
+
+          const areaSize = circleSizes.minSize + Math.floor(Math.random() * (circleSizes.maxSize - circleSizes.minSize + 1))
+          let ovalSize = areaSize / 1.5
+          
+          // Slightly enlarge in transition zone
+          if (brightness < transitionEnd) {
+            const enlargeFactor = 1 - (brightness / transitionEnd)
+            ovalSize = ovalSize * (1 + enlargeFactor * 0.5)
+          }
+
+          const opacity = 0.07
+          const rProb = targetR / 255
+          const gProb = targetG / 255
+          const bProb = targetB / 255
+          const sizeVar = 0.9 + Math.random() * 0.2
+          const finalSize = ovalSize * sizeVar
+          
+          // Calculate shared base position for all channels
+          // This ensures R, G, B ovals stack together for proper color blending
+          const baseOffsetX = (Math.random() - 0.5) * ovalSize * 0.4
+          const baseOffsetY = (Math.random() - 0.5) * ovalSize * 0.4
+          const baseX = x + baseOffsetX
+          const baseY = y + baseOffsetY
+          
+          // Micro-jitter: max 1/6th of radius to keep channels co-located
+          const microJitter = finalSize * (1/6) * 0.5
+
+          if (Math.random() < rProb) {
+            allCircles.push({
+              x: baseX + (Math.random() - 0.5) * microJitter,
+              y: baseY + (Math.random() - 0.5) * microJitter,
+              size: finalSize,
+              r: 255, g: 0, b: 0, a: opacity,
+            })
+          }
+          if (Math.random() < gProb) {
+            allCircles.push({
+              x: baseX + (Math.random() - 0.5) * microJitter,
+              y: baseY + (Math.random() - 0.5) * microJitter,
+              size: finalSize,
+              r: 0, g: 255, b: 0, a: opacity,
+            })
+          }
+          if (Math.random() < bProb) {
+            allCircles.push({
+              x: baseX + (Math.random() - 0.5) * microJitter,
+              y: baseY + (Math.random() - 0.5) * microJitter,
+              size: finalSize,
+              r: 0, g: 0, b: 255, a: opacity,
+            })
+          }
+        }
+      }
+      
+      // === SECOND PASS: SHADOW AREAS WITH CLUSTERED STOCHASTIC PATTERN ===
+      // Use Poisson-like sampling with clump field as probability modulator
+      
+      const shadowStep = Math.max(2, baseOvalSize * 0.4) // Base step for shadow sampling
+      const numShadowPasses = 3 // Multiple passes for layered texture
+      
+      for (let pass = 0; pass < numShadowPasses; pass++) {
+        // Each pass uses slightly different noise offset for variety
+        const passOffset = pass * 1000
+        
+        for (let gridY = 0; gridY < height; gridY += shadowStep) {
+          for (let gridX = 0; gridX < width; gridX += shadowStep) {
+            // Get global coordinates for noise sampling
+            const globalX = tileX + gridX
+            const globalY = tileY + gridY
+            
+            // Sample clump field at this position
+            const clumpValue = clumpNoise(globalX + passOffset, globalY + passOffset)
+            
+            // Clump field modulates probability of placing a grain here
+            // Higher clump value = more likely to place grains (clustered effect)
+            const clumpProbability = clumpValue * clumpValue // Square for more contrast
+            
+            // Skip based on clump probability - creates the clustered pattern
+            if (Math.random() > clumpProbability * 1.5) continue
+            
+            // Add stochastic jitter within the cell (smaller than non-shadow)
+            const jitterX = (Math.random() - 0.5) * shadowStep * 0.6
+            const jitterY = (Math.random() - 0.5) * shadowStep * 0.6
+            const x = gridX + jitterX
+            const y = gridY + jitterY
+            
+            const sampleX = Math.max(0, Math.min(Math.floor(x), width - 1))
+            const sampleY = Math.max(0, Math.min(Math.floor(y), height - 1))
+            const pixelIdx = (sampleY * width + sampleX) * 4
+
+            const targetR = sourcePixels[pixelIdx]
+            const targetG = sourcePixels[pixelIdx + 1]
+            const targetB = sourcePixels[pixelIdx + 2]
+            const brightness = (targetR + targetG + targetB) / 3
+            
+            // Only process shadow areas (bottom 15%)
+            if (brightness >= shadowThreshold) continue
+            if (brightness < 2) continue
+            
+            const areaSize = circleSizes.minSize + Math.floor(Math.random() * (circleSizes.maxSize - circleSizes.minSize + 1))
+            // Larger ovals in shadows for texture
+            let ovalSize = (areaSize / 1.5) * (1.5 + (1 - brightness / shadowThreshold) * 1.0)
+            
+            // Opacity: use current proven values
+            const opacity = 0.01 + (brightness / shadowThreshold) * 0.06
+            
+            const rProb = targetR / 255
+            const gProb = targetG / 255
+            const bProb = targetB / 255
+            const sizeVar = 0.85 + Math.random() * 0.3
+            const finalSize = ovalSize * sizeVar
+            
+            // Calculate shared base position for all channels
+            // This ensures R, G, B ovals stack together for proper color blending
+            const baseOffsetX = (Math.random() - 0.5) * ovalSize * 0.3
+            const baseOffsetY = (Math.random() - 0.5) * ovalSize * 0.3
+            const baseX = x + baseOffsetX
+            const baseY = y + baseOffsetY
+            
+            // Micro-jitter: max 1/6th of radius to keep channels co-located
+            const microJitter = finalSize * (1/6) * 0.5
+
+            if (Math.random() < rProb) {
+              allCircles.push({
+                x: baseX + (Math.random() - 0.5) * microJitter,
+                y: baseY + (Math.random() - 0.5) * microJitter,
+                size: finalSize,
+                r: 255, g: 0, b: 0, a: opacity,
+              })
+            }
+            if (Math.random() < gProb) {
+              allCircles.push({
+                x: baseX + (Math.random() - 0.5) * microJitter,
+                y: baseY + (Math.random() - 0.5) * microJitter,
+                size: finalSize,
+                r: 0, g: 255, b: 0, a: opacity,
+              })
+            }
+            if (Math.random() < bProb) {
+              allCircles.push({
+                x: baseX + (Math.random() - 0.5) * microJitter,
+                y: baseY + (Math.random() - 0.5) * microJitter,
+                size: finalSize,
+                r: 0, g: 0, b: 255, a: opacity,
+              })
+            }
+          }
+        }
+      }
+
+      // Draw all ovals using additive blending (lighter composite operation)
+      ctx.globalCompositeOperation = "lighter"
+      
+      allCircles.forEach((circle) => {
+        ctx.beginPath()
+        ctx.arc(
+          tileX + circle.x + circle.size / 2,
+          tileY + circle.y + circle.size / 2,
+          circle.size / 2,
+          0,
+          Math.PI * 2
+        )
+        ctx.fillStyle = `rgba(${circle.r}, ${circle.g}, ${circle.b}, ${circle.a})`
+        ctx.fill()
+      })
+
+      // Reset composite operation
+      ctx.globalCompositeOperation = "source-over"
+
+      return allCircles
+    } catch (error) {
+      console.error(`Error processing tile (algo2) at ${tileX},${tileY}:`, error)
+      return []
+    }
+  }
+
+  // Analyze boundaries between tiles within a macro tile
+  const analyzeTileBoundaries = (
+    ctx: CanvasRenderingContext2D,
+    macroTileCircles: { [key: string]: CircleData[] },
+    boundaryHeatMap: number[][],
+    macroX: number,
+    macroY: number,
+    width: number,
+    height: number,
+  ) => {
+    const tileSize = 150
+    const analysisWidth = 30 // Width of analysis zone on each side of boundary
+
+    // Analyze horizontal boundaries
+    for (let tileY = tileSize; tileY < height; tileY += tileSize) {
+      if (tileY >= height) break
+
+      for (let tileX = 0; tileX < width; tileX += tileSize) {
+        const topTileKey = `${tileX},${tileY - tileSize}`
+        const bottomTileKey = `${tileX},${tileY}`
+
+        if (!macroTileCircles[topTileKey] || !macroTileCircles[bottomTileKey]) break
+
+        // Get circles near the boundary
+        const topCircles = macroTileCircles[topTileKey].filter(
+          (circle) => circle.y + circle.size / 2 > tileSize - analysisWidth,
+        )
+        const bottomCircles = macroTileCircles[bottomTileKey].filter(
+          (circle) => circle.y - circle.size / 2 < analysisWidth,
+        )
+
+        // Analyze the boundary
+        const boundaryAnalysis = analyzeCircleBoundary(
+          topCircles,
+          bottomCircles,
+          true,
+          ctx,
+          tileX,
+          tileY - analysisWidth,
+          Math.min(tileSize, width - tileX),
+          analysisWidth * 2,
+        )
+
+        // Update the heat map
+        updateBoundaryHeatMap(
+          boundaryHeatMap,
+          macroX + tileX,
+          macroY + tileY - analysisWidth,
+          Math.min(tileSize, width - tileX),
+          analysisWidth * 2,
+          boundaryAnalysis.boundaryProbability,
+          true,
+        )
+      }
+    }
+
+    // Analyze vertical boundaries
+    for (let tileX = tileSize; tileX < width; tileX += tileSize) {
+      if (tileX >= width) break
+
+      for (let tileY = 0; tileY < height; tileY += tileSize) {
+        const leftTileKey = `${tileX - tileSize},${tileY}`
+        const rightTileKey = `${tileX},${tileY}`
+
+        if (!macroTileCircles[leftTileKey] || !macroTileCircles[rightTileKey]) break
+
+        // Get circles near the boundary
+        const leftCircles = macroTileCircles[leftTileKey].filter(
+          (circle) => circle.x + circle.size / 2 > tileSize - analysisWidth,
+        )
+        const rightCircles = macroTileCircles[rightTileKey].filter(
+          (circle) => circle.x - circle.size / 2 < analysisWidth,
+        )
+
+        // Analyze the boundary
+        const boundaryAnalysis = analyzeCircleBoundary(
+          leftCircles,
+          rightCircles,
+          false,
+          ctx,
+          tileX - analysisWidth,
+          tileY,
+          analysisWidth * 2,
+          Math.min(tileSize, height - tileY),
+        )
+
+        // Update the heat map
+        updateBoundaryHeatMap(
+          boundaryHeatMap,
+          macroX + tileX - analysisWidth,
+          macroY + tileY,
+          analysisWidth * 2,
+          Math.min(tileSize, height - tileY),
+          boundaryAnalysis.boundaryProbability,
+          false,
+        )
+      }
+    }
+  }
+
+  // Analyze a boundary between two sets of circles
+  const analyzeCircleBoundary = (
+    circlesA: CircleData[],
+    circlesB: CircleData[],
+    isHorizontal: boolean,
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+  ): BoundaryAnalysis => {
+    try {
+      // Calculate statistics for both sets of circles
+      const statsA = calculateCircleStatistics(circlesA)
+      const statsB = calculateCircleStatistics(circlesB)
+
+      // 1. Analyze color discontinuity
+      const colorDiscontinuity = calculateColorDiscontinuity(statsA.avgColor, statsB.avgColor)
+
+      // 2. Analyze pattern discontinuity
+      const patternDiscontinuity =
+        Math.abs(statsA.sizeVariance - statsB.sizeVariance) /
+        Math.max(0.1, (statsA.sizeVariance + statsB.sizeVariance) / 2)
+
+      // 3. Analyze density change
+      const densityChange =
+        Math.abs(statsA.density - statsB.density) / Math.max(0.1, (statsA.density + statsB.density) / 2)
+
+      // 4. Detect unnatural alignments
+      const alignmentScore = detectCircleAlignment(circlesA.concat(circlesB), isHorizontal)
+
+      // 5. Examine texture coherence
+      const textureCoherence = calculateTextureCoherence(ctx, x, y, width, height, isHorizontal)
+
+      // Calculate overall boundary probability (weighted sum)
+      const boundaryProbability =
+        colorDiscontinuity * 0.25 +
+        patternDiscontinuity * 0.2 +
+        densityChange * 0.2 +
+        alignmentScore * 0.25 +
+        (1 - textureCoherence) * 0.1
+
+      return {
+        colorDiscontinuity,
+        patternDiscontinuity,
+        densityChange,
+        alignmentScore,
+        textureCoherence,
+        boundaryProbability,
+      }
+    } catch (error) {
+      console.error("Error in analyzeCircleBoundary:", error)
+      // Return default values if analysis fails
+      return {
+        colorDiscontinuity: 0.5,
+        patternDiscontinuity: 0.5,
+        densityChange: 0.5,
+        alignmentScore: 0.5,
+        textureCoherence: 0.5,
+        boundaryProbability: 0.5,
+      }
+    }
+  }
+
+  // Calculate statistics for a set of circles
+  const calculateCircleStatistics = (circles: CircleData[]): CircleStatistics => {
+    if (circles.length === 0) {
+      return {
+        avgSize: 0,
+        sizeVariance: 0,
+        avgColor: { r: 0, g: 0, b: 0 },
+        colorVariance: 0,
+        density: 0,
+        avgOpacity: 0,
+        opacityVariance: 0,
+        dominantDirection: null,
+      }
+    }
+
+    // Calculate average size
+    const totalSize = circles.reduce((sum, circle) => sum + circle.size, 0)
+    const avgSize = totalSize / circles.length
+
+    // Calculate size variance
+    const sizeVariance = circles.reduce((sum, circle) => sum + Math.pow(circle.size - avgSize, 2), 0) / circles.length
+
+    // Calculate average color
+    const totalColor = circles.reduce(
+      (sum, circle) => ({
+        r: sum.r + circle.r,
+        g: sum.g + circle.g,
+        b: sum.b + circle.b,
+      }),
+      { r: 0, g: 0, b: 0 },
+    )
+    const avgColor = {
+      r: totalColor.r / circles.length,
+      g: totalColor.g / circles.length,
+      b: totalColor.b / circles.length,
+    }
+
+    // Calculate color variance (simplified as average distance from mean)
+    const colorVariance =
+      circles.reduce(
+        (sum, circle) =>
+          sum +
+          Math.sqrt(
+            Math.pow(circle.r - avgColor.r, 2) +
+              Math.pow(circle.g - avgColor.g, 2) +
+              Math.pow(circle.b - avgColor.b, 2),
+          ),
+        0,
+      ) / circles.length
+
+    // Calculate density (circles per unit area)
+    const totalArea = circles.reduce((sum, circle) => sum + Math.PI * Math.pow(circle.size / 2, 2), 0)
+    const density = totalArea / (circles.length > 0 ? circles.length : 1)
+
+    // Calculate average opacity
+    const totalOpacity = circles.reduce((sum, circle) => sum + circle.a, 0)
+    const avgOpacity = totalOpacity / circles.length
+
+    // Calculate opacity variance
+    const opacityVariance =
+      circles.reduce((sum, circle) => sum + Math.pow(circle.a - avgOpacity, 2), 0) / circles.length
+
+    // Analyze dominant direction (if any)
+    const directions: { [key: string]: number } = {}
+    // Limit the number of pairs to analyze to avoid excessive computation
+    const maxPairsToAnalyze = 200 // Reduced from 1000 to prevent stack overflow
+    const maxCirclesToConsider = Math.min(circles.length, 100) // Limit the number of circles to consider
+    const pairsToAnalyze = Math.min(
+      maxPairsToAnalyze,
+      Math.floor((maxCirclesToConsider * (maxCirclesToConsider - 1)) / 2),
+    )
+
+    if (pairsToAnalyze > 0 && maxCirclesToConsider > 1) {
+      const pairStep = Math.max(1, Math.floor((maxCirclesToConsider * (maxCirclesToConsider - 1)) / 2 / pairsToAnalyze))
+      let pairCount = 0
+      let pairIndex = 0
+
+      for (let i = 0; i < maxCirclesToConsider - 1 && pairCount < pairsToAnalyze; i++) {
+        for (let j = i + 1; j < maxCirclesToConsider && pairCount < pairsToAnalyze; j++) {
+          pairIndex++
+          if (pairIndex % pairStep === 0) {
+            const dx = circles[j].x - circles[i].x
+            const dy = circles[j].y - circles[i].y
+            const angle = Math.atan2(dy, dx) * (180 / Math.PI)
+            const binned = Math.round(angle / 10) * 10
+            directions[binned] = (directions[binned] || 0) + 1
+            pairCount++
+          }
+        }
+      }
+    }
+
+    let dominantDirection = null
+    let maxCount = 0
+    for (const [dir, count] of Object.entries(directions)) {
+      if (count > maxCount) {
+        maxCount = count
+        dominantDirection = Number.parseInt(dir)
+      }
+    }
+
+    return {
+      avgSize,
+      sizeVariance,
+      avgColor,
+      colorVariance,
+      density,
+      avgOpacity,
+      opacityVariance,
+      dominantDirection,
+    }
+  }
+
+  // Calculate color discontinuity between two average colors
+  const calculateColorDiscontinuity = (
+    colorA: { r: number; g: number; b: number },
+    colorB: { r: number; g: number; b: number },
+  ) => {
+    return (
+      Math.sqrt(
+        Math.pow(colorA.r - colorB.r, 2) + Math.pow(colorA.g - colorB.g, 2) + Math.pow(colorA.b - colorB.b, 2),
+      ) / 441.67
+    ) // Normalize by max possible distance (sqrt(255^2 * 3))
+  }
+
+  // Detect unnatural alignments of circles
+  const detectCircleAlignment = (circles: CircleData[], isHorizontal: boolean): number => {
+    if (circles.length < 5) return 0
+
+    // Sort circles by position along the boundary
+    const sortedCircles = [...circles].sort((a, b) => (isHorizontal ? a.x - b.x : a.y - b.y))
+
+    // Count how many circles are aligned in a grid-like pattern
+    let alignedCount = 0
+    const alignmentThreshold = 2 // Maximum distance to consider aligned
+
+    for (let i = 0; i < sortedCircles.length - 1; i++) {
+      const current = sortedCircles[i]
+      const next = sortedCircles[i + 1]
+
+      // Check if circles are aligned perpendicular to the boundary
+      const distance = isHorizontal ? Math.abs(current.y - next.y) : Math.abs(current.x - next.x)
+
+      if (distance < alignmentThreshold) {
+        alignedCount++
+      }
+    }
+
+    // Calculate alignment score (0 to 1)
+    return alignedCount / (sortedCircles.length - 1)
+  }
+
+  // Calculate texture coherence across a boundary
+  const calculateTextureCoherence = (
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    isHorizontal: boolean,
+  ): number => {
+    try {
+      // Get image data for the boundary area
+      const imageData = ctx.getImageData(x, y, width, height)
+      const data = imageData.data
+
+      // Calculate texture features on both sides of the boundary
+      const midpoint = isHorizontal ? Math.floor(height / 2) : Math.floor(width / 2)
+
+      // Calculate texture features (simplified as variance in each region)
+      const featuresA = calculateTextureFeatures(data, width, height, 0, midpoint, isHorizontal)
+      const featuresB = calculateTextureFeatures(
+        data,
+        width,
+        height,
+        midpoint,
+        isHorizontal ? height : width,
+        isHorizontal,
+      )
+
+      // Calculate similarity between texture features (higher is more coherent)
+      const similarity = calculateFeatureSimilarity(featuresA, featuresB)
+
+      return similarity
+    } catch (e) {
+      return 0.5 // Default to medium coherence if calculation fails
+    }
+  }
+
+  // Calculate texture features for a region
+  const calculateTextureFeatures = (
+    data: Uint8ClampedArray,
+    width: number,
+    height: number,
+    start: number,
+    end: number,
+    isHorizontal: boolean,
+  ): number[] => {
+    // Calculate mean and variance for each color channel
+    let sumR = 0,
+      sumG = 0,
+      sumB = 0
+    let count = 0
+
+    // Calculate means
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const position = isHorizontal ? y : x
+        if (position >= start && position < end) {
+          const idx = (y * width + x) * 4
+          sumR += data[idx]
+          sumG += data[idx + 1]
+          sumB += data[idx + 2]
+          count++
+        }
+      }
+    }
+
+    const meanR = sumR / count
+    const meanG = sumG / count
+    const meanB = sumB / count
+
+    // Calculate variances
+    let varR = 0,
+      varG = 0,
+      varB = 0
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const position = isHorizontal ? y : x
+        if (position >= start && position < end) {
+          const idx = (y * width + x) * 4
+          varR += Math.pow(data[idx] - meanR, 2)
+          varG += Math.pow(data[idx + 1] - meanG, 2)
+          varB += Math.pow(data[idx + 2] - meanB, 2)
+        }
+      }
+    }
+
+    varR /= count
+    varG /= count
+    varB /= count
+
+    // Calculate edge density (simplified)
+    let edgeCount = 0
+    for (let y = 1; y < height; y++) {
+      for (let x = 1; x < width; x++) {
+        const position = isHorizontal ? y : x
+        if (position >= start && position < end) {
+          const idx = (y * width + x) * 4
+          const idxLeft = (y * width + (x - 1)) * 4
+          const idxUp = ((y - 1) * width + x) * 4
+
+          const diffH =
+            Math.abs(data[idx] - data[idxLeft]) +
+            Math.abs(data[idx + 1] - data[idxLeft + 1]) +
+            Math.abs(data[idx + 2] - data[idxLeft + 2])
+
+          const diffV =
+            Math.abs(data[idx] - data[idxUp]) +
+            Math.abs(data[idx + 1] - data[idxUp + 1]) +
+            Math.abs(data[idx + 2] - data[idxUp + 2])
+
+          if (diffH > 100 || diffV > 100) {
+            edgeCount++
+          }
+        }
+      }
+    }
+
+    const edgeDensity = edgeCount / count
+
+    // Return feature vector
+    return [meanR, meanG, meanB, varR, varG, varB, edgeDensity]
+  }
+
+  // Calculate similarity between feature vectors
+  const calculateFeatureSimilarity = (featuresA: number[], featuresB: number[]): number => {
+    // Normalize the feature vectors
+    const normalizedA = normalizeFeatures(featuresA)
+    const normalizedB = normalizeFeatures(featuresB)
+
+    // Calculate cosine similarity
+    let dotProduct = 0
+    let normA = 0
+    let normB = 0
+
+    for (let i = 0; i < normalizedA.length; i++) {
+      dotProduct += normalizedA[i] * normalizedB[i]
+      normA += Math.pow(normalizedA[i], 2)
+      normB += Math.pow(normalizedB[i], 2)
+    }
+
+    normA = Math.sqrt(normA)
+    normB = Math.sqrt(normB)
+
+    if (normA === 0 || normB === 0) return 0
+
+    return dotProduct / (normA * normB)
+  }
+
+  // Normalize feature vector
+  const normalizeFeatures = (features: number[]): number[] => {
+    const min = Math.min(...features)
+    const max = Math.max(...features)
+
+    if (max === min) return features.map(() => 1)
+
+    return features.map((f) => (f - min) / (max - min))
+  }
+
+  // Update the boundary heat map
+  const updateBoundaryHeatMap = (
+    heatMap: number[][],
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    probability: number,
+    isHorizontal: boolean,
+  ) => {
+    // Apply a Gaussian-like distribution centered on the boundary
+    const sigma = isHorizontal ? height / 6 : width / 6
+
+    for (let py = 0; py < height; py++) {
+      for (let px = 0; px < width; px++) {
+        const mapX = x + px
+        const mapY = y + py
+
+        if (mapX < 0 || mapX >= heatMap[0].length || mapY < 0 || mapY >= heatMap.length) break
+
+        // Calculate distance from boundary line
+        const distance = isHorizontal ? Math.abs(py - height / 2) : Math.abs(px - width / 2)
+
+        // Apply Gaussian falloff
+        const weight = Math.exp(-(distance * distance) / (2 * sigma * sigma))
+
+        // Update heat map with weighted probability
+        heatMap[mapY][mapX] = Math.max(heatMap[mapY][mapX], probability * weight)
+      }
+    }
+  }
+
+  // Fix global boundaries using the heat map and advanced strategies
+  const fixGlobalBoundaries = async (
+    ctx: CanvasRenderingContext2D,
+    circlesCtx: CanvasRenderingContext2D,
+    originalCtx: CanvasRenderingContext2D,
+    boundaryHeatMap: number[][],
+    allCircles: CircleData[],
+    width: number,
+    height: number,
+    tileSize: number,
+    macroTileSize: number,
+    transitionZoneWidth: number,
+  ) => {
+    try {
+      // Create a canvas for the fixed image
+      const fixedCanvas = document.createElement("canvas")
+      fixedCanvas.width = width
+      fixedCanvas.height = height
+      const fixedCtx = fixedCanvas.getContext("2d")
+      if (!fixedCtx) return
+
+      // Copy the current image
+      fixedCtx.drawImage(ctx.canvas, 0, 0)
+
+      // Find high probability boundary areas
+      const boundaryThreshold = 0.6 // Threshold for considering an area as a boundary
+      const boundaryAreas: { x: number; y: number; width: number; height: number; isHorizontal: boolean }[] = []
+
+      // Check horizontal boundaries at tile and macro tile levels
+      for (let y = tileSize; y < height; y += tileSize) {
+        // Check if this is a high probability boundary
+        let maxProb = 0
+        for (let x = 0; x < width; x += Math.max(1, Math.floor(width / 20))) {
+          // Sample fewer points
+          if (y < boundaryHeatMap.length && x < boundaryHeatMap[0].length) {
+            maxProb = Math.max(maxProb, boundaryHeatMap[y][x])
+          }
+        }
+
+        if (maxProb > boundaryThreshold) {
+          boundaryAreas.push({
+            x: 0,
+            y: y - transitionZoneWidth,
+            width,
+            height: transitionZoneWidth * 2,
+            isHorizontal: true,
+          })
+        }
+      }
+
+      // Check vertical boundaries at tile and macro tile levels
+      for (let x = tileSize; x < width; x += tileSize) {
+        // Check if this is a high probability boundary
+        let maxProb = 0
+        for (let y = 0; y < height; y += Math.max(1, Math.floor(height / 20))) {
+          // Sample fewer points
+          if (y < boundaryHeatMap.length && x < boundaryHeatMap[0].length) {
+            maxProb = Math.max(maxProb, boundaryHeatMap[y][x])
+          }
+        }
+
+        if (maxProb > boundaryThreshold) {
+          boundaryAreas.push({
+            x: x - transitionZoneWidth,
+            y: 0,
+            width: transitionZoneWidth * 2,
+            height,
+            isHorizontal: false,
+          })
+        }
+      }
+
+      console.log(`Found ${boundaryAreas.length} boundary areas to fix`)
+
+      // Limit the number of boundary areas to process to prevent stack overflow
+      const MAX_BOUNDARY_AREAS = 20
+      const areasToProcess = boundaryAreas.slice(0, MAX_BOUNDARY_AREAS)
+      console.log(`Processing ${areasToProcess.length} of ${boundaryAreas.length} boundary areas`)
+
+      // Fix each boundary area
+      for (const area of areasToProcess) {
+        try {
+          // Get image content type for this area
+          const contentType = analyzeImageContent(originalCtx, area.x, area.y, area.width, area.height)
+
+          // Apply appropriate fixing strategy based on content type
+          if (contentType === "detailed") {
+            await fixDetailedBoundary(fixedCtx, originalCtx, circlesCtx, allCircles, area, transitionZoneWidth)
+          } else if (contentType === "uniform") {
+            await fixUniformBoundary(fixedCtx, originalCtx, circlesCtx, allCircles, area, transitionZoneWidth)
+          } else {
+            await fixMixedBoundary(fixedCtx, originalCtx, circlesCtx, allCircles, area, transitionZoneWidth)
+          }
+        } catch (error) {
+          console.error("Error fixing boundary area:", error)
+          // Continue with other areas even if one fails
+        }
+
+        // Yield to browser occasionally to prevent UI freezing
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      }
+
+      // Copy the fixed image back to the main canvas
+      ctx.clearRect(0, 0, width, height)
+      ctx.drawImage(fixedCanvas, 0, 0)
+      console.log("Global boundary fixing complete")
+    } catch (error) {
+      console.error("Error in fixGlobalBoundaries:", error)
+      // Make sure we still return even if there's an error
+    }
+  }
+
+  // Analyze image content type (detailed, uniform, or mixed)
+  const analyzeImageContent = (
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+  ): "detailed" | "uniform" | "mixed" => {
+    try {
+      const imageData = ctx.getImageData(x, y, width, height)
+      const data = imageData.data
+
+      // Calculate variance and edge density
+      let sumR = 0,
+        sumG = 0,
+        sumB = 0
+      const count = width * height
+
+      // Calculate means
+      for (let i = 0; i < data.length; i += 4) {
+        sumR += data[i]
+        sumG += data[i + 1]
+        sumB += data[i + 2]
+      }
+
+      const meanR = sumR / count
+      const meanG = sumG / count
+      const meanB = sumB / count
+
+      // Calculate variances
+      let varR = 0,
+        varG = 0,
+        varB = 0
+
+      for (let i = 0; i < data.length; i += 4) {
+        varR += Math.pow(data[i] - meanR, 2)
+        varG += Math.pow(data[i + 1] - meanG, 2)
+        varB += Math.pow(data[i + 2] - meanB, 2)
+      }
+
+      varR /= count
+      varG /= count
+      varB /= count
+
+      const totalVariance = (varR + varG + varB) / 3
+
+      // Calculate edge density
+      let edgeCount = 0
+      for (let y = 1; y < height; y += 2) {
+        // Sample fewer points
+        for (let x = 1; x < width; x += 2) {
+          // Sample fewer points
+          const idx = (y * width + x) * 4
+          const idxLeft = (y * width + (x - 1)) * 4
+          const idxUp = ((y - 1) * width + x) * 4
+
+          const diffH =
+            Math.abs(data[idx] - data[idxLeft]) +
+            Math.abs(data[idx + 1] - data[idxLeft + 1]) +
+            Math.abs(data[idx + 2] - data[idxLeft + 2])
+
+          const diffV =
+            Math.abs(data[idx] - data[idxUp]) +
+            Math.abs(data[idx + 1] - data[idxUp + 1]) +
+            Math.abs(data[idx + 2] - data[idxUp + 2])
+
+          if (diffH > 100 || diffV > 100) {
+            edgeCount++
+          }
+        }
+      }
+
+      const edgeDensity = edgeCount / ((width / 2 - 1) * (height / 2 - 1))
+
+      // Classify based on variance and edge density
+      if (totalVariance > 1000 || edgeDensity > 0.1) {
+        return "detailed"
+      } else if (totalVariance < 300 && edgeDensity < 0.05) {
+        return "uniform"
+      } else {
+        return "mixed"
+      }
+    } catch (e) {
+      return "mixed" // Default to mixed if analysis fails
+    }
+  }
+
+  // Fix a detailed boundary area
+  const fixDetailedBoundary = async (
+    ctx: CanvasRenderingContext2D,
+    originalCtx: CanvasRenderingContext2D,
+    circlesCtx: CanvasRenderingContext2D,
+    allCircles: CircleData[],
+    area: { x: number; y: number; width: number; height: number; isHorizontal: boolean },
+    transitionZoneWidth: number,
+  ) => {
+    // For detailed areas, use a combination of statistical matching and Perlin noise
+
+    // Get circles in and around the boundary area
+    const expandedArea = {
+      x: Math.max(0, area.x - transitionZoneWidth),
+      y: Math.max(0, area.y - transitionZoneWidth),
+      width: area.width + transitionZoneWidth * 2,
+      height: area.height + transitionZoneWidth * 2,
+    }
+
+    // Filter circles to only include those in the expanded area
+    // Use a more efficient approach for large circle arrays
+    const nearbyCircles: CircleData[] = []
+    const maxCirclesToProcess = 5000 // Reduced from 10000 to prevent stack overflow
+    const circleStep = Math.max(1, Math.floor(allCircles.length / maxCirclesToProcess))
+
+    for (let i = 0; i < allCircles.length; i += circleStep) {
+      const circle = allCircles[i]
+      if (
+        circle.x >= expandedArea.x &&
+        circle.x < expandedArea.x + expandedArea.width &&
+        circle.y >= expandedArea.y &&
+        circle.y < expandedArea.y + expandedArea.height
+      ) {
+        nearbyCircles.push(circle)
+      }
+    }
+
+    // Divide into two regions (across the boundary)
+    const midpoint = area.isHorizontal ? area.y + area.height / 2 : area.x + area.width / 2
+
+    const regionACircles = nearbyCircles.filter((circle) =>
+      area.isHorizontal ? circle.y < midpoint : circle.x < midpoint,
+    )
+
+    const regionBCircles = nearbyCircles.filter((circle) =>
+      area.isHorizontal ? circle.y >= midpoint : circle.x >= midpoint,
+    )
+
+    // Calculate statistics for both regions
+    const statsA = calculateCircleStatistics(regionACircles)
+    const statsB = calculateCircleStatistics(regionBCircles)
+
+    // Clear the boundary area
+    ctx.clearRect(area.x, area.y, area.width, area.height)
+
+    // Create new circles in the boundary area with statistical properties that transition smoothly
+    const newCircles: CircleData[] = []
+    const circleCount = Math.max(50, Math.floor((area.width * area.height) / 100))
+
+    for (let i = 0; i < circleCount; i++) {
+      // Random position within the boundary area
+      const x = area.x + Math.random() * area.width
+      const y = area.y + Math.random() * area.height
+
+      // Calculate transition factor (0 at one edge, 1 at the other)
+      const transitionFactor = area.isHorizontal ? (y - area.y) / area.height : (x - area.x) / area.width
+
+      // Apply Perlin-like noise to the transition factor for more natural blending
+      const noiseFactor = 0.7 + 0.3 * Math.sin(x * 0.1) * Math.cos(y * 0.1)
+      const adjustedFactor = Math.max(0, Math.min(1, transitionFactor * noiseFactor))
+
+      // Interpolate circle properties between the two regions
+      const size = statsA.avgSize * (1 - adjustedFactor) + statsB.avgSize * adjustedFactor
+      const sizeVariation = Math.sqrt(statsA.sizeVariance * (1 - adjustedFactor) + statsB.sizeVariance * adjustedFactor)
+
+      // Add some randomness to the size
+      const finalSize = Math.max(2, Math.min(9, size + (Math.random() * 2 - 1) * sizeVariation))
+
+      // Get color from the original image with some statistical influence
+      const originalColor = getColorFromOriginal(originalCtx, x, y, finalSize)
+      if (!originalColor) break
+
+      // Blend with statistical color properties
+      const r =
+        originalColor.r * 0.7 + (statsA.avgColor.r * (1 - adjustedFactor) + statsB.avgColor.r * adjustedFactor) * 0.3
+      const g =
+        originalColor.g * 0.7 + (statsA.avgColor.g * (1 - adjustedFactor) + statsB.avgColor.g * adjustedFactor) * 0.3
+      const b =
+        originalColor.b * 0.7 + (statsA.avgColor.b * (1 - adjustedFactor) + statsB.avgColor.b * adjustedFactor) * 0.3
+
+      // Interpolate opacity
+      const opacity = statsA.avgOpacity * (1 - adjustedFactor) + statsB.avgOpacity * adjustedFactor
+
+      // Add the new circle
+      newCircles.push({
+        x: x - area.x, // Store relative to area
+        y: y - area.y,
+        size: finalSize,
+        r: Math.round(r),
+        g: Math.round(g),
+        b: Math.round(b),
+        a: opacity,
+      })
+    }
+
+    // Draw the new circles
+    newCircles.forEach((circle) => {
+      ctx.beginPath()
+      ctx.arc(area.x + circle.x + circle.size / 2, area.y + circle.y + circle.size / 2, circle.size / 2, 0, Math.PI * 2)
+      ctx.fillStyle = `rgba(${circle.r}, ${circle.g}, ${circle.b}, ${circle.a})`
+      ctx.fill()
+    })
+  }
+
+  // Fix a uniform boundary area
+  const fixUniformBoundary = async (
+    ctx: CanvasRenderingContext2D,
+    originalCtx: CanvasRenderingContext2D,
+    circlesCtx: CanvasRenderingContext2D,
+    allCircles: CircleData[],
+    area: { x: number; y: number; width: number; height: number; isHorizontal: boolean },
+    transitionZoneWidth: number,
+  ) => {
+    // For uniform areas, use a simpler approach with more color consistency
+
+    // Get the average color from the original image in this area
+    const imageData = originalCtx.getImageData(area.x, area.y, area.width, area.height)
+    const data = imageData.data
+
+    let sumR = 0,
+      sumG = 0,
+      sumB = 0,
+      count = 0
+
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i + 3] > 0) {
+        sumR += data[i]
+        sumG += data[i + 1]
+        sumB += data[i + 2]
+        count++
+      }
+    }
+
+    const avgColor = {
+      r: Math.round(sumR / count),
+      g: Math.round(sumG / count),
+      b: Math.round(sumB / count),
+    }
+
+    // Clear the boundary area
+    ctx.clearRect(area.x, area.y, area.width, area.height)
+
+    // Create new circles with consistent properties but varied positions
+    const circleCount = Math.max(30, Math.floor((area.width * area.height) / 150))
+
+    for (let i = 0; i < circleCount; i++) {
+      // Random position within the boundary area
+      const x = area.x + Math.random() * area.width
+      const y = area.y + Math.random() * area.height
+
+      // Random size between 2 and 9
+      const size = 2 + Math.random() * 7
+
+      // Get color from the original image but blend with average
+      const originalColor = getColorFromOriginal(originalCtx, x, y, size)
+      if (!originalColor) break
+
+      // Blend with average color (80% original, 20% average)
+      const r = originalColor.r * 0.8 + avgColor.r * 0.2
+      const g = originalColor.g * 0.8 + avgColor.g * 0.2
+      const b = originalColor.b * 0.8 + avgColor.b * 0.2
+
+      // Draw the circle
+      ctx.beginPath()
+      ctx.arc(x, y, size / 2, 0, Math.PI * 2)
+      ctx.fillStyle = `rgba(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)}, ${originalColor.a * 0.7})`
+      ctx.fill()
+    }
+  }
+
+  // Fix a mixed boundary area
+  const fixMixedBoundary = async (
+    ctx: CanvasRenderingContext2D,
+    originalCtx: CanvasRenderingContext2D,
+    circlesCtx: CanvasRenderingContext2D,
+    allCircles: CircleData[],
+    area: { x: number; y: number; width: number; height: number; isHorizontal: boolean },
+    transitionZoneWidth: number,
+  ) => {
+    // For mixed areas, use a circle flow approach
+
+    // Get circles in and around the boundary area
+    const expandedArea = {
+      x: Math.max(0, area.x - transitionZoneWidth),
+      y: Math.max(0, area.y - transitionZoneWidth),
+      width: area.width + transitionZoneWidth * 2,
+      height: area.height + transitionZoneWidth * 2,
+    }
+
+    // Filter circles to only include those in the expanded area
+    // Use a more efficient approach for large circle arrays
+    const nearbyCircles: CircleData[] = []
+    const maxCirclesToProcess = 5000 // Limit to prevent excessive computation
+    const circleStep = Math.max(1, Math.floor(allCircles.length / maxCirclesToProcess))
+
+    for (let i = 0; i < allCircles.length; i += circleStep) {
+      const circle = allCircles[i]
+      if (
+        circle.x >= expandedArea.x &&
+        circle.x < expandedArea.x + expandedArea.width &&
+        circle.y >= expandedArea.y &&
+        circle.y < expandedArea.y + expandedArea.height
+      ) {
+        nearbyCircles.push(circle)
+      }
+    }
+
+    // Clear the boundary area
+    ctx.clearRect(area.x, area.y, area.width, area.height)
+
+    // Create a flow field for circle placement
+    const flowField = createFlowField(area.width, area.height, area.isHorizontal)
+
+    // Create new circles following the flow field
+    const circleCount = Math.max(40, Math.floor((area.width * area.height) / 120))
+
+    for (let i = 0; i < circleCount; i++) {
+      // Start with random position within the boundary area
+      let x = Math.random() * area.width
+      let y = Math.random() * area.height
+
+      // Follow the flow field for a few steps
+      const steps = 3 + Math.floor(Math.random() * 3)
+      for (let step = 0; step < steps; step++) {
+        const fieldX = Math.floor(x / 10)
+        const fieldY = Math.floor(y / 10)
+
+        if (fieldX >= 0 && fieldX < flowField[0].length && fieldY >= 0 && fieldY < flowField.length) {
+          const angle = flowField[fieldY][fieldX]
+          x += Math.cos(angle) * 3
+          y += Math.sin(angle) * 3
+        }
+
+        // Keep within bounds
+        x = Math.max(0, Math.min(area.width - 1, x))
+        y = Math.max(0, Math.min(area.height - 1, y))
+      }
+
+      // Random size between 2 and 9
+      const size = 2 + Math.random() * 7
+
+      // Get color from the original image
+      const originalColor = getColorFromOriginal(originalCtx, area.x + x, area.y + y, size)
+      if (!originalColor) break
+
+      // Draw the circle
+      ctx.beginPath()
+      ctx.arc(area.x + x, area.y + y, size / 2, 0, Math.PI * 2)
+      ctx.fillStyle = `rgba(${originalColor.r}, ${originalColor.g}, ${originalColor.b}, ${originalColor.a * 0.7})`
+      ctx.fill()
+    }
+  }
+
+  // Create a flow field for circle placement
+  const createFlowField = (width: number, height: number, isHorizontal: boolean): number[][] => {
+    const cellSize = 10
+    const cols = Math.ceil(width / cellSize)
+    const rows = Math.ceil(height / cellSize)
+
+    const field: number[][] = []
+
+    for (let y = 0; y < rows; y++) {
+      field[y] = []
+      for (let x = 0; x < cols; x++) {
+        // Base angle perpendicular to the boundary
+        const baseAngle = isHorizontal ? 0 : Math.PI / 2
+
+        // Add Perlin-like noise
+        const noiseX = Math.sin(x * 0.2) * Math.cos(y * 0.3)
+        const noiseY = Math.sin(y * 0.2) * Math.cos(x * 0.3)
+        const noiseAngle = Math.atan2(noiseY, noiseX)
+
+        // Combine base angle with noise
+        field[y][x] = baseAngle + noiseAngle * 0.5
+      }
+    }
+
+    return field
+  }
+
+  // Helper function to get average color of an area
+  const getAverageColor = (ctx: CanvasRenderingContext2D, x: number, y: number, size: number) => {
+    try {
+      const data = ctx.getImageData(x, y, size, size).data
+      let r = 0,
+        g = 0,
+        b = 0,
+        a = 0,
+        count = 0
+
+      for (let i = 0; i < data.length; i += 4) {
+        if (data[i + 3] > 0) {
+          // Only count non-transparent pixels
+          r += data[i]
+          g += data[i + 1]
+          b += data[i + 2]
+          a += data[i + 3]
+          count++
+        }
+      }
+
+      if (count === 0) return null
+
+      return {
+        r: Math.round(r / count),
+        g: Math.round(g / count),
+        b: Math.round(b / count),
+        a: a / count / 255, // Convert to 0-1 range
+      }
+    } catch (e) {
+      return null // Return null if we're out of bounds
+    }
+  }
+
+  // Get color from the original image
+  const getColorFromOriginal = (originalCtx: CanvasRenderingContext2D, x: number, y: number, size: number) => {
+    try {
+      // Get color from the reference image
+      const halfSize = Math.floor(size / 2)
+      const colorData = originalCtx.getImageData(Math.max(0, x - halfSize), Math.max(0, y - halfSize), size, size)
+
+      // Calculate average color
+      let r = 0,
+        g = 0,
+        b = 0,
+        a = 0,
+        count = 0
+
+      for (let i = 0; i < colorData.data.length; i += 4) {
+        if (colorData.data[i + 3] > 0) {
+          r += colorData.data[i]
+          g += colorData.data[i + 1]
+          b += colorData.data[i + 2]
+          a += colorData.data[i + 3]
+          count++
+        }
+      }
+
+      if (count > 0) {
+        return {
+          r: Math.round(r / count),
+          g: Math.round(g / count),
+          b: Math.round(b / count),
+          a: a / count / 255, // Convert to 0-1 range
+        }
+      }
+      return null
+    } catch (e) {
+      return null // Return null if we're out of bounds
+    }
+  }
+
+  // Handle download for both desktop and iOS
+  const handleDownload = () => {
+    if (!processedImage) return
+
+    // Check if running on iOS
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !(window as any).MSStream
+
+    if (isIOS) {
+      // For iOS, use a more direct approach
+      try {
+        // Create a temporary link element
+        const link = document.createElement("a")
+        link.href = processedImage
+        link.download = "processed-image.png"
+        link.target = "_blank"
+
+        // Make the link visible and add to DOM
+        link.style.position = "fixed"
+        link.style.top = "0"
+        link.style.left = "0"
+        link.style.opacity = "0"
+        link.style.pointerEvents = "none"
+        document.body.appendChild(link)
+
+        // Trigger click programmatically
+        link.click()
+
+        // Clean up
+        setTimeout(() => {
+          document.body.removeChild(link)
+        }, 100)
+
+        // Also try opening in new window as fallback
+        setTimeout(() => {
+          const newWindow = window.open(processedImage, "_blank")
+          if (newWindow) {
+            newWindow.document.write(`
+            <html>
+              <head>
+                <title>Save Image</title>
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+                <style>
+                  body { 
+                    margin: 0; 
+                    padding: 20px; 
+                    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+                    text-align: center;
+                    background: #f5f5f5;
+                  }
+                  img { 
+                    max-width: 100%; 
+                    height: auto; 
+                    border-radius: 8px;
+                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                    margin: 20px 0;
+                  }
+                  .instructions {
+                    margin: 20px 0;
+                    padding: 15px;
+                    background: white;
+                    border-radius: 8px;
+                    color: #333;
+                    line-height: 1.5;
+                  }
+                  .step {
+                    margin: 8px 0;
+                    padding: 8px;
+                    background: #f8f9fa;
+                    border-radius: 4px;
+                    text-align: left;
+                  }
+                </style>
+              </head>
+              <body>
+                <h2>📱 Save Your Image</h2>
+                <div class="instructions">
+                  <div class="step"><strong>Step 1:</strong> Tap and hold the image below</div>
+                  <div class="step"><strong>Step 2:</strong> Select "Save to Photos" from the menu</div>
+                  <div class="step"><strong>Step 3:</strong> The image will be saved to your Photos app</div>
+                </div>
+                <img src="${processedImage}" alt="Processed Image" />
+              </body>
+            </html>
+          `)
+            newWindow.document.close()
+          }
+        }, 500)
+      } catch (error) {
+        console.error("iOS download error:", error)
+        // Ultimate fallback - just alert the user
+        alert("To save the image: tap and hold the image when it appears, then select 'Save to Photos'")
+        window.open(processedImage, "_blank")
+      }
+    } else {
+      // For other platforms, use download attribute
+      const link = document.createElement("a")
+      link.href = processedImage
+      link.download = "processed-image.png"
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Main image container */}
+      <div className="relative border rounded-lg overflow-hidden" onDoubleClick={handleDoubleTap}>
+        <div className="relative">
+          {/* Original image (hidden, used for reference) */}
+          <img
+            ref={mainImageRef}
+            src={originalImage || "/placeholder.svg"}
+            alt="Original"
+            className="w-full h-auto invisible absolute"
+          />
+
+          {/* Canvas for displaying the image */}
+          <canvas ref={mainCanvasRef} className="w-full h-auto" />
+
+          {/* Processing overlay */}
+          {isProcessing && (
+            <div className="absolute inset-0 flex items-center justify-center bg-black/50">
+              <div className="text-white text-center">
+                <Loader2 className="h-8 w-8 animate-spin mx-auto" />
+                <p className="mt-2">Processing image...</p>
+                {progress && (
+                  <div className="mt-2 w-64 mx-auto">
+                    <p className="text-xs mb-1">{progress.stage}</p>
+                    <div className="w-full bg-gray-700 rounded-full h-2.5">
+                      <div
+                        className="bg-blue-500 h-2.5 rounded-full"
+                        style={{ width: `${progress.percentage}%` }}
+                      ></div>
+                    </div>
+                    <p className="text-xs mt-1">
+                      {progress.tilesProcessed} of {progress.totalTiles} ({progress.percentage}%)
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Detail view */}
+      <div className="border rounded-lg overflow-hidden">
+        <h3 className="p-2 text-sm font-medium bg-muted">Detail Preview</h3>
+        <div className="p-2">
+          <p className="text-xs text-muted-foreground mb-2">Double-tap the main image to move this preview area</p>
+          <canvas ref={detailCanvasRef} className="w-full aspect-square" />
+        </div>
+      </div>
+
+      {/* Topographic opacity controls */}
+      <div className="space-y-4 py-2">
+        <div className="flex items-center space-x-2">
+          <Switch id="topo-opacity" checked={useTopoOpacity} onCheckedChange={setUseTopoOpacity} />
+          <Label htmlFor="topo-opacity" className="text-sm">
+            Topographic opacity (highlights: {highlightOpacity}%, midtones: {midtoneOpacity}%, shadows: 100%)
+          </Label>
+        </div>
+
+        {useTopoOpacity && (
+          <div className="space-y-2">
+            <Label htmlFor="highlight-opacity" className="text-sm text-muted-foreground">
+              Highlight opacity: {highlightOpacity}%
+            </Label>
+            <Slider
+              id="highlight-opacity"
+              min={1}
+              max={25}
+              step={1}
+              value={[highlightOpacity]}
+              onValueChange={(value) => setHighlightOpacity(value[0])}
+              className="w-full"
+            />
+
+            <Label htmlFor="midtone-opacity" className="text-sm text-muted-foreground">
+              Midtone opacity: {midtoneOpacity}%
+            </Label>
+            <Slider
+              id="midtone-opacity"
+              min={2}
+              max={100}
+              step={1}
+              value={[midtoneOpacity]}
+              onValueChange={(value) => setMidtoneOpacity(value[0])}
+              className="w-full"
+            />
+
+  <Label htmlFor="shadow-opacity" className="text-sm text-muted-foreground">
+  Shadow opacity: {shadowOpacity}%
+  </Label>
+  <Slider
+  id="shadow-opacity"
+  min={50}
+  max={100}
+  step={1}
+  value={[shadowOpacity]}
+  onValueChange={(value) => setShadowOpacity(value[0])}
+  className="w-full"
+  />
+  
+  <Label htmlFor="highlight-threshold" className="text-sm text-muted-foreground">
+  Highlight threshold: {highlightThreshold} (brightness above this is highlight)
+  </Label>
+  <Slider
+  id="highlight-threshold"
+  min={150}
+  max={240}
+  step={5}
+  value={[highlightThreshold]}
+  onValueChange={(value) => setHighlightThreshold(value[0])}
+  className="w-full"
+  />
+  
+  <Label htmlFor="midtone-threshold" className="text-sm text-muted-foreground">
+  Midtone threshold: {midtoneThreshold} (brightness below this is shadow)
+  </Label>
+  <Slider
+  id="midtone-threshold"
+  min={5}
+  max={150}
+  step={5}
+  value={[midtoneThreshold]}
+  onValueChange={(value) => setMidtoneThreshold(value[0])}
+  className="w-full"
+  />
+  
+  <Label htmlFor="shadow-oval-size" className="text-sm text-muted-foreground">
+  Shadow oval size: {shadowOvalSize}%
+  </Label>
+  <Slider
+  id="shadow-oval-size"
+  min={100}
+  max={300}
+  step={10}
+  value={[shadowOvalSize]}
+  onValueChange={(value) => setShadowOvalSize(value[0])}
+  className="w-full"
+  />
+  
+  <Label htmlFor="shadow-color-density" className="text-sm text-muted-foreground">
+  Shadow color density: {shadowColorDensity}%
+  </Label>
+  <Slider
+  id="shadow-color-density"
+  min={100}
+  max={250}
+  step={10}
+  value={[shadowColorDensity]}
+  onValueChange={(value) => setShadowColorDensity(value[0])}
+  className="w-full"
+  />
+  
+  <Label htmlFor="shadow-brightness" className="text-sm text-muted-foreground">
+  Shadow brightness: {shadowBrightness}%
+  </Label>
+  <Slider
+  id="shadow-brightness"
+  min={50}
+  max={100}
+  step={5}
+  value={[shadowBrightness]}
+  onValueChange={(value) => setShadowBrightness(value[0])}
+  className="w-full"
+  />
+  </div>
+  )}
+      </div>
+
+      {/* Algo2 checkbox - additive RGB algorithm */}
+      <div className="flex items-center gap-2 p-2 border rounded-lg bg-muted/30">
+        <input
+          type="checkbox"
+          id="algo2-toggle"
+          checked={useAlgo2}
+          onChange={(e) => setUseAlgo2(e.target.checked)}
+          className="w-4 h-4"
+        />
+        <label htmlFor="algo2-toggle" className="text-sm font-medium">
+          Algo2 (Additive RGB)
+        </label>
+      </div>
+
+      {/* Halation settings - hidden when algo2 is enabled */}
+      {!useAlgo2 && (
+        <>
+          {/* Halation button with toggle */}
+          <div className="flex items-center gap-2">
+            <Switch
+              id="halation-toggle"
+              checked={halationSettings.enabled}
+              onCheckedChange={(checked) => setHalationSettings(prev => ({ ...prev, enabled: checked }))}
+            />
+            <Button onClick={() => setHalationModalOpen(true)} variant="outline" className="flex-1 bg-transparent">
+              Halation Settings
+            </Button>
+          </div>
+          
+          {/* Contour Halation toggle with strength */}
+          <div className="flex items-center gap-2">
+            <Switch
+              id="contour-halation-toggle"
+              checked={contourHalationEnabled}
+              onCheckedChange={setContourHalationEnabled}
+            />
+            <span className="text-sm flex-1">Contour Halation</span>
+            <div className="flex gap-1">
+              {[1, 2, 3].map((strength) => (
+                <Button
+                  key={strength}
+                  variant={contourHalationStrength === strength ? "default" : "outline"}
+                  size="sm"
+                  className={`w-8 h-8 p-0 ${contourHalationStrength !== strength ? "bg-transparent" : ""}`}
+                  onClick={() => setContourHalationStrength(strength as 1 | 2 | 3)}
+                  disabled={!contourHalationEnabled}
+                >
+                  {strength}
+                </Button>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+  
+  {/* Fine Grain toggle with strength and extra chroma */}
+  <div className="flex items-center gap-2">
+  <Switch
+  id="fine-grain-toggle"
+  checked={fineGrainEnabled}
+  onCheckedChange={setFineGrainEnabled}
+  />
+  <span className="text-sm flex-1">Fine Grain</span>
+  <div className="flex gap-1">
+  {(["normal", "strong"] as const).map((strength) => (
+  <Button
+  key={strength}
+  variant={fineGrainStrength === strength ? "default" : "outline"}
+  size="sm"
+  className={`px-2 h-8 text-xs ${fineGrainStrength !== strength ? "bg-transparent" : ""}`}
+  onClick={() => setFineGrainStrength(strength)}
+  disabled={!fineGrainEnabled}
+  >
+  {strength === "normal" ? "Norm" : "Strong"}
+  </Button>
+  ))}
+  </div>
+  </div>
+  
+  {/* Extra Chroma checkbox - only visible when fine grain is enabled */}
+  {fineGrainEnabled && (
+  <div className="flex items-center gap-2 pl-12">
+  <input
+  type="checkbox"
+  id="extra-chroma"
+  checked={fineGrainExtraChroma}
+  onChange={(e) => setFineGrainExtraChroma(e.target.checked)}
+  className="h-4 w-4 rounded border-border"
+  />
+  <label htmlFor="extra-chroma" className="text-sm text-muted-foreground">
+  Extra Chroma
+  </label>
+  </div>
+  )}
+  
+  {/* Halation Modal */}
+  <Dialog open={halationModalOpen} onOpenChange={setHalationModalOpen}>
+        <DialogContent className="max-w-[95vw] max-h-[95vh] w-full h-full flex flex-col">
+          <DialogHeader>
+            <DialogTitle>Halation Settings</DialogTitle>
+            <DialogDescription>
+              Halation simulates the red/orange glow that appears in 35mm film when light bounces off the camera
+              pressure plate into shadow areas near highlights.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex-1 overflow-auto space-y-4">
+            {/* Preview canvas */}
+            <div className="border rounded-lg overflow-hidden">
+              <canvas ref={halationPreviewCanvasRef} className="w-full h-auto max-h-[50vh] object-contain" />
+              <div className="p-2 text-xs text-muted-foreground">
+                <span className="inline-block w-3 h-3 bg-cyan-400 mr-1"></span> Highlight edges
+                <span className="inline-block w-3 h-3 bg-fuchsia-500 ml-3 mr-1"></span> Shadow edges
+                <span className="ml-3">Halation appears where shadow edges are near highlight edges</span>
+              </div>
+            </div>
+
+            {/* Controls */}
+            <div className="space-y-4">
+              {/* Enable/disable halation */}
+              <div className="flex items-center space-x-2">
+                <Switch
+                  id="halation-enabled"
+                  checked={halationSettings.enabled}
+                  onCheckedChange={(checked) => setHalationSettings((prev) => ({ ...prev, enabled: checked }))}
+                />
+                <Label htmlFor="halation-enabled" className="text-sm">
+                  Enable halation effect
+                </Label>
+              </div>
+
+              {/* Highlight threshold */}
+              <div className="space-y-2">
+                <Label htmlFor="halation-highlight-threshold" className="text-sm text-muted-foreground">
+                  Highlight threshold: {halationSettings.highlightThreshold} (brightness above this is a highlight)
+                </Label>
+                <Slider
+                  id="halation-highlight-threshold"
+                  min={150}
+                  max={250}
+                  step={5}
+                  value={[halationSettings.highlightThreshold]}
+                  onValueChange={(value) => setHalationSettings((prev) => ({ ...prev, highlightThreshold: value[0] }))}
+                  className="w-full"
+                />
+              </div>
+
+              {/* Shadow threshold */}
+              <div className="space-y-2">
+                <Label htmlFor="halation-shadow-threshold" className="text-sm text-muted-foreground">
+                  Shadow threshold: {halationSettings.shadowThreshold} (brightness below this is a shadow)
+                </Label>
+                <Slider
+                  id="halation-shadow-threshold"
+                  min={10}
+                  max={150}
+                  step={5}
+                  value={[halationSettings.shadowThreshold]}
+                  onValueChange={(value) => setHalationSettings((prev) => ({ ...prev, shadowThreshold: value[0] }))}
+                  className="w-full"
+                />
+              </div>
+
+              {/* Halation depth */}
+              <div className="space-y-2">
+                <Label htmlFor="halation-depth" className="text-sm text-muted-foreground">
+                  Halation depth: {halationSettings.halationDepth}px (how far the glow extends into shadows)
+                </Label>
+                <Slider
+                  id="halation-depth"
+                  min={5}
+                  max={50}
+                  step={1}
+                  value={[halationSettings.halationDepth]}
+                  onValueChange={(value) => setHalationSettings((prev) => ({ ...prev, halationDepth: value[0] }))}
+                  className="w-full"
+                />
+              </div>
+
+              {/* Halation color */}
+              <div className="space-y-2">
+                <Label htmlFor="halation-color" className="text-sm text-muted-foreground">
+                  Halation color:{" "}
+                  {halationSettings.halationColor <= 0.33
+                    ? "Red"
+                    : halationSettings.halationColor <= 0.66
+                      ? "Orange"
+                      : "White"}
+                </Label>
+                <div className="flex items-center space-x-2">
+                  <span className="text-xs">Red</span>
+                  <Slider
+                    id="halation-color"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={[halationSettings.halationColor]}
+                    onValueChange={(value) => setHalationSettings((prev) => ({ ...prev, halationColor: value[0] }))}
+                    className="flex-1"
+                  />
+                  <span className="text-xs">White</span>
+                </div>
+                <div
+                  className="h-6 rounded"
+                  style={{
+                    backgroundColor: (() => {
+                      const color = getHalationColor(halationSettings.halationColor)
+                      return `rgb(${color.r}, ${color.g}, ${color.b})`
+                    })(),
+                  }}
+                />
+              </div>
+
+              {/* Halation opacity */}
+              <div className="space-y-2">
+                <Label htmlFor="halation-opacity" className="text-sm text-muted-foreground">
+                  Halation opacity: {halationSettings.halationOpacity}% (scales down the halation intensity)
+                </Label>
+<Slider
+id="halation-opacity"
+min={1}
+max={40}
+step={1}
+                  value={[halationSettings.halationOpacity]}
+                  onValueChange={(value) => setHalationSettings((prev) => ({ ...prev, halationOpacity: value[0] }))}
+                  className="w-full"
+                />
+              </div>
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setHalationModalOpen(false)} className="bg-transparent">
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                setHalationModalOpen(false)
+              }}
+            >
+              Save Halation Settings
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Process button (show if not processed OR if settings changed since last process) */}
+      {(!processedImage || settingsChangedSinceProcess) && !isProcessing && (
+        <div className="flex justify-center">
+          <Button onClick={processImage} className="w-full">
+            {processedImage && settingsChangedSinceProcess ? "Re-apply Tile Effect" : "Apply Tile Effect"}
+          </Button>
+        </div>
+      )}
+
+      {/* Download button (only show if processed) */}
+      {processedImage && (
+        <div className="flex justify-center">
+          <Button
+            onClick={handleDownload}
+            onTouchStart={(e) => {
+              // Prevent default touch behavior that might interfere
+              e.preventDefault()
+              handleDownload()
+            }}
+            className="w-full touch-manipulation"
+            style={{
+              WebkitTouchCallout: "none",
+              WebkitUserSelect: "none",
+              touchAction: "manipulation",
+            }}
+          >
+            {/iPad|iPhone|iPod/.test(navigator.userAgent) && !(window as any).MSStream
+              ? "Save Image (iOS)"
+              : "Download Processed Image"}
+          </Button>
+        </div>
+      )}
+    </div>
+  )
+}
