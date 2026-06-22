@@ -23,7 +23,8 @@ find_bundled_libraw_src() {
     return 1
   fi
   local dir
-  dir="$(find "$base" -maxdepth 1 -type d -name 'LibRaw-*' | head -1)"
+  # mindepth 1: "LibRaw-Source" itself also matches LibRaw-*
+  dir="$(find "$base" -mindepth 1 -maxdepth 1 -type d -name 'LibRaw-*' | head -1)"
   [[ -n "$dir" && -f "$dir/configure" ]] || return 1
   printf '%s' "$dir"
 }
