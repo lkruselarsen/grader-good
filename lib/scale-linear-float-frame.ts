@@ -12,6 +12,17 @@ export function downscaleLinearFloatByScale(
   frame: PixelFrameF32,
   scale: number
 ): PixelFrameF32 {
+  const { width, height } = frame;
+  if (
+    !Number.isFinite(width) ||
+    !Number.isFinite(height) ||
+    width <= 0 ||
+    height <= 0
+  ) {
+    throw new Error(
+      `Cannot downscale frame with invalid dimensions (${width}×${height}).`
+    );
+  }
   const s = clamp(scale, 0.1, 1);
   if (s >= 0.999) {
     return {

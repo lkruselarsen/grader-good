@@ -24,6 +24,7 @@ export type {
   PipelineParams,
 } from "./types";
 export { allocPixelFrameF32, pixelFrameF32ToPixelFrameRGBA } from "./types";
+export { pixelFrameF32ToPixelFrameRGBAAsync } from "./yielding-conversions";
 export {
   computeImageStats,
   computeImageStatsFromFloat,
