@@ -32,6 +32,22 @@ ensure_build_tools() {
   ensure_autotools_compat
 }
 
+prepare_bundled_libraw_tree() {
+  local libraw_src="$1"
+  # npm pack does not preserve execute bits; configure.ac runs ./version.sh via m4.
+  find "$libraw_src" -type f \( \
+    -name '*.sh' -o -name 'configure' -o -name 'missing' \
+    -o -name 'install-sh' -o -name 'compile' \
+    -o -name 'config.guess' -o -name 'config.sub' -o -name 'ltmain.sh' \
+  \) -exec chmod +x {} +
+  # Release tarball ships generated autotools output; keep libtool from rebuilding it.
+  if [[ -f "$libraw_src/aclocal.m4" ]]; then
+    touch "$libraw_src/aclocal.m4"
+    [[ -f "$libraw_src/Makefile.in" ]] && touch "$libraw_src/Makefile.in"
+    [[ -f "$libraw_src/configure" ]] && touch "$libraw_src/configure"
+  fi
+}
+
 find_bundled_libraw_src() {
   local base="$ROOT/node_modules/lightdrift-libraw/deps/LibRaw-Source"
   if [[ ! -d "$base" ]]; then
@@ -58,13 +74,15 @@ build_bundled_libraw() {
 
   echo "vercel-install: building bundled LibRaw from $libraw_src"
   ensure_build_tools
+  prepare_bundled_libraw_tree "$libraw_src"
 
   local jobs="${VERCEL_BUILD_CPUS:-2}"
   (
     cd "$libraw_src"
     bash configure --prefix=/usr/local
-    make -j"$jobs"
-    make install
+    [[ -f aclocal.m4 ]] && touch aclocal.m4
+    make -j"$jobs" -o aclocal.m4
+    make install -o aclocal.m4
   )
 }
 
