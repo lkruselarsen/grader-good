@@ -86,13 +86,14 @@ verify_lightdrift() {
 
 rebuild_lightdrift() {
   local pkg="$ROOT/node_modules/lightdrift-libraw"
-  local addon="$pkg/build/Release/libraw_addon.node"
+  local release="$pkg/build/Release"
 
   # binding.gyp lists /usr/include/libraw but not /usr/local/include/libraw
   export CPPFLAGS="-I/usr/local/include/libraw ${CPPFLAGS:-}"
   export CXXFLAGS="-I/usr/local/include/libraw ${CXXFLAGS:-}"
   export LDFLAGS="-L/usr/local/lib -Wl,-rpath,/usr/local/lib ${LDFLAGS:-}"
   export LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH:-}"
+  export npm_config_build_from_source=true
 
   echo "vercel-install: compiling lightdrift-libraw native addon..."
   (
@@ -100,9 +101,14 @@ rebuild_lightdrift() {
     npx --yes node-gyp rebuild
   )
 
-  if [[ ! -f "$addon" ]]; then
-    echo "vercel-install: libraw_addon.node missing after node-gyp rebuild" >&2
-    ls -la "$pkg/build/Release/" 2>/dev/null || ls -la "$pkg/build/" 2>/dev/null || true
+  # node-gyp outputs raw_addon.node; the JS loader expects libraw_addon.node
+  if [[ -f "$release/raw_addon.node" && ! -f "$release/libraw_addon.node" ]]; then
+    ln -sf raw_addon.node "$release/libraw_addon.node"
+  fi
+
+  if [[ ! -f "$release/libraw_addon.node" && ! -f "$release/raw_addon.node" ]]; then
+    echo "vercel-install: native addon missing after node-gyp rebuild" >&2
+    ls -la "$release/" 2>/dev/null || ls -la "$pkg/build/" 2>/dev/null || true
     return 1
   fi
 }
