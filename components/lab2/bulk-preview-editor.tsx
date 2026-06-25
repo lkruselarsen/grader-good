@@ -19,6 +19,7 @@ import {
   scalePngBlob,
 } from "@/lib/lab2/build-export-png-blob";
 import { applyGrainToPngBlob, applyGrainToPreviewPngBlob } from "@/lib/grain/apply-algo2-grain";
+import { DEFAULT_GRAIN_PARAMS } from "@/lib/grain/constants";
 import type { GrainExportParams } from "@/lib/grain/types";
 import {
   applyBulkItemMatch,
@@ -504,6 +505,7 @@ export function BulkPreviewEditor({
               : "grain";
       setGrainExportRequest({
         ...request,
+        withGrain: true,
         filename: makeBulkGrainFilename(suffix),
       });
       setGrainModalOpen(true);
@@ -511,47 +513,67 @@ export function BulkPreviewEditor({
     [makeBulkGrainFilename]
   );
 
-  const runGrainExport = useCallback(
+  const runModalExport = useCallback(
     async (params: GrainExportParams, request: GrainExportRequest) => {
+      const withGrain = request.withGrain !== false;
       const isPreview = request.source === "preview";
       setBusy(true);
       setIsExporting(true);
       setExportProgressPct(5);
       setExportProgressLabel(isPreview ? "Encoding preview" : "Starting export");
       onPatchItem(itemId, {
-        status: isPreview ? "Export preview with grain…" : "Export with grain…",
+        status: withGrain
+          ? isPreview
+            ? "Export preview with grain…"
+            : "Export with grain…"
+          : isPreview
+            ? "Export preview…"
+            : "Export…",
       });
       try {
-        const blob = isPreview
+        let blob = isPreview
           ? await buildPreviewPngBlobFromCanvas(canvasRef.current!)
           : await buildItemExportBlob();
-        setExportProgressPct(isPreview ? 25 : 78);
-        setExportProgressLabel("Applying grain");
-        let grainBlob = isPreview
-          ? await applyGrainToPreviewPngBlob(blob, params, (progress) => {
-              setExportProgressLabel(progress.stage);
-              const grainStart = 25;
-              const grainSpan = 65;
-              setExportProgressPct(
-                grainStart + Math.round(progress.percentage * (grainSpan / 100))
-              );
-            })
-          : await applyGrainToPngBlob(blob, params, (progress) => {
-              setExportProgressLabel(progress.stage);
-              setExportProgressPct(78 + Math.round(progress.percentage * 0.17));
-            });
+
+        if (withGrain) {
+          setExportProgressPct(isPreview ? 25 : 78);
+          setExportProgressLabel("Applying grain");
+          blob = isPreview
+            ? await applyGrainToPreviewPngBlob(blob, params, (progress) => {
+                setExportProgressLabel(progress.stage);
+                const grainStart = 25;
+                const grainSpan = 65;
+                setExportProgressPct(
+                  grainStart + Math.round(progress.percentage * (grainSpan / 100))
+                );
+              })
+            : await applyGrainToPngBlob(blob, params, (progress) => {
+                setExportProgressLabel(progress.stage);
+                setExportProgressPct(78 + Math.round(progress.percentage * 0.17));
+              });
+        }
+
         if (!isPreview && request.scale < 1) {
           setExportProgressLabel(`Downscaling to ${Math.round(request.scale * 100)}%`);
-          setExportProgressPct(96);
-          grainBlob = await scalePngBlob(grainBlob, request.scale);
+          setExportProgressPct(withGrain ? 96 : 88);
+          blob = await scalePngBlob(blob, request.scale);
         }
-        downloadPngBlob(grainBlob, request.filename);
+
+        setExportProgressPct(98);
+        setExportProgressLabel("Downloading");
+        downloadPngBlob(blob, request.filename);
         setExportProgressPct(100);
         setExportProgressLabel("Done");
         onPatchItem(itemId, {
-          status: isPreview
-            ? "Preview grain export downloaded (canvas resolution)."
-            : "Grain export downloaded.",
+          status: withGrain
+            ? isPreview
+              ? "Preview grain export downloaded (canvas resolution)."
+              : "Grain export downloaded."
+            : request.scale < 1
+              ? `Low-res (${Math.round(request.scale * 100)}%) export downloaded.`
+              : isPreview
+                ? "Preview PNG downloaded (canvas resolution)."
+                : "Export downloaded.",
         });
         setGrainModalOpen(false);
         setGrainExportRequest(null);
@@ -570,77 +592,39 @@ export function BulkPreviewEditor({
     [buildItemExportBlob, canvasRef, itemId, onPatchItem]
   );
 
-  const exportPng = useCallback(async () => {
-    setBusy(true);
-    setIsExporting(true);
-    onPatchItem(itemId, { status: "Export…" });
-    try {
-      const blob = await buildItemExportBlob();
-      downloadPngBlob(blob, makeBulkGrainFilename("grade"));
-      onPatchItem(itemId, { status: "Export downloaded." });
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      onPatchItem(itemId, { status: message, error: message });
-    } finally {
-      setIsExporting(false);
-      setBusy(false);
-    }
-  }, [buildItemExportBlob, itemId, makeBulkGrainFilename, onPatchItem]);
+  const startPlainExport = useCallback(
+    (request: Omit<GrainExportRequest, "withGrain" | "filename"> & { filename?: string }) => {
+      const suffix =
+        request.source === "preview"
+          ? "preview"
+          : request.scale === 0.7
+            ? "grade-low"
+            : request.scale === 0.5
+              ? "grade-50"
+              : "grade";
+      const fullRequest: GrainExportRequest = {
+        ...request,
+        withGrain: false,
+        filename: request.filename ?? makeBulkGrainFilename(suffix),
+      };
+      setGrainExportRequest(fullRequest);
+      setGrainModalOpen(true);
+      void runModalExport(DEFAULT_GRAIN_PARAMS, fullRequest);
+    },
+    [makeBulkGrainFilename, runModalExport]
+  );
 
-  const exportPngLow = useCallback(async () => {
-    setBusy(true);
-    setIsExporting(true);
-    onPatchItem(itemId, { status: "Export low (70%)…" });
-    try {
-      const blob = await buildItemExportBlob();
-      const lowBlob = await scalePngBlob(blob, 0.7);
-      downloadPngBlob(lowBlob, makeBulkGrainFilename("grade-low"));
-      onPatchItem(itemId, { status: "Low-res export downloaded." });
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      onPatchItem(itemId, { status: message, error: message });
-    } finally {
-      setIsExporting(false);
-      setBusy(false);
-    }
-  }, [buildItemExportBlob, itemId, makeBulkGrainFilename, onPatchItem]);
+  const exportPng = useCallback(() => {
+    startPlainExport({ scale: 1 });
+  }, [startPlainExport]);
 
-  const exportPng50 = useCallback(async () => {
-    setBusy(true);
-    setIsExporting(true);
-    onPatchItem(itemId, { status: "Export 50%…" });
-    try {
-      const blob = await buildItemExportBlob();
-      const lowBlob = await scalePngBlob(blob, 0.5);
-      downloadPngBlob(lowBlob, makeBulkGrainFilename("grade-50"));
-      onPatchItem(itemId, { status: "50% export downloaded." });
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      onPatchItem(itemId, { status: message, error: message });
-    } finally {
-      setIsExporting(false);
-      setBusy(false);
-    }
-  }, [buildItemExportBlob, itemId, makeBulkGrainFilename, onPatchItem]);
+  const exportPngLow = useCallback(() => {
+    startPlainExport({ scale: 0.7 });
+  }, [startPlainExport]);
 
-  const exportPreviewPng = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) {
-      onPatchItem(itemId, { status: "Nothing to export — preview is empty." });
-      return;
-    }
-    void buildPreviewPngBlobFromCanvas(canvas)
-      .then((blob) => {
-        downloadPngBlob(blob, makeBulkGrainFilename("preview"));
-        onPatchItem(itemId, {
-          status: "Preview PNG downloaded (canvas resolution).",
-        });
-      })
-      .catch((e: unknown) => {
-        const message = e instanceof Error ? e.message : String(e);
-        onPatchItem(itemId, { status: message });
-      });
-  }, [canvasRef, itemId, makeBulkGrainFilename, onPatchItem]);
+  const exportPng50 = useCallback(() => {
+    startPlainExport({ scale: 0.5 });
+  }, [startPlainExport]);
 
   const handleClose = useCallback(() => {
     const look = lookParamsRef.current;
@@ -687,10 +671,12 @@ export function BulkPreviewEditor({
       onClose={handleClose}
       onExportHalationActuanceChange={setExportHalationActuance}
       onApplyHalationActuance={() => {}}
-      onExportPng={() => void exportPng()}
-      onExportPreviewPng={exportPreviewPng}
-      onExportPngLow={() => void exportPngLow()}
-      onExportPng50={() => void exportPng50()}
+      onExportPng={exportPng}
+      onExportPreviewPng={() =>
+        startPlainExport({ source: "preview", scale: 1 })
+      }
+      onExportPngLow={exportPngLow}
+      onExportPng50={exportPng50}
       onOpenGrainExport={openGrainExport}
       controlsProps={{
         lookParams,
@@ -759,7 +745,7 @@ export function BulkPreviewEditor({
         setGrainModalOpen(open);
         if (!open) setGrainExportRequest(null);
       }}
-      onConfirm={(params, request) => void runGrainExport(params, request)}
+        onConfirm={(params, request) => void runModalExport(params, request)}
     />
   </>
   );

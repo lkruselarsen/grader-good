@@ -17,13 +17,15 @@ export type GridStateStyle = {
   shape?: UnitShape;
   customShapeId?: string;
   style: GridUnitStyle;
+  /** Fill/stroke color. Defaults to white when omitted. */
+  color?: string;
 };
 
 export type UnitStateDef = {
   id: string;
   label: string;
   grid?: GridStateStyle;
-  bar?: { fillStyle: BarFillStyle; shape: BarShape };
+  bar?: { fillStyle: BarFillStyle; shape: BarShape; color?: string };
   numbers?: { opacity?: number };
 };
 

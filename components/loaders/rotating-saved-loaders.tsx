@@ -1,9 +1,12 @@
 "use client";
 
-import { memo, useEffect, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import { GridLoader } from "@/components/app/grid-loader";
 import { ConfigurableLoader } from "@/components/loaders/configurable-loader";
+import { useLoaderLoopsOptional } from "@/hooks/use-loader-loops";
 import { useSavedLoadersOptional } from "@/hooks/use-saved-loaders";
+import type { LoaderLoopId } from "@/lib/loaders/loops";
+import { resolvePlaylist } from "@/lib/loaders/loops";
 import { bundleToShapesMap } from "@/lib/loaders/saved-presets";
 import { cn } from "@/lib/utils";
 
@@ -12,15 +15,26 @@ type RotatingSavedLoadersProps = {
   className?: string;
   /** When set, selects the preset by index (phase-driven rotation). */
   presetIndex?: number;
+  /** Playlist to draw from. Falls back to all saved loaders when unset or empty. */
+  loopId?: LoaderLoopId;
+  /** Called when the current animation completes one loop cycle. */
+  onLoopComplete?: () => void;
 };
 
 export const RotatingSavedLoaders = memo(function RotatingSavedLoaders({
   label,
   className,
   presetIndex: presetIndexProp,
+  loopId,
+  onLoopComplete,
 }: RotatingSavedLoadersProps) {
   const savedLoaders = useSavedLoadersOptional();
-  const presets = savedLoaders?.presets ?? [];
+  const loaderLoops = useLoaderLoopsOptional();
+  const allPresets = savedLoaders?.presets ?? [];
+  const presets = useMemo(() => {
+    if (!loopId || !loaderLoops) return allPresets;
+    return resolvePlaylist(loopId, loaderLoops.config, allPresets);
+  }, [allPresets, loopId, loaderLoops]);
   const [internalPresetIndex, setInternalPresetIndex] = useState(0);
 
   useEffect(() => {
@@ -50,6 +64,7 @@ export const RotatingSavedLoaders = memo(function RotatingSavedLoaders({
       label={statusLabel || undefined}
       showLabel={Boolean(statusLabel)}
       className={cn(className)}
+      onLoopComplete={onLoopComplete}
     />
   );
 });

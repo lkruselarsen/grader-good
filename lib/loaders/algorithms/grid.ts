@@ -379,6 +379,308 @@ const islandCount: LoaderAlgorithm = {
   },
 };
 
+const pulsingSun: LoaderAlgorithm = {
+  id: "pulsing-sun",
+  label: "Pulsing sun",
+  vizTypes: ["grid"],
+  minStates: 2,
+  recommendedStates: 3,
+  generateSequence(config, frameCount, unitCount) {
+    const { cols, rows } = getGridDims(config);
+    const active = activeStateIndex(config.stateCount);
+    const corona = config.stateCount >= 3 ? active - 1 : active;
+    const centerCol = (cols - 1) / 2;
+    const centerRow = (rows - 1) / 2;
+    const maxDist = Math.max(cols, rows) * 0.55;
+    const frames: LoaderFrame[] = [];
+
+    for (let f = 0; f < frameCount; f++) {
+      const frame = createFrame(unitCount, INACTIVE);
+      const phase = (f / frameCount) * Math.PI * 2;
+      const radius = maxDist * (0.45 + 0.25 * Math.sin(phase));
+
+      for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < cols; col++) {
+          const dx = col - centerCol;
+          const dy = row - centerRow;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          const idx = gridIndex(col, row, cols);
+
+          if (dist <= radius * 0.65) {
+            frame[idx] = active;
+          } else if (
+            config.stateCount >= 3 &&
+            Math.abs(dist - radius) < 0.75
+          ) {
+            frame[idx] = corona;
+          }
+        }
+      }
+
+      frames.push(frame);
+    }
+
+    return frames;
+  },
+};
+
+const spiralOut: LoaderAlgorithm = {
+  id: "spiral-out",
+  label: "Spiral out",
+  vizTypes: ["grid"],
+  minStates: 2,
+  recommendedStates: 3,
+  generateSequence(config, frameCount, unitCount) {
+    const { cols, rows } = getGridDims(config);
+    const active = activeStateIndex(config.stateCount);
+    const trail = config.stateCount >= 3 ? active - 1 : INACTIVE;
+    const centerCol = (cols - 1) / 2;
+    const centerRow = (rows - 1) / 2;
+    const maxDist = Math.max(cols, rows) * 0.75;
+    const steps: Array<(frame: LoaderFrame) => void> = [];
+    const visited = new Set<number>();
+
+    const samples = Math.max(cols, rows) * 24;
+    for (let s = 0; s <= samples; s++) {
+      const t = (s / samples) * maxDist * Math.PI * 1.5;
+      const r = t * 0.35;
+      const angle = t;
+      const col = Math.round(centerCol + r * Math.cos(angle));
+      const row = Math.round(centerRow + r * Math.sin(angle));
+
+      if (col < 0 || col >= cols || row < 0 || row >= rows) continue;
+      const idx = gridIndex(col, row, cols);
+      if (visited.has(idx)) continue;
+      visited.add(idx);
+
+      const captured = idx;
+      steps.push((frame) => {
+        for (let i = 0; i < unitCount; i++) {
+          if (frame[i] === active) frame[i] = trail;
+        }
+        frame[captured] = active;
+      });
+    }
+
+    return distributeSteps(steps, frameCount, unitCount);
+  },
+};
+
+const ringWave: LoaderAlgorithm = {
+  id: "ring-wave",
+  label: "Ring wave",
+  vizTypes: ["grid"],
+  minStates: 2,
+  recommendedStates: 3,
+  generateSequence(config, frameCount, unitCount) {
+    const { cols, rows } = getGridDims(config);
+    const active = activeStateIndex(config.stateCount);
+    const peak = config.stateCount >= 3 ? active - 1 : active;
+    const centerCol = (cols - 1) / 2;
+    const centerRow = (rows - 1) / 2;
+    const frames: LoaderFrame[] = [];
+
+    for (let f = 0; f < frameCount; f++) {
+      const frame = createFrame(unitCount, INACTIVE);
+      const phase = (f / frameCount) * Math.PI * 2;
+
+      for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < cols; col++) {
+          const dx = col - centerCol;
+          const dy = row - centerRow;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          const waveOffset = Math.sin(col * 0.55 + phase) * 1.2;
+          const ringRadius = 1.5 + ((phase / (Math.PI * 2)) * Math.max(cols, rows) * 0.55) % (Math.max(cols, rows) * 0.55);
+          const idx = gridIndex(col, row, cols);
+          const ringDist = Math.abs(dist + waveOffset - ringRadius);
+
+          if (ringDist < 0.45) {
+            frame[idx] = active;
+          } else if (config.stateCount >= 3 && ringDist < 0.9) {
+            frame[idx] = peak;
+          }
+        }
+      }
+
+      frames.push(frame);
+    }
+
+    return frames;
+  },
+};
+
+const staticNoise: LoaderAlgorithm = {
+  id: "static-noise",
+  label: "Static noise",
+  vizTypes: ["grid"],
+  minStates: 2,
+  recommendedStates: 3,
+  generateSequence(config, frameCount, unitCount) {
+    const { cols, rows } = getGridDims(config);
+    const active = activeStateIndex(config.stateCount);
+    const mid = config.stateCount >= 3 ? active - 1 : INACTIVE;
+    const frames: LoaderFrame[] = [];
+
+    for (let f = 0; f < frameCount; f++) {
+      const frame = createFrame(unitCount, INACTIVE);
+      const rand = seededRandom(f * 7919 + cols * 13 + rows);
+
+      for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < cols; col++) {
+          const idx = gridIndex(col, row, cols);
+          const v = rand();
+
+          if (v > 0.72) {
+            frame[idx] = active;
+          } else if (config.stateCount >= 3 && v > 0.45) {
+            frame[idx] = mid;
+          }
+        }
+      }
+
+      frames.push(frame);
+    }
+
+    return frames;
+  },
+};
+
+const columnWave: LoaderAlgorithm = {
+  id: "column-wave",
+  label: "Column wave",
+  vizTypes: ["grid"],
+  minStates: 2,
+  recommendedStates: 3,
+  generateSequence(config, frameCount, unitCount) {
+    const { cols, rows } = getGridDims(config);
+    const active = activeStateIndex(config.stateCount);
+    const peak = config.stateCount >= 3 ? active - 1 : active;
+    const frames: LoaderFrame[] = [];
+
+    for (let f = 0; f < frameCount; f++) {
+      const frame = createFrame(unitCount, INACTIVE);
+      const phase = (f / frameCount) * Math.PI * 2;
+
+      for (let col = 0; col < cols; col++) {
+        const wave = Math.sin(col * 0.65 + phase);
+        const fillRow = Math.round((rows - 1) * (0.5 + 0.42 * wave));
+
+        for (let row = 0; row < rows; row++) {
+          const idx = gridIndex(col, row, cols);
+          if (row >= fillRow) {
+            frame[idx] = active;
+          } else if (
+            config.stateCount >= 3 &&
+            row === fillRow - 1
+          ) {
+            frame[idx] = peak;
+          }
+        }
+      }
+
+      frames.push(frame);
+    }
+
+    return frames;
+  },
+};
+
+const dnaHelix: LoaderAlgorithm = {
+  id: "dna-helix",
+  label: "DNA helix",
+  vizTypes: ["grid"],
+  minStates: 2,
+  recommendedStates: 4,
+  generateSequence(config, frameCount, unitCount) {
+    const { cols, rows } = getGridDims(config);
+    const strandA = activeStateIndex(config.stateCount);
+    const strandB = config.stateCount >= 3 ? strandA - 1 : strandA;
+    const rung = config.stateCount >= 4 ? strandB - 1 : INACTIVE;
+    const centerRow = (rows - 1) / 2;
+    const amplitude = (rows - 1) * 0.38;
+    const frames: LoaderFrame[] = [];
+
+    for (let f = 0; f < frameCount; f++) {
+      const frame = createFrame(unitCount, INACTIVE);
+      const phase = (f / frameCount) * Math.PI * 2;
+
+      for (let col = 0; col < cols; col++) {
+        const y1 = centerRow + amplitude * Math.sin(col * 0.55 + phase);
+        const y2 = centerRow + amplitude * Math.sin(col * 0.55 + phase + Math.PI);
+        const row1 = Math.round(y1);
+        const row2 = Math.round(y2);
+
+        if (row1 >= 0 && row1 < rows) {
+          frame[gridIndex(col, row1, cols)] = strandA;
+        }
+        if (row2 >= 0 && row2 < rows) {
+          frame[gridIndex(col, row2, cols)] = strandB;
+        }
+
+        if (config.stateCount >= 4 && col % 3 === 0) {
+          const low = Math.min(row1, row2);
+          const high = Math.max(row1, row2);
+          for (let row = low + 1; row < high; row++) {
+            if (row >= 0 && row < rows) {
+              frame[gridIndex(col, row, cols)] = rung;
+            }
+          }
+        }
+      }
+
+      frames.push(frame);
+    }
+
+    return frames;
+  },
+};
+
+const ripple: LoaderAlgorithm = {
+  id: "ripple",
+  label: "Ripple",
+  vizTypes: ["grid"],
+  minStates: 2,
+  recommendedStates: 3,
+  generateSequence(config, frameCount, unitCount) {
+    const { cols, rows } = getGridDims(config);
+    const active = activeStateIndex(config.stateCount);
+    const trail = config.stateCount >= 3 ? active - 1 : INACTIVE;
+    const centerCol = (cols - 1) / 2;
+    const centerRow = (rows - 1) / 2;
+    const maxDist = Math.sqrt(centerCol * centerCol + centerRow * centerRow) + 1;
+    const frames: LoaderFrame[] = [];
+
+    for (let f = 0; f < frameCount; f++) {
+      const frame = createFrame(unitCount, INACTIVE);
+      const phase = (f / frameCount) * maxDist;
+      const ring = phase % maxDist;
+      const trailRing = (ring - maxDist * 0.18 + maxDist) % maxDist;
+
+      for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < cols; col++) {
+          const dx = col - centerCol;
+          const dy = row - centerRow;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          const idx = gridIndex(col, row, cols);
+
+          if (Math.abs(dist - ring) < 0.55) {
+            frame[idx] = active;
+          } else if (
+            config.stateCount >= 3 &&
+            Math.abs(dist - trailRing) < 0.45
+          ) {
+            frame[idx] = trail;
+          }
+        }
+      }
+
+      frames.push(frame);
+    }
+
+    return frames;
+  },
+};
+
 export function registerGridAlgorithms(): void {
   registerAlgorithm(cumulativeFill);
   registerAlgorithm(sinWave);
@@ -387,4 +689,11 @@ export function registerGridAlgorithms(): void {
   registerAlgorithm(dfs);
   registerAlgorithm(astar);
   registerAlgorithm(islandCount);
+  registerAlgorithm(pulsingSun);
+  registerAlgorithm(spiralOut);
+  registerAlgorithm(ringWave);
+  registerAlgorithm(staticNoise);
+  registerAlgorithm(columnWave);
+  registerAlgorithm(dnaHelix);
+  registerAlgorithm(ripple);
 }

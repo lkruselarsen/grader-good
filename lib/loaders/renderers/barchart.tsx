@@ -1,21 +1,15 @@
+import type { CSSProperties } from "react";
 import type { BarFillStyle, BarShape, UnitStateDef } from "../types";
+import { resolveUnitColor } from "../color";
 import { cn } from "@/lib/utils";
-import { seededRandom } from "../algorithms/utils";
-
-function barHeight(index: number, barCount: number, seed: number): number {
-  const rand = seededRandom(seed);
-  const heights = Array.from({ length: barCount }, (_, i) =>
-    Math.floor(rand() * 60) + 25 + (i % 3) * 8
-  );
-  return heights[index] ?? 50;
-}
+import { barHeightPercent } from "../algorithms/utils";
 
 function barClasses(fillStyle: BarFillStyle, shape: BarShape): string {
   const fillMap: Record<BarFillStyle, string> = {
-    fill: "bg-primary",
-    stroke: "bg-transparent border border-primary",
+    fill: "bg-transparent",
+    stroke: "bg-transparent border",
     "gray-fill": "bg-muted",
-    "dashed-fill": "bg-transparent border border-dashed border-primary",
+    "dashed-fill": "bg-transparent border border-dashed",
   };
   const shapeMap: Record<BarShape, string> = {
     thin: "w-0.5",
@@ -23,6 +17,19 @@ function barClasses(fillStyle: BarFillStyle, shape: BarShape): string {
     dumbbell: "w-1/2",
   };
   return cn(fillMap[fillStyle], shapeMap[shape]);
+}
+
+function barColorStyle(
+  fillStyle: BarFillStyle,
+  color?: string
+): CSSProperties | undefined {
+  if (fillStyle === "gray-fill") return undefined;
+
+  const resolved = resolveUnitColor(color);
+  if (fillStyle === "fill") {
+    return { backgroundColor: resolved };
+  }
+  return { borderColor: resolved };
 }
 
 type BarChartLoaderViewProps = {
@@ -53,8 +60,9 @@ export function BarChartLoaderView({
         const stateIdx = stateIndices[i] ?? 0;
         const stateDef = states[stateIdx] ?? states[0];
         const bar = stateDef.bar ?? { fillStyle: "fill" as BarFillStyle, shape: "fat" as BarShape };
-        const heightPct = barHeight(i, barCount, 42);
+        const heightPct = barHeightPercent(i, barCount, 42);
         const isInactive = stateIdx === 0;
+        const colorStyle = barColorStyle(bar.fillStyle, bar.color);
 
         return (
           <div
@@ -69,6 +77,7 @@ export function BarChartLoaderView({
                     barClasses(bar.fillStyle, "fat"),
                     isInactive && "opacity-20"
                   )}
+                  style={colorStyle}
                 />
                 <div
                   className={cn(
@@ -76,6 +85,7 @@ export function BarChartLoaderView({
                     barClasses(bar.fillStyle, "thin"),
                     isInactive && "opacity-20"
                   )}
+                  style={colorStyle}
                 />
                 <div
                   className={cn(
@@ -83,6 +93,7 @@ export function BarChartLoaderView({
                     barClasses(bar.fillStyle, "fat"),
                     isInactive && "opacity-20"
                   )}
+                  style={colorStyle}
                 />
               </div>
             ) : (
@@ -92,7 +103,7 @@ export function BarChartLoaderView({
                   barClasses(bar.fillStyle, bar.shape),
                   isInactive && "opacity-20"
                 )}
-                style={{ height: `${heightPct}%` }}
+                style={{ height: `${heightPct}%`, ...colorStyle }}
               />
             )}
           </div>

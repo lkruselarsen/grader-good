@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -14,7 +13,7 @@ import {
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
-import { ProgressWithLabel } from "@/components/app/progress-with-label";
+import { ExportStatusLoader } from "@/components/lab2/export-status-loader";
 import {
   DEFAULT_GRAIN_PARAMS,
   loadGrainParamsFromStorage,
@@ -31,6 +30,8 @@ export type GrainExportRequest = {
   filename: string;
   /** Full-res export pipeline (default) or preview canvas only. */
   source?: GrainExportSource;
+  /** When false, skip grain controls and export the graded image only. */
+  withGrain?: boolean;
 };
 
 type GrainOptionsDialogProps = {
@@ -68,6 +69,7 @@ export function GrainOptionsDialog({
   }, []);
 
   const isPreview = request?.source === "preview";
+  const withGrain = request?.withGrain !== false;
   const scaleLabel =
     request?.scale === 0.7
       ? "70%"
@@ -75,22 +77,40 @@ export function GrainOptionsDialog({
         ? "50%"
         : "full resolution";
 
-  const dialogTitle = isPreview ? "Export preview with grain" : "Export with grain";
-  const dialogDescription = isPreview
-    ? "Preview is temporarily upscaled so pointillist grain matches full exports, then returned to canvas resolution."
-    : `Film grain is applied after the full-resolution grade export${
-        request ? ` (${scaleLabel})` : ""
-      }.`;
+  const dialogTitle = isExporting
+    ? "Exporting…"
+    : withGrain
+      ? isPreview
+        ? "Export preview with grain"
+        : "Export with grain"
+      : isPreview
+        ? "Export preview"
+        : "Export";
+
+  const dialogDescription = isExporting
+    ? undefined
+    : withGrain
+      ? isPreview
+        ? "Preview is temporarily upscaled so pointillist grain matches full exports, then returned to canvas resolution."
+        : `Film grain is applied after the full-resolution grade export${
+            request ? ` (${scaleLabel})` : ""
+          }.`
+      : isPreview
+        ? "Downloads the current preview canvas at canvas resolution."
+        : `Full-resolution grade export${request ? ` (${scaleLabel})` : ""}.`;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md" showCloseButton={!isExporting}>
         <DialogHeader>
           <DialogTitle>{dialogTitle}</DialogTitle>
-          <DialogDescription>{dialogDescription}</DialogDescription>
+          {dialogDescription ? (
+            <DialogDescription>{dialogDescription}</DialogDescription>
+          ) : null}
         </DialogHeader>
 
-        <div className="space-y-4 py-2">
+        {withGrain && !isExporting ? (
+          <div className="space-y-4 py-2">
           <div className="flex items-center gap-3">
             <Checkbox
               id="fine-grain-enabled"
@@ -171,13 +191,16 @@ export function GrainOptionsDialog({
             </p>
           </div>
         </div>
+        ) : null}
 
-        {isExporting && (
-          <ProgressWithLabel
-            value={exportProgressPct}
-            label={`${exportProgressLabel || "Exporting"} (${Math.round(exportProgressPct)}%)`}
-          />
-        )}
+        {isExporting ? (
+          <div className="flex min-h-[140px] items-center justify-center py-2">
+            <ExportStatusLoader
+              label={`${exportProgressLabel || "Exporting"} (${Math.round(exportProgressPct)}%)`}
+              className="w-full"
+            />
+          </div>
+        ) : null}
 
         <DialogFooter>
           <Button
@@ -188,23 +211,18 @@ export function GrainOptionsDialog({
           >
             Cancel
           </Button>
-          <Button
-            type="button"
-            disabled={!request || isExporting}
-            onClick={() => {
-              if (!request) return;
-              onConfirm(params, request);
-            }}
-          >
-            {isExporting ? (
-              <>
-                <Loader2 className="animate-spin" />
-                Exporting…
-              </>
-            ) : (
-              "Export"
-            )}
-          </Button>
+          {withGrain ? (
+            <Button
+              type="button"
+              disabled={!request || isExporting}
+              onClick={() => {
+                if (!request) return;
+                onConfirm(params, request);
+              }}
+            >
+              Export
+            </Button>
+          ) : null}
         </DialogFooter>
       </DialogContent>
     </Dialog>

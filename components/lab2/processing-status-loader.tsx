@@ -59,6 +59,7 @@ export const ProcessingStatusLoader = memo(function ProcessingStatusLoader({
 
   return (
     <RotatingSavedLoaders
+      loopId="processing"
       label={label}
       className={className}
       presetIndex={presetIndex}

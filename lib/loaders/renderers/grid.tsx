@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import type { CustomGridShape } from "../custom-shapes/types";
+import { resolveUnitColor } from "../color";
 import type { GridUnitStyle, UnitShape, UnitStateDef } from "../types";
 import { cn } from "@/lib/utils";
 
@@ -126,6 +127,7 @@ export function GridUnit({
     style: "fill" as GridUnitStyle,
   };
 
+  const unitColor = resolveUnitColor(gridStyle.color);
   const customShape = gridStyle.customShapeId
     ? customShapes?.[gridStyle.customShapeId]
     : undefined;
@@ -145,11 +147,14 @@ export function GridUnit({
       height={height}
       viewBox={viewBox}
       className={cn(
-        "text-primary transition-opacity duration-150",
+        "transition-opacity duration-150",
         missingCustom && "opacity-30",
         className
       )}
-      style={{ opacity: missingCustom ? opacity * 0.5 : opacity }}
+      style={{
+        color: unitColor,
+        opacity: missingCustom ? opacity * 0.5 : opacity,
+      }}
       aria-hidden
     >
       {missingCustom

@@ -9,7 +9,6 @@ import {
   PanelSidebarProvider,
   usePanelSidebar,
 } from "@/components/app/panel-sidebar";
-import { ProgressWithLabel } from "@/components/app/progress-with-label";
 import { Lab2ControlsPanel } from "@/components/lab2/lab2-controls-panel";
 import { Button } from "@/components/ui/button";
 import {
@@ -334,9 +333,6 @@ export function Lab2PreviewModal({
           </div>
           {status && (
             <p className="text-xs text-muted-foreground max-w-md text-center">{status}</p>
-          )}
-          {isExporting && (
-            <ProgressWithLabel indeterminate label="Exporting…" className="w-64" />
           )}
         </ModalPreviewViewport>
         <PanelSidebar collapsible="offcanvas">

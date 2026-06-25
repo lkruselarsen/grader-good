@@ -24,6 +24,7 @@ import type {
   UnitShape,
   UnitStateDef,
 } from "@/lib/loaders/types";
+import { LoaderUnitColorPicker } from "./loader-unit-color-picker";
 
 const GRID_SHAPES: { value: UnitShape; label: string }[] = [
   { value: "rectangle", label: "Rectangle" },
@@ -119,7 +120,11 @@ export function StateStyleEditor({
     if (decoded.customShapeId) {
       onChange({
         ...state,
-        grid: { customShapeId: decoded.customShapeId, style },
+        grid: {
+          customShapeId: decoded.customShapeId,
+          style,
+          color: state.grid?.color,
+        },
       });
       return;
     }
@@ -129,6 +134,7 @@ export function StateStyleEditor({
       grid: {
         shape: (decoded.shape ?? "rectangle") as UnitShape,
         style,
+        color: state.grid?.color,
       },
     });
   };
@@ -149,7 +155,7 @@ export function StateStyleEditor({
       </div>
 
       {vizType === "grid" ? (
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-3 gap-3">
           <div className="space-y-1.5">
             <Label className="text-xs">Shape</Label>
             <Select
@@ -206,10 +212,15 @@ export function StateStyleEditor({
                   onChange({
                     ...state,
                     grid: state.grid?.customShapeId
-                      ? { customShapeId: state.grid.customShapeId, style }
+                      ? {
+                          customShapeId: state.grid.customShapeId,
+                          style,
+                          color: state.grid.color,
+                        }
                       : {
                           shape: state.grid?.shape ?? "rectangle",
                           style,
+                          color: state.grid?.color,
                         },
                   })
                 }
@@ -228,6 +239,31 @@ export function StateStyleEditor({
               </Select>
             )}
           </div>
+          {!isPngCustom ? (
+            <div className="space-y-1.5">
+              <Label className="text-xs">Color</Label>
+              <LoaderUnitColorPicker
+                value={state.grid?.color}
+                onChange={(color) =>
+                  onChange({
+                    ...state,
+                    grid: state.grid?.customShapeId
+                      ? {
+                          customShapeId: state.grid.customShapeId,
+                          style: state.grid.style ?? "fill",
+                          color,
+                        }
+                      : {
+                          shape: state.grid?.shape ?? "rectangle",
+                          style: state.grid?.style ?? "fill",
+                          color,
+                        },
+                  })
+                }
+                disabled={disabled}
+              />
+            </div>
+          ) : null}
         </div>
       ) : null}
 
@@ -243,6 +279,7 @@ export function StateStyleEditor({
                   bar: {
                     fillStyle,
                     shape: state.bar?.shape ?? "fat",
+                    color: state.bar?.color,
                   },
                 })
               }
@@ -260,7 +297,33 @@ export function StateStyleEditor({
               </SelectContent>
             </Select>
           </div>
-          <div className="space-y-1.5">
+          {state.bar?.fillStyle !== "gray-fill" ? (
+            <div className="space-y-1.5">
+              <Label className="text-xs">Color</Label>
+              <LoaderUnitColorPicker
+                value={state.bar?.color}
+                onChange={(color) =>
+                  onChange({
+                    ...state,
+                    bar: {
+                      fillStyle: state.bar?.fillStyle ?? "fill",
+                      shape: state.bar?.shape ?? "fat",
+                      color,
+                    },
+                  })
+                }
+                disabled={disabled}
+              />
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              <Label className="text-xs">Color</Label>
+              <p className="flex h-8 items-center text-xs text-muted-foreground">
+                Uses theme gray
+              </p>
+            </div>
+          )}
+          <div className="col-span-2 space-y-1.5">
             <Label className="text-xs">Bar shape</Label>
             <Select
               value={state.bar?.shape ?? "fat"}
@@ -270,6 +333,7 @@ export function StateStyleEditor({
                   bar: {
                     fillStyle: state.bar?.fillStyle ?? "fill",
                     shape,
+                    color: state.bar?.color,
                   },
                 })
               }
