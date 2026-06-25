@@ -4,18 +4,11 @@ import type { LoaderFrame } from "../types";
 import {
   createFrame,
   distributeSteps,
-  seededRandom,
+  makeBarHeights,
 } from "./utils";
 
 function activeStateIndex(stateCount: number): number {
   return stateCount - 1;
-}
-
-function makeBarHeights(barCount: number, seed: number): number[] {
-  const rand = seededRandom(seed);
-  return Array.from({ length: barCount }, (_, i) =>
-    Math.floor(rand() * 80) + 20 + (i % 3) * 5
-  );
 }
 
 function swapStep(
@@ -55,7 +48,8 @@ function finishSwap(
 const stalinSort: LoaderAlgorithm = {
   id: "stalin-sort",
   label: "Stalin sort",
-  vizTypes: ["barchart"],
+  vizTypes: ["grid", "barchart"],
+  unitDimension: "bars",
   minStates: 3,
   recommendedStates: 4,
   generateSequence(config, frameCount, unitCount) {
@@ -98,7 +92,8 @@ const stalinSort: LoaderAlgorithm = {
 const gnomeSort: LoaderAlgorithm = {
   id: "gnome-sort",
   label: "Gnome sort",
-  vizTypes: ["barchart"],
+  vizTypes: ["grid", "barchart"],
+  unitDimension: "bars",
   minStates: 3,
   recommendedStates: 4,
   generateSequence(config, frameCount, unitCount) {
@@ -135,7 +130,8 @@ const gnomeSort: LoaderAlgorithm = {
 const quicksort: LoaderAlgorithm = {
   id: "quicksort",
   label: "Quick sort",
-  vizTypes: ["barchart"],
+  vizTypes: ["grid", "barchart"],
+  unitDimension: "bars",
   minStates: 4,
   recommendedStates: 5,
   generateSequence(config, frameCount, unitCount) {

@@ -174,7 +174,11 @@ export function LoaderLabControls({
     if (!state) return;
     updateState(uploadTargetStateIndex, {
       ...state,
-      grid: { customShapeId: shape.id, style: state.grid?.style ?? "fill" },
+      grid: {
+        customShapeId: shape.id,
+        style: state.grid?.style ?? "fill",
+        color: state.grid?.color,
+      },
     });
     setUploadTargetStateIndex(null);
   };
@@ -194,6 +198,7 @@ export function LoaderLabControls({
           grid: {
             shape: "rectangle" as const,
             style: state.grid.style ?? ("fill" as const),
+            color: state.grid.color,
           },
         };
       });

@@ -46,6 +46,7 @@ import {
   type GrainExportRequest,
 } from "@/components/grain/grain-options-dialog";
 import { applyGrainToPngBlob, applyGrainToPreviewPngBlob } from "@/lib/grain/apply-algo2-grain";
+import { DEFAULT_GRAIN_PARAMS } from "@/lib/grain/constants";
 import type { GrainExportParams } from "@/lib/grain/types";
 import {
   applyLivePostModel2OnlyWithState,
@@ -1611,115 +1612,6 @@ export default function Lab2Page() {
 
   const downloadBlob = downloadPngBlob;
 
-  /** Encodes the current preview canvas only (no full-res pipeline). Long edge ≤ PREVIEW_MAX_EDGE. */
-  const exportPreviewPng = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) {
-      setStatus("Nothing to export — preview is empty.");
-      return;
-    }
-    void buildPreviewPngBlobFromCanvas(canvas)
-      .then((blob) => {
-        downloadBlob(blob, "lab2-grade-preview.png");
-        setStatus("Preview PNG downloaded (fast; canvas resolution).");
-      })
-      .catch((e: unknown) => {
-        setStatus(e instanceof Error ? e.message : String(e));
-      });
-  }, [downloadBlob]);
-
-  const exportPng = useCallback(async () => {
-    setBusy(true);
-    setIsExporting(true);
-    setExportProgressPct(5);
-    setExportProgressLabel("Starting export");
-    setStatus("Export…");
-    try {
-      await nextPaint();
-      const blob = await buildExportPngBlob();
-      setExportProgressPct(95);
-      setExportProgressLabel("Downloading");
-      await nextPaint();
-      downloadBlob(blob, "lab2-grade.png");
-      setExportProgressPct(100);
-      setExportProgressLabel("Done");
-      setStatus("Export downloaded.");
-    } catch (e) {
-      setStatus(e instanceof Error ? e.message : String(e));
-    } finally {
-      window.setTimeout(() => {
-        setExportProgressPct(0);
-        setExportProgressLabel("");
-        setIsExporting(false);
-      }, 300);
-      setBusy(false);
-    }
-  }, [buildExportPngBlob, downloadBlob, nextPaint]);
-
-  const exportPngLow = useCallback(async () => {
-    setBusy(true);
-    setIsExporting(true);
-    setExportProgressPct(5);
-    setExportProgressLabel("Starting export");
-    setStatus("Export low (70%)…");
-    try {
-      await nextPaint();
-      const blob = await buildExportPngBlob();
-      setExportProgressPct(88);
-      setExportProgressLabel("Downscaling to 70%");
-      await nextPaint();
-      const lowBlob = await scalePngBlob(blob, 0.7);
-      setExportProgressPct(95);
-      setExportProgressLabel("Downloading");
-      await nextPaint();
-      downloadBlob(lowBlob, "lab2-grade-low.png");
-      setExportProgressPct(100);
-      setExportProgressLabel("Done");
-      setStatus("Low-res export downloaded.");
-    } catch (e) {
-      setStatus(e instanceof Error ? e.message : String(e));
-    } finally {
-      window.setTimeout(() => {
-        setExportProgressPct(0);
-        setExportProgressLabel("");
-        setIsExporting(false);
-      }, 300);
-      setBusy(false);
-    }
-  }, [buildExportPngBlob, downloadBlob, scalePngBlob, nextPaint]);
-
-  const exportPng50 = useCallback(async () => {
-    setBusy(true);
-    setIsExporting(true);
-    setExportProgressPct(5);
-    setExportProgressLabel("Starting export");
-    setStatus("Export 50%…");
-    try {
-      await nextPaint();
-      const blob = await buildExportPngBlob();
-      setExportProgressPct(88);
-      setExportProgressLabel("Downscaling to 50%");
-      await nextPaint();
-      const lowBlob = await scalePngBlob(blob, 0.5);
-      setExportProgressPct(95);
-      setExportProgressLabel("Downloading");
-      await nextPaint();
-      downloadBlob(lowBlob, "lab2-grade-50.png");
-      setExportProgressPct(100);
-      setExportProgressLabel("Done");
-      setStatus("50% export downloaded.");
-    } catch (e) {
-      setStatus(e instanceof Error ? e.message : String(e));
-    } finally {
-      window.setTimeout(() => {
-        setExportProgressPct(0);
-        setExportProgressLabel("");
-        setIsExporting(false);
-      }, 300);
-      setBusy(false);
-    }
-  }, [buildExportPngBlob, downloadBlob, scalePngBlob, nextPaint]);
-
   const exportAllZip = useCallback(async (lowScale: number) => {
     const currentItems = bulkItemsRef.current;
     if (!currentItems.length) {
@@ -1782,56 +1674,76 @@ export default function Lab2Page() {
   }, [buildExportPngBlobFromItem, downloadBlob, nextPaint, scalePngBlob]);
 
   const openGrainExport = useCallback((request: GrainExportRequest) => {
-    setGrainExportRequest(request);
+    setGrainExportRequest({ ...request, withGrain: true });
     setGrainModalOpen(true);
   }, []);
 
-  const runGrainExport = useCallback(
+  const runModalExport = useCallback(
     async (params: GrainExportParams, request: GrainExportRequest) => {
+      const withGrain = request.withGrain !== false;
       const isPreview = request.source === "preview";
       setBusy(true);
       setIsExporting(true);
       setExportProgressPct(5);
       setExportProgressLabel(isPreview ? "Encoding preview" : "Starting export");
-      setStatus(isPreview ? "Export preview with grain…" : "Export with grain…");
+      setStatus(
+        withGrain
+          ? isPreview
+            ? "Export preview with grain…"
+            : "Export with grain…"
+          : isPreview
+            ? "Export preview…"
+            : "Export…"
+      );
       try {
         await nextPaint();
         const canvas = canvasRef.current;
-        const blob = isPreview
+        let blob = isPreview
           ? await buildPreviewPngBlobFromCanvas(canvas!)
           : await buildExportPngBlob();
-        setExportProgressPct(isPreview ? 25 : 78);
-        setExportProgressLabel("Applying grain");
-        await nextPaint();
-        let grainBlob = isPreview
-          ? await applyGrainToPreviewPngBlob(blob, params, (progress) => {
-              setExportProgressLabel(progress.stage);
-              const grainStart = 25;
-              const grainSpan = 65;
-              setExportProgressPct(
-                grainStart + Math.round(progress.percentage * (grainSpan / 100))
-              );
-            })
-          : await applyGrainToPngBlob(blob, params, (progress) => {
-              setExportProgressLabel(progress.stage);
-              setExportProgressPct(78 + Math.round(progress.percentage * 0.17));
-            });
+
+        if (withGrain) {
+          setExportProgressPct(isPreview ? 25 : 78);
+          setExportProgressLabel("Applying grain");
+          await nextPaint();
+          blob = isPreview
+            ? await applyGrainToPreviewPngBlob(blob, params, (progress) => {
+                setExportProgressLabel(progress.stage);
+                const grainStart = 25;
+                const grainSpan = 65;
+                setExportProgressPct(
+                  grainStart + Math.round(progress.percentage * (grainSpan / 100))
+                );
+              })
+            : await applyGrainToPngBlob(blob, params, (progress) => {
+                setExportProgressLabel(progress.stage);
+                setExportProgressPct(78 + Math.round(progress.percentage * 0.17));
+              });
+        }
+
         if (!isPreview && request.scale < 1) {
           setExportProgressLabel(`Downscaling to ${Math.round(request.scale * 100)}%`);
-          setExportProgressPct(96);
+          setExportProgressPct(withGrain ? 96 : 88);
           await nextPaint();
-          grainBlob = await scalePngBlob(grainBlob, request.scale);
+          blob = await scalePngBlob(blob, request.scale);
         }
+
         setExportProgressPct(98);
         setExportProgressLabel("Downloading");
         await nextPaint();
-        downloadBlob(grainBlob, request.filename);
+        downloadBlob(blob, request.filename);
         setExportProgressPct(100);
         setExportProgressLabel("Done");
         setStatus(
-          isPreview
-            ? "Preview grain export downloaded (canvas resolution)."
-            : "Grain export downloaded."
+          withGrain
+            ? isPreview
+              ? "Preview grain export downloaded (canvas resolution)."
+              : "Grain export downloaded."
+            : request.scale < 1
+              ? `Low-res (${Math.round(request.scale * 100)}%) export downloaded.`
+              : isPreview
+                ? "Preview PNG downloaded (canvas resolution)."
+                : "Export downloaded."
         );
         setGrainModalOpen(false);
         setGrainExportRequest(null);
@@ -1846,8 +1758,38 @@ export default function Lab2Page() {
         setBusy(false);
       }
     },
-    [buildExportPngBlob, downloadBlob, nextPaint]
+    [buildExportPngBlob, downloadBlob, nextPaint, scalePngBlob]
   );
+
+  const startPlainExport = useCallback(
+    (request: Omit<GrainExportRequest, "withGrain">) => {
+      const fullRequest: GrainExportRequest = { ...request, withGrain: false };
+      setGrainExportRequest(fullRequest);
+      setGrainModalOpen(true);
+      void runModalExport(DEFAULT_GRAIN_PARAMS, fullRequest);
+    },
+    [runModalExport]
+  );
+
+  const exportPng = useCallback(() => {
+    startPlainExport({ scale: 1, filename: "lab2-grade.png" });
+  }, [startPlainExport]);
+
+  const exportPngLow = useCallback(() => {
+    startPlainExport({ scale: 0.7, filename: "lab2-grade-low.png" });
+  }, [startPlainExport]);
+
+  const exportPng50 = useCallback(() => {
+    startPlainExport({ scale: 0.5, filename: "lab2-grade-50.png" });
+  }, [startPlainExport]);
+
+  const exportPreviewPng = useCallback(() => {
+    startPlainExport({
+      source: "preview",
+      scale: 1,
+      filename: "lab2-grade-preview.png",
+    });
+  }, [startPlainExport]);
 
   const updateMatch = <K extends keyof LookParamsT["match"]>(
     key: K,
@@ -1983,12 +1925,6 @@ export default function Lab2Page() {
               <p className="text-[11px] text-muted-foreground">
                 Expensive sliders render on pointer-up for responsiveness.
               </p>
-            )}
-            {isExporting && (
-              <ProgressWithLabel
-                value={exportProgressPct}
-                label={`Export: ${exportProgressLabel || "Working"} (${Math.round(exportProgressPct)}%)`}
-              />
             )}
             <p className="text-xs text-muted-foreground">{status}</p>
             {showPerfDebug && lastRenderTelemetry && (
@@ -2224,7 +2160,7 @@ export default function Lab2Page() {
           setGrainModalOpen(open);
           if (!open) setGrainExportRequest(null);
         }}
-        onConfirm={(params, request) => void runGrainExport(params, request)}
+        onConfirm={(params, request) => void runModalExport(params, request)}
       />
     </>
   );

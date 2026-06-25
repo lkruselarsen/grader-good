@@ -2,10 +2,14 @@ import type { LoaderDefinition } from "../types";
 import type { LoaderFrame } from "../types";
 import type { LoaderVizType } from "../types";
 
+export type LoaderUnitDimension = "bars" | "cells";
+
 export type LoaderAlgorithm = {
   id: string;
   label: string;
   vizTypes: LoaderVizType[];
+  /** Bars = one index per column/bar; cells = one index per grid cell (default). */
+  unitDimension?: LoaderUnitDimension;
   minStates: number;
   recommendedStates?: number;
   generateSequence: (

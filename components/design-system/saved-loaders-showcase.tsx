@@ -5,7 +5,11 @@ import { Copy, ExternalLink, Trash2 } from "lucide-react";
 import { EmptyState } from "@/components/app/empty-state";
 import { ConfigurableLoader } from "@/components/loaders/configurable-loader";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
+import { useLoaderLoops } from "@/hooks/use-loader-loops";
 import { useSavedLoaders } from "@/hooks/use-saved-loaders";
+import { LOADER_LOOP_LABELS, type LoaderLoopId } from "@/lib/loaders/loops";
 import {
   bundleToShapesMap,
   LOADER_LAB_PENDING_IMPORT_KEY,
@@ -23,8 +27,11 @@ function formatSavedAt(iso: string) {
   }
 }
 
+const LOOP_IDS: LoaderLoopId[] = ["processing", "export"];
+
 export function SavedLoadersShowcase() {
   const { presets, removePreset } = useSavedLoaders();
+  const { isInLoop, setMembership } = useLoaderLoops();
 
   if (presets.length === 0) {
     return (
@@ -88,9 +95,38 @@ export function SavedLoadersShowcase() {
 
             <div className="min-w-0 space-y-1">
               <p className="truncate text-sm font-medium">{preset.name}</p>
+              <p className="truncate font-mono text-[11px] text-muted-foreground">
+                {preset.id}
+              </p>
               <p className="text-xs text-muted-foreground">
                 {formatSavedAt(preset.savedAt)}
               </p>
+            </div>
+
+            <div className="space-y-2 rounded-md border bg-muted/20 p-3">
+              <p className="text-xs font-medium text-muted-foreground">Playlists</p>
+              <div className="space-y-2">
+                {LOOP_IDS.map((loopId) => {
+                  const checkboxId = `${preset.id}-${loopId}`;
+                  return (
+                    <div key={loopId} className="flex items-center gap-2">
+                      <Checkbox
+                        id={checkboxId}
+                        checked={isInLoop(loopId, preset.id)}
+                        onCheckedChange={(checked) =>
+                          setMembership(loopId, preset.id, checked === true)
+                        }
+                      />
+                      <Label
+                        htmlFor={checkboxId}
+                        className="cursor-pointer text-xs font-normal"
+                      >
+                        {LOADER_LOOP_LABELS[loopId]}
+                      </Label>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
 
             <div className="flex flex-wrap gap-2">

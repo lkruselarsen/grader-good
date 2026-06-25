@@ -1,10 +1,8 @@
 import { buildEngineParamsFromLookParams } from "@/lib/build-engine-params";
 import type { LookParams as LookParamsT } from "@/lib/look-params";
+import { runExportGradingInWorker } from "@/lib/lab2/export-worker-client";
 import {
-  buildExposureMapFromFloat,
   frameToImageData,
-  pixelFrameF32ToPixelFrameRGBA,
-  processFramesFloat,
   type PixelFrameF32,
 } from "@/src/lib/pipeline";
 
@@ -34,16 +32,17 @@ export async function buildExportPngBlobFromFrames(
           ? { ...engine.highlightFill, strength: 0 }
           : { strength: 0 },
       };
-  const exposureMap = buildExposureMapFromFloat(src);
-  const resultFloat = processFramesFloat(src, ref ?? null, {
-    strength: input.model2Strength,
-    grading,
-    exposureMap,
-    matchModel: 2,
-    model2Strength: input.model2Strength,
-    model2RobustSampling: input.model2Robust,
+  const rgba = await runExportGradingInWorker({
+    decodedSource: src,
+    decodedRef: ref,
+    pipelineParams: {
+      strength: input.model2Strength,
+      grading,
+      matchModel: 2,
+      model2Strength: input.model2Strength,
+      model2RobustSampling: input.model2Robust,
+    },
   });
-  const rgba = pixelFrameF32ToPixelFrameRGBA(resultFloat);
   const canvas = document.createElement("canvas");
   canvas.width = rgba.width;
   canvas.height = rgba.height;
