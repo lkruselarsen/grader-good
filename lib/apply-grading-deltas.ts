@@ -28,8 +28,10 @@ export const CLAMP_MAP: Record<string, [number, number]> = {
   highlightWarmthHue: [0, 360],
   highlightWarmthAmount: [0, 1],
   highlightWarmthThreshold: [0.01, 0.5],
-  halationEdge: [0, 1],
-  halationStrength: [0, 1],
+  halationAmount: [0, 1],
+  halationSensitivity: [0, 1],
+  halationRadius: [0, 1],
+  halationWarmth: [0, 1],
   actuanceStrength: [0, 3],
   actuanceRadius: [0.5, 5],
   actuanceHighlightGuard: [0.5, 0.9],
@@ -62,8 +64,10 @@ export const HALATION_KEYS = new Set([
   "highlightWarmthHue",
   "highlightWarmthAmount",
   "highlightWarmthThreshold",
-  "halationEdge",
-  "halationStrength",
+  "halationAmount",
+  "halationSensitivity",
+  "halationRadius",
+  "halationWarmth",
 ]);
 
 /** Phase 1–8 parameter keys for phased approach. Phase 6 uses prefix match for refraction. */

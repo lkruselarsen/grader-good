@@ -1,4 +1,4 @@
-import type { LookParams as LookParamsT } from "@/lib/look-params";
+import { migrateLegacyHalationKeys, type LookParams as LookParamsT } from "@/lib/look-params";
 import { BULK_ITEM_SETTINGS_PREFIX } from "./constants";
 import type { PreviewRenderer } from "./preview-mode";
 import type { ActiveMatchSelection, Lab2TileBlend } from "./types";
@@ -35,6 +35,10 @@ export function loadBulkItemSettings(id: string): BulkItemSettings | null {
       parsed.exportActuance = parsed.exportHalationActuance;
     }
     delete parsed.exportHalationActuance;
+    for (const key of ["lookParams", "liveLookParams"] as const) {
+      const lp = parsed[key];
+      if (lp?.match) parsed[key] = { ...lp, match: migrateLegacyHalationKeys(lp.match) };
+    }
     return parsed;
   } catch {
     return null;

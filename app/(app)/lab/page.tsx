@@ -29,6 +29,7 @@ import {
   defaultExposureCurve,
   defaultColorDensityCurve,
   defaultContrastCurve,
+  migrateLegacyHalationKeys,
 } from "@/lib/look-params";
 import {
   runPipeline as runPipelineFn,
@@ -297,8 +298,10 @@ const PARAM_SECTIONS: Array<{
       { key: "highlightWarmthHue", label: "Warmth hue (°)", min: 0, max: 360, step: 1 },
       { key: "highlightWarmthAmount", label: "Warmth amount", min: 0, max: 1, step: 0.01 },
       { key: "highlightWarmthThreshold", label: "Warmth threshold", min: 0.01, max: 0.5, step: 0.01 },
-      { key: "halationEdge", label: "Halation edge", min: 0, max: 1, step: 0.01 },
-      { key: "halationStrength", label: "Halation strength", min: 0, max: 1, step: 0.01 },
+      { key: "halationAmount", label: "Halation amount", min: 0, max: 1, step: 0.01 },
+      { key: "halationSensitivity", label: "Halation sensitivity", min: 0, max: 1, step: 0.01 },
+      { key: "halationRadius", label: "Halation radius", min: 0, max: 1, step: 0.01 },
+      { key: "halationWarmth", label: "Halation warmth", min: 0, max: 1, step: 0.01 },
     ],
   },
 ];
@@ -467,7 +470,7 @@ export default function LabPage() {
         return;
       }
       const merged: LookParams = {
-        match: { ...DEFAULT_LOOK_PARAMS.match, ...(obj.match as object) },
+        match: { ...DEFAULT_LOOK_PARAMS.match, ...migrateLegacyHalationKeys(obj.match as object) },
         grading: { ...DEFAULT_LOOK_PARAMS.grading, ...(obj.grading as object) },
       };
       if (obj.halation && typeof obj.halation === "object") {
@@ -1541,8 +1544,10 @@ export default function LabPage() {
                                   ["highlightWarmthHue", "Warmth hue", 0, 360, 1, 35],
                                   ["highlightWarmthAmount", "Warmth amount", 0, 1, 0.01, 0.15],
                                   ["highlightWarmthThreshold", "Warmth threshold", 0.01, 0.5, 0.01, 0.25],
-                                  ["halationEdge", "Halation edge", 0, 1, 0.01, 0.5],
-                                  ["halationStrength", "Halation strength", 0, 1, 0.01, 0.4],
+                                  ["halationAmount", "Halation amount", 0, 1, 0.01, 0.35],
+                                  ["halationSensitivity", "Halation sensitivity", 0, 1, 0.01, 0.5],
+                                  ["halationRadius", "Halation radius", 0, 1, 0.01, 0.5],
+                                  ["halationWarmth", "Halation warmth", 0, 1, 0.01, 0.5],
                                 ] as const
                               ).map(([key, label, min, max, step, fallback]) => (
                                 <div key={key} className="flex gap-2 items-center text-[10px]">

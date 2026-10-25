@@ -129,10 +129,14 @@ export interface LookParamsMatch {
   highlightWarmthAmount?: number;
   /** Highlight warmth threshold (0.01–0.5): upper fraction of the tonal range affected. */
   highlightWarmthThreshold?: number;
-  /** Halation edge (0–1): bleed radius and size of the highlight zone (top 6–20%). */
-  halationEdge?: number;
-  /** Halation strength (0–1): overall opacity, about 14% at max. */
-  halationStrength?: number;
+  /** Halation amount (0–1): overall scattered exposure; self-limiting, photographic even at 1. */
+  halationAmount?: number;
+  /** Halation sensitivity (0–1): exposure threshold; higher starts fewer stops above middle grey. */
+  halationSensitivity?: number;
+  /** Halation radius (0–1): physical scattering scale (resolution independent). */
+  halationRadius?: number;
+  /** Halation warmth (0–1): spectral colour, red-leaning (0) to orange (1). */
+  halationWarmth?: number;
   /** Refraction: shadow wheel (6 nodes: red, yellow, green, teal, blue, purple). Each node { hue: 0..360°, sat: 0..3 }. */
   refractionShadow?: RefractionWheel;
   /** Refraction: highlight wheel. Same shape. */
@@ -285,8 +289,10 @@ export const DEFAULT_LOOK_PARAMS: LookParams = {
     highlightWarmthHue: 35,
     highlightWarmthAmount: 0.15,
     highlightWarmthThreshold: 0.25,
-    halationEdge: 0.5,
-    halationStrength: 0.4,
+    halationAmount: 0.35,
+    halationSensitivity: 0.5,
+    halationRadius: 0.5,
+    halationWarmth: 0.5,
     actuanceStrength: 0,
     actuanceRadius: 0,
     actuanceHighlightGuard: 0,
@@ -305,6 +311,38 @@ export const DEFAULT_LOOK_PARAMS: LookParams = {
   },
   grading: defaultGrading(),
 };
+
+/** Engine halation params from the UI match params (missing values → defaults). */
+export function halationFromLook(
+  m: Partial<LookParamsMatch>
+): NonNullable<EngineLookParams["halation"]> {
+  const d = DEFAULT_LOOK_PARAMS.match;
+  return {
+    amount: m.halationAmount ?? d.halationAmount ?? 0,
+    sensitivity: m.halationSensitivity ?? d.halationSensitivity ?? 0.5,
+    radius: m.halationRadius ?? d.halationRadius ?? 0.5,
+    warmth: m.halationWarmth ?? d.halationWarmth ?? 0.5,
+  };
+}
+
+/**
+ * Maps the pre-rebuild halation keys (halationStrength, halationEdge) onto
+ * halationAmount / halationRadius and drops them. New keys win when both exist.
+ */
+export function migrateLegacyHalationKeys<T extends object>(match: T): T {
+  const m = match as Record<string, unknown>;
+  if (!("halationStrength" in m) && !("halationEdge" in m)) return match;
+  const out: Record<string, unknown> = { ...m };
+  if (typeof m.halationStrength === "number" && typeof m.halationAmount !== "number") {
+    out.halationAmount = m.halationStrength;
+  }
+  if (typeof m.halationEdge === "number" && typeof m.halationRadius !== "number") {
+    out.halationRadius = m.halationEdge;
+  }
+  delete out.halationStrength;
+  delete out.halationEdge;
+  return out as T;
+}
 
 /** Convert flat UI grading to engine LookParams. */
 export function gradingToEngine(g: LookParamsGrading): EngineLookParams {

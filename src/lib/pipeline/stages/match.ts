@@ -171,14 +171,18 @@ export interface LookParams {
     threshold: number;
   };
   /**
-   * Finishing stage: film halation (orange scatter around highlights).
-   * strength 0 = off.
+   * Finishing stage: film halation (scattered exposure around intense highlights).
+   * amount 0 = off.
    */
   halation?: {
-    /** 0..1: bleed radius and highlight-zone size. */
-    edge: number;
-    /** 0..1: overall opacity (about 14% at max). */
-    strength: number;
+    /** 0..1: overall halation exposure. */
+    amount: number;
+    /** 0..1: exposure threshold (higher = starts at fewer stops above grey). */
+    sensitivity: number;
+    /** 0..1: physical scattering scale. */
+    radius: number;
+    /** 0..1: spectral colour, red-leaning (0) to orange (1). */
+    warmth: number;
   };
   /** Refraction: shadow wheel. Six nodes { hue: 0..360°, sat: 0..3 } order: red, yellow, green, teal, blue, purple. */
   refractionShadow?: RefractionWheelEngine;

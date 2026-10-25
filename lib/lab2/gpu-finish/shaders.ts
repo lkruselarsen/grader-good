@@ -6,22 +6,28 @@
  */
 
 import {
-  HALATION_ENERGY_CAP,
-  HALATION_ENERGY_GAIN,
-  HALATION_LOBE_WEIGHTS,
-  HALATION_NOISE_AMP,
-  HALATION_NOISE_FREQ,
-  HALATION_NOISE_OCTAVE_WEIGHTS,
-  HALATION_NOISE_SEED,
-  HALATION_NOISE_WARMTH,
-  HALATION_TINT,
+  HALATION_LAYER_LOBES,
+  HALATION_LIMIT,
+  HALATION_REF_GREY,
+  HALATION_SHOULDER_WHITE,
+  HALATION_SOURCE_MAX,
+  HALATION_SOURCE_SUPPRESSION,
+  HALATION_SPECTRAL,
 } from "@/src/lib/pipeline/finishing/model";
 
 const f = (v: number) => {
   const s = String(v);
   return s.includes(".") || s.includes("e") ? s : `${s}.0`;
 };
-const hex = (v: number) => `0x${(v >>> 0).toString(16)}u`;
+
+/** Exposure activation in stops (mirrors halationActivation in model.ts). */
+const ACTIVATION_GLSL = `
+uniform vec2 u_ev;
+float halationActivation(float Y) {
+  float ev = log2(max(Y, 1e-6) / ${f(HALATION_REF_GREY)});
+  float t = clamp((ev - u_ev.x) * u_ev.y, 0.0, 1.0);
+  return t * t * (3.0 - 2.0 * t);
+}`;
 
 export const FULLSCREEN_VS = `#version 300 es
 in vec2 a_pos;
@@ -73,17 +79,18 @@ void main() {
   o = vec4(max(rgb, vec3(0.0)), c.a);
 }`;
 
-/** Highlight energy (mirrors the energy loop in halation.ts). */
+/** Halation source (mirrors halationSource in model.ts). */
 export const ENERGY_FS = `#version 300 es
 precision highp float;
 in vec2 v_uv;
 out vec4 o;
 uniform sampler2D u_src;
-uniform vec2 u_knee;
+${ACTIVATION_GLSL}
 void main() {
   vec3 c = texture(u_src, v_uv).rgb;
-  float Y = max(0.0, dot(c, vec3(0.2126, 0.7152, 0.0722)));
-  float e = Y > 0.0 ? smoothstep(u_knee.x, u_knee.y, pow(Y, 1.0 / 3.0)) * min(Y, ${f(HALATION_ENERGY_CAP)}) : 0.0;
+  float H = halationActivation(dot(c, vec3(0.2126, 0.7152, 0.0722)));
+  float S = max(0.0, dot(c, vec3(${f(HALATION_SPECTRAL.r)}, ${f(HALATION_SPECTRAL.g)}, ${f(HALATION_SPECTRAL.b)})));
+  float e = H > 0.0 ? H * ${f(HALATION_SOURCE_MAX)} * (1.0 - exp(-S / ${f(HALATION_SOURCE_MAX)})) : 0.0;
   o = vec4(e, 0.0, 0.0, 1.0);
 }`;
 
@@ -96,7 +103,7 @@ uniform sampler2D u_src;
 void main() { o = texture(u_src, v_uv); }`;
 
 /** Separable Gaussian, up to 2*MAX_TAPS+1 taps. */
-export const BLUR_MAX_TAPS = 12;
+export const BLUR_MAX_TAPS = 24;
 export const BLUR_FS = `#version 300 es
 precision highp float;
 in vec2 v_uv;
@@ -122,7 +129,6 @@ void main() {
 /** Halation composite + sRGB encode (mirrors the composite loop in halation.ts). */
 export const COMPOSITE_FS = `#version 300 es
 precision highp float;
-precision highp int;
 in vec2 v_uv;
 out vec4 o;
 uniform sampler2D u_src;
@@ -132,44 +138,18 @@ uniform sampler2D u_lobe2;
 uniform int u_halation;
 uniform int u_flipY;
 uniform int u_inputSrgb;
-uniform vec2 u_frameSize;
-uniform float u_fillGain;
-uniform float u_gainSpan;
-uniform float u_opacity;
-
-uint hash2u(int ix, int iy) {
-  uint h = (uint(ix) * 0x27d4eb2du) ^ (uint(iy) * 0x165667b1u) ^ ${hex(HALATION_NOISE_SEED)};
-  h = (h ^ (h >> 15u)) * 0x85ebca6bu;
-  h = (h ^ (h >> 13u)) * 0xc2b2ae35u;
-  h ^= h >> 16u;
-  return h;
-}
-float hash01(int ix, int iy) { return float(hash2u(ix, iy)) / 4294967296.0; }
-float valueNoise(vec2 p) {
-  vec2 i = floor(p);
-  vec2 fr = p - i;
-  vec2 s = fr * fr * (3.0 - 2.0 * fr);
-  int ix = int(i.x);
-  int iy = int(i.y);
-  float a = hash01(ix, iy);
-  float b = hash01(ix + 1, iy);
-  float c = hash01(ix, iy + 1);
-  float d = hash01(ix + 1, iy + 1);
-  return a + (b - a) * s.x + (c - a) * s.y + (a - b - c + d) * s.x * s.y;
-}
-float halationNoise(vec2 uv) {
-  return ${f(HALATION_NOISE_OCTAVE_WEIGHTS[0])} * valueNoise(uv * ${f(HALATION_NOISE_FREQ[0])})
-       + ${f(HALATION_NOISE_OCTAVE_WEIGHTS[1])} * valueNoise(uv * ${f(HALATION_NOISE_FREQ[1])} + vec2(17.3, 9.1));
-}
+uniform vec3 u_gain;
+${ACTIVATION_GLSL}
 vec3 linearToSrgb(vec3 c) {
   c = clamp(c, 0.0, 1.0);
   return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), c));
 }
 
-const vec3 W0 = vec3(${f(HALATION_LOBE_WEIGHTS.r[0] * HALATION_TINT.r)}, ${f(HALATION_LOBE_WEIGHTS.g[0] * HALATION_TINT.g)}, ${f(HALATION_LOBE_WEIGHTS.b[0] * HALATION_TINT.b)});
-const vec3 W1 = vec3(${f(HALATION_LOBE_WEIGHTS.r[1] * HALATION_TINT.r)}, ${f(HALATION_LOBE_WEIGHTS.g[1] * HALATION_TINT.g)}, ${f(HALATION_LOBE_WEIGHTS.b[1] * HALATION_TINT.b)});
-const vec3 W2 = vec3(${f(HALATION_LOBE_WEIGHTS.r[2] * HALATION_TINT.r)}, ${f(HALATION_LOBE_WEIGHTS.g[2] * HALATION_TINT.g)}, ${f(HALATION_LOBE_WEIGHTS.b[2] * HALATION_TINT.b)});
-const vec3 VIS = vec3(${f(HALATION_LOBE_WEIGHTS.r[0])}, ${f(HALATION_LOBE_WEIGHTS.r[1])}, ${f(HALATION_LOBE_WEIGHTS.r[2])});
+const vec3 LR = vec3(${f(HALATION_LAYER_LOBES.r[0])}, ${f(HALATION_LAYER_LOBES.r[1])}, ${f(HALATION_LAYER_LOBES.r[2])});
+const vec3 LG = vec3(${f(HALATION_LAYER_LOBES.g[0])}, ${f(HALATION_LAYER_LOBES.g[1])}, ${f(HALATION_LAYER_LOBES.g[2])});
+const vec3 LB = vec3(${f(HALATION_LAYER_LOBES.b[0])}, ${f(HALATION_LAYER_LOBES.b[1])}, ${f(HALATION_LAYER_LOBES.b[2])});
+const float HMAX = ${f(HALATION_LIMIT)};
+const float SW = ${f(HALATION_SHOULDER_WHITE)};
 
 void main() {
   vec2 uv = u_flipY == 1 ? vec2(v_uv.x, 1.0 - v_uv.y) : v_uv;
@@ -177,21 +157,12 @@ void main() {
   if (u_inputSrgb == 1) { o = vec4(c.rgb, 1.0); return; }
   vec3 rgb = c.rgb;
   if (u_halation == 1) {
-    float l0 = texture(u_lobe0, uv).r;
-    float l1 = texture(u_lobe1, uv).r;
-    float l2 = texture(u_lobe2, uv).r;
-    if (l0 + l1 + l2 >= 1e-7) {
-      vec2 px = uv * u_frameSize;
-      float shortEdge = min(u_frameSize.x, u_frameSize.y);
-      float nn = (halationNoise(px / shortEdge) - 0.5) * 2.0;
-      float Y = max(0.0, dot(rgb, vec3(0.2126, 0.7152, 0.0722)));
-      float scatter = dot(VIS, vec3(l0, l1, l2));
-      float vis = scatter / (scatter + Y + 1e-4);
-      float mod_ = ${f(HALATION_ENERGY_GAIN)} * (u_fillGain + u_gainSpan * vis * vis) * (1.0 + ${f(HALATION_NOISE_AMP)} * nn);
-      vec3 e = (W0 * l0 + W1 * l1 + W2 * l2) * mod_;
-      e.g *= 1.0 + ${f(HALATION_NOISE_WARMTH)} * nn;
-      vec3 add = (u_opacity * e) / (1.0 + e);
-      rgb = rgb + add * (1.0 - clamp(rgb, 0.0, 1.0));
+    vec3 l = vec3(texture(u_lobe0, uv).r, texture(u_lobe1, uv).r, texture(u_lobe2, uv).r);
+    if (l.x + l.y + l.z >= 1e-6) {
+      float vis = 1.0 - ${f(HALATION_SOURCE_SUPPRESSION)} * halationActivation(dot(rgb, vec3(0.2126, 0.7152, 0.0722)));
+      vec3 halo = vec3(dot(LR, l), dot(LG, l), dot(LB, l)) * vis;
+      vec3 h = u_gain * HMAX * (1.0 - exp(-halo / HMAX));
+      rgb = rgb + exp(-max(rgb, vec3(0.0)) / SW) * SW * (1.0 - exp(-h / SW));
     }
   }
   o = vec4(linearToSrgb(rgb), 1.0);

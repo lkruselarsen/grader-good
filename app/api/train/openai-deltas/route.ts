@@ -27,13 +27,13 @@ Return ONLY valid JSON.`;
 const OPENAI_SUBSTEP1_PROMPT = `Focus on exposure, contrast, color density, curves, refraction, per-band controls. Do NOT adjust halation.
 
 Adjust: exposureStrength, exposureCurve.L_out_0…6, blackPoint, blackRange, blackStrength; contrastCurve.values_0…6; colorDensityCurve.scale_0…6; colorStrength, bandMidTemp/Hue/Sat, band*Hue/Temp/Sat/Luma; refractionShadow/Highlight.<color>.hue/.sat, refractionSplitL.
-Omit: highlightWarmthHue, highlightWarmthAmount, highlightWarmthThreshold, halationEdge, halationStrength.
+Omit: highlightWarmthHue, highlightWarmthAmount, highlightWarmthThreshold, halationAmount, halationSensitivity, halationRadius, halationWarmth.
 EV: exposureCurve L_out 1=0 EV, 1.4≈+0.5 EV. Refraction green=120°; 120→115=orange, 120→125=greener.
 Return JSON of deltas only. Omit keys for no change.`;
 
 const OPENAI_SUBSTEP2_PROMPT = `Focus ONLY on highlight warmth and halation (warm tint of the top tones, orange glow at highlight/shadow edges). Compare to reference.
 
-Adjust only: highlightWarmthHue (0–360°, wheel hue of the highlight tint; 35 = warm orange), highlightWarmthAmount (0–1, tint strength), highlightWarmthThreshold (0.01–0.5, upper fraction of the tonal range tinted; default 0.25), halationEdge (0–1, bleed radius and size of the highlight zone), halationStrength (0–1, overall halation opacity, subtle even at 1).
+Adjust only: highlightWarmthHue (0–360°, wheel hue of the highlight tint; 35 = warm orange), highlightWarmthAmount (0–1, tint strength), highlightWarmthThreshold (0.01–0.5, upper fraction of the tonal range tinted; default 0.25), halationAmount (0–1, overall scattered exposure around intense highlights; self-limiting, subtle even at 1), halationSensitivity (0–1, exposure threshold; higher = halation starts fewer stops above middle grey), halationRadius (0–1, physical scattering scale), halationWarmth (0–1, halo colour from red-leaning to orange).
 Return JSON of deltas only. Omit keys for no change.`;
 
 const PHASE_PROMPTS: Record<
@@ -83,7 +83,7 @@ Parameters: actuanceStrength (0.75–3): higher = stronger crispness. actuanceRa
 Return JSON of deltas only. Omit keys for no change.`,
   8: `Phase 8: Highlight warmth and halation only.
 
-Parameters: highlightWarmthHue (0–360°, wheel hue of the highlight tint; 35 = warm orange), highlightWarmthAmount (0–1, tint strength), highlightWarmthThreshold (0.01–0.5, upper fraction of the tonal range tinted; default 0.25), halationEdge (0–1, bleed radius and size of the highlight zone), halationStrength (0–1, overall halation opacity, subtle even at 1).
+Parameters: highlightWarmthHue (0–360°, wheel hue of the highlight tint; 35 = warm orange), highlightWarmthAmount (0–1, tint strength), highlightWarmthThreshold (0.01–0.5, upper fraction of the tonal range tinted; default 0.25), halationAmount (0–1, overall scattered exposure around intense highlights; self-limiting, subtle even at 1), halationSensitivity (0–1, exposure threshold; higher = halation starts fewer stops above middle grey), halationRadius (0–1, physical scattering scale), halationWarmth (0–1, halo colour from red-leaning to orange).
 
 Return JSON of deltas only. Omit keys for no change.`,
 };
@@ -107,7 +107,7 @@ Parameters: bandLowerShadowHue, bandUpperShadowHue, bandMidHue, bandLowerHighHue
 Return JSON of deltas only. Omit keys for no change.`,
   3: `Phase 3: Highlight warmth and halation only.
 
-Parameters: highlightWarmthHue (0–360°, wheel hue of the highlight tint; 35 = warm orange), highlightWarmthAmount (0–1, tint strength), highlightWarmthThreshold (0.01–0.5, upper fraction of the tonal range tinted; default 0.25), halationEdge (0–1, bleed radius and size of the highlight zone), halationStrength (0–1, overall halation opacity, subtle even at 1).
+Parameters: highlightWarmthHue (0–360°, wheel hue of the highlight tint; 35 = warm orange), highlightWarmthAmount (0–1, tint strength), highlightWarmthThreshold (0.01–0.5, upper fraction of the tonal range tinted; default 0.25), halationAmount (0–1, overall scattered exposure around intense highlights; self-limiting, subtle even at 1), halationSensitivity (0–1, exposure threshold; higher = halation starts fewer stops above middle grey), halationRadius (0–1, physical scattering scale), halationWarmth (0–1, halo colour from red-leaning to orange).
 
 Return JSON of deltas only. Omit keys for no change.`,
 };

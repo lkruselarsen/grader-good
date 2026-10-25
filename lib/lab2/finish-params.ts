@@ -1,5 +1,5 @@
 import type { LookParams as LookParamsT } from "@/lib/look-params";
-import { DEFAULT_LOOK_PARAMS } from "@/lib/look-params";
+import { DEFAULT_LOOK_PARAMS, halationFromLook } from "@/lib/look-params";
 import type { FinishParams } from "@/src/lib/pipeline/finishing/model";
 import type { GradingParams } from "@/src/lib/pipeline/types";
 
@@ -17,10 +17,7 @@ export function finishParamsFromLook(
       amount: m.highlightWarmthAmount ?? d.highlightWarmthAmount ?? 0,
       threshold: m.highlightWarmthThreshold ?? d.highlightWarmthThreshold ?? 0.25,
     },
-    halation: {
-      edge: m.halationEdge ?? d.halationEdge ?? 0.5,
-      strength: m.halationStrength ?? d.halationStrength ?? 0,
-    },
+    halation: halationFromLook(m),
   };
 }
 

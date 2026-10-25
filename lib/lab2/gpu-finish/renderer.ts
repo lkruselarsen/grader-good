@@ -8,7 +8,6 @@
  */
 
 import {
-  HALATION_MAX_OPACITY,
   computeHalationUniforms,
   computeWarmthUniforms,
   type FinishParams,
@@ -37,6 +36,8 @@ type Program = {
 };
 
 const MAX_LEVELS = 5;
+/** Lobes blur at the coarsest level that keeps sigma ≥ this many texels (bilinear upsampling stays smooth). */
+const MIN_LEVEL_SIGMA = 4;
 
 export function isWebGL2FinishingSupported(): boolean {
   if (typeof document === "undefined") return false;
@@ -312,17 +313,17 @@ export class GpuFinishRenderer {
     }
     if (!halation) return { src: current, halation: null };
 
-    // Energy at full preview resolution, then the mip chain.
+    // Source at full preview resolution, then the mip chain.
     const pe = this.pEnergy;
     gl.useProgram(pe.prog);
     this.bindTex(0, current, pe, "u_src");
-    gl.uniform2f(pe.loc("u_knee"), halation.kneeLo, halation.kneeHi);
+    gl.uniform2f(pe.loc("u_ev"), halation.startEV, halation.invSpanEV);
     this.draw(pe, this.energy[0], this.energy[0].w, this.energy[0].h);
 
     const shortEdge = Math.min(this.frameW, this.frameH);
     const sigmasPx = halation.sigmas.map((s) => s * shortEdge);
     const levels = sigmasPx.map((s) =>
-      Math.max(0, Math.min(MAX_LEVELS - 1, Math.floor(Math.log2(Math.max(1, s / 2)))))
+      Math.max(0, Math.min(MAX_LEVELS - 1, Math.floor(Math.log2(Math.max(1, s / MIN_LEVEL_SIGMA)))))
     );
     const maxLevel = Math.max(...levels);
     const pd = this.pDown;
@@ -382,10 +383,9 @@ export class GpuFinishRenderer {
     gl.uniform1i(p.loc("u_halation"), halation ? 1 : 0);
     gl.uniform1i(p.loc("u_flipY"), flipY ? 1 : 0);
     gl.uniform1i(p.loc("u_inputSrgb"), this.srcIsSrgb ? 1 : 0);
-    gl.uniform2f(p.loc("u_frameSize"), this.frameW, this.frameH);
-    gl.uniform1f(p.loc("u_fillGain"), halation?.fillGain ?? 0);
-    gl.uniform1f(p.loc("u_gainSpan"), halation ? halation.edgeGain - halation.fillGain : 0);
-    gl.uniform1f(p.loc("u_opacity"), halation ? HALATION_MAX_OPACITY * halation.strength : 0);
+    gl.uniform2f(p.loc("u_ev"), halation?.startEV ?? 0, halation?.invSpanEV ?? 0);
+    const gain = halation?.gain ?? [0, 0, 0];
+    gl.uniform3f(p.loc("u_gain"), gain[0], gain[1], gain[2]);
     this.draw(p, target, vw, vh);
   }
 

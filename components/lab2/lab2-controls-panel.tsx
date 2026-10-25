@@ -18,7 +18,9 @@ import { Switch } from "@/components/ui/switch";
 import {
   defaultColorDensityCurve,
   defaultExposureCurve,
+  halationFromLook,
   type LookParams as LookParamsT,
+  type LookParamsMatch,
 } from "@/lib/look-params";
 import { REFRACTION_HUE_NAMES } from "@/lib/lab2/constants";
 import { cn } from "@/lib/utils";
@@ -726,8 +728,21 @@ function FinishingEffectsCard({
   const hue = m.highlightWarmthHue ?? DEFAULT_WARMTH_HUE;
   const amount = m.highlightWarmthAmount ?? 0;
   const thresholdPct = Math.round((m.highlightWarmthThreshold ?? 0.25) * 100);
-  const edgePct = Math.round((m.halationEdge ?? 0.5) * 100);
-  const strengthPct = Math.round((m.halationStrength ?? 0) * 100);
+  const halation = halationFromLook(m);
+  const halationSliders: {
+    key: Extract<
+      keyof LookParamsMatch,
+      "halationAmount" | "halationSensitivity" | "halationRadius" | "halationWarmth"
+    >;
+    label: string;
+    value: number;
+    fallback: number;
+  }[] = [
+    { key: "halationAmount", label: "Amount", value: halation.amount, fallback: 0.35 },
+    { key: "halationSensitivity", label: "Sensitivity", value: halation.sensitivity, fallback: 0.5 },
+    { key: "halationRadius", label: "Radius", value: halation.radius, fallback: 0.5 },
+    { key: "halationWarmth", label: "Warmth", value: halation.warmth, fallback: 0.5 },
+  ];
   return (
     <section className="rounded-lg border bg-card/40">
       <div className="flex items-center justify-between gap-3 px-3 py-2.5">
@@ -774,34 +789,25 @@ function FinishingEffectsCard({
         </div>
         <div className="space-y-3">
           <p className="text-xs font-medium text-muted-foreground/80">Halation</p>
-          <div className="space-y-2">
-            <div className="flex justify-between text-xs text-muted-foreground">
-              <span>Edge</span>
-              <span>{edgePct}%</span>
-            </div>
-            <Slider
-              className={SLIDER_CLASS}
-              min={0}
-              max={100}
-              step={1}
-              value={[edgePct]}
-              onValueChange={(v) => updateMatch("halationEdge", (v[0] ?? 50) / 100)}
-            />
-          </div>
-          <div className="space-y-2">
-            <div className="flex justify-between text-xs text-muted-foreground">
-              <span>Strength</span>
-              <span>{strengthPct}%</span>
-            </div>
-            <Slider
-              className={SLIDER_CLASS}
-              min={0}
-              max={100}
-              step={1}
-              value={[strengthPct]}
-              onValueChange={(v) => updateMatch("halationStrength", (v[0] ?? 0) / 100)}
-            />
-          </div>
+          {halationSliders.map(({ key, label, value, fallback }) => {
+            const pct = Math.round(value * 100);
+            return (
+              <div key={key} className="space-y-2">
+                <div className="flex justify-between text-xs text-muted-foreground">
+                  <span>{label}</span>
+                  <span>{pct}%</span>
+                </div>
+                <Slider
+                  className={SLIDER_CLASS}
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={[pct]}
+                  onValueChange={(v) => updateMatch(key, (v[0] ?? fallback * 100) / 100)}
+                />
+              </div>
+            );
+          })}
         </div>
       </div>
     </section>

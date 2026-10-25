@@ -419,7 +419,7 @@ export default function TrainPage() {
                   : {
                       match: {
                         ...currentParams.match,
-                        halationStrength: 0,
+                        halationAmount: 0,
                       highlightWarmthAmount: 0,
                       },
                       grading: currentParams.grading,
@@ -530,7 +530,7 @@ export default function TrainPage() {
           const paramsSubstep1: LookParams = {
             match: {
               ...currentParams.match,
-              halationStrength: 0,
+              halationAmount: 0,
               highlightWarmthAmount: 0,
             },
             grading: currentParams.grading,

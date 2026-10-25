@@ -4,22 +4,30 @@ import { useEffect, useRef, useState } from "react";
 import { notFound } from "next/navigation";
 import {
   makeFinishingTestFrame,
+  makeHalationSceneFrame,
   runFinishingParityCheck,
   type FinishingParityResult,
 } from "@/lib/lab2/gpu-finish/parity";
 import type { FinishParams } from "@/src/lib/pipeline/finishing/model";
+import type { PixelFrameF32 } from "@/src/lib/pipeline/types";
 
-const CASES: { name: string; finish: FinishParams | null }[] = [
-  { name: "passthrough", finish: null },
-  { name: "warmth-default", finish: { highlightWarmth: { hue: 35, amount: 0.15, threshold: 0.25 } } },
-  { name: "warmth-max", finish: { highlightWarmth: { hue: 35, amount: 1, threshold: 0.5 } } },
-  { name: "halation-default", finish: { halation: { edge: 0.5, strength: 0.4 } } },
-  { name: "halation-max", finish: { halation: { edge: 1, strength: 1 } } },
+const HALATION_DEFAULT = { amount: 0.35, sensitivity: 0.5, radius: 0.5, warmth: 0.5 };
+const HALATION_MAX = { amount: 1, sensitivity: 1, radius: 1, warmth: 1 };
+
+const CASES: { name: string; scene: "mixed" | "lamps"; finish: FinishParams | null }[] = [
+  { name: "passthrough", scene: "mixed", finish: null },
+  { name: "warmth-default", scene: "mixed", finish: { highlightWarmth: { hue: 35, amount: 0.15, threshold: 0.25 } } },
+  { name: "warmth-max", scene: "mixed", finish: { highlightWarmth: { hue: 35, amount: 1, threshold: 0.5 } } },
+  { name: "halation-default", scene: "mixed", finish: { halation: HALATION_DEFAULT } },
+  { name: "halation-max", scene: "mixed", finish: { halation: HALATION_MAX } },
+  { name: "lamps-default", scene: "lamps", finish: { halation: HALATION_DEFAULT } },
+  { name: "lamps-max", scene: "lamps", finish: { halation: HALATION_MAX } },
   {
     name: "both-max",
+    scene: "mixed",
     finish: {
       highlightWarmth: { hue: 35, amount: 1, threshold: 0.5 },
-      halation: { edge: 1, strength: 1 },
+      halation: HALATION_MAX,
     },
   },
 ];
@@ -49,8 +57,14 @@ function FinishingParityHarness() {
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      const frame = makeFinishingTestFrame(1200, 800);
-      const out = CASES.map((c) => ({ name: c.name, result: runFinishingParityCheck(frame, c.finish) }));
+      const frames: Record<string, PixelFrameF32> = {
+        mixed: makeFinishingTestFrame(1200, 800),
+        lamps: makeHalationSceneFrame(1200, 800),
+      };
+      const out = CASES.map((c) => ({
+        name: c.name,
+        result: runFinishingParityCheck(frames[c.scene], c.finish),
+      }));
       setRows(out);
       document.title = `parity:${JSON.stringify(
         out.map((r) => ({
@@ -59,6 +73,7 @@ function FinishingParityHarness() {
           p99: r.result?.p99DeltaE.toFixed(3),
           max: r.result?.maxDeltaE.toFixed(3),
           code: r.result?.maxCodeDiff,
+          at: r.result ? `${r.result.maxCodeAt.x},${r.result.maxCodeAt.y}` : null,
         }))
       )}`;
     }, 0);
