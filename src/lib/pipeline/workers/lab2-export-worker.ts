@@ -1,11 +1,10 @@
 /**
  * Web Worker for full-resolution Lab2 export grading.
  *
- * Runs buildExposureMapFromFloat → processFramesFloat → pixelFrameF32ToPixelFrameRGBA
+ * Runs processFramesFloat → pixelFrameF32ToPixelFrameRGBA
  * off the main thread so export-modal loader animations stay smooth.
  */
 
-import { buildExposureMapFromFloat } from "../exposureMap";
 import { processFramesFloat } from "../processFrames";
 import type { PipelineParams, PixelFrameF32 } from "../types";
 import { pixelFrameF32ToPixelFrameRGBA } from "../types";
@@ -45,11 +44,7 @@ self.onmessage = (e: MessageEvent<ExportWorkerMsg>) => {
         }
       : null;
 
-    const exposureMap = buildExposureMapFromFloat(source);
-    const resultFloat = processFramesFloat(source, ref, {
-      ...params,
-      exposureMap,
-    });
+    const resultFloat = processFramesFloat(source, ref, params);
     const rgba = pixelFrameF32ToPixelFrameRGBA(resultFloat);
 
     self.postMessage(

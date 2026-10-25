@@ -292,64 +292,13 @@ const PARAM_SECTIONS: Array<{
   },
   {
     id: "match",
-    label: "Halation",
+    label: "Highlight warmth + halation",
     params: [
-      {
-        key: "highlightFillStrength",
-        label: "Strength",
-        min: 0,
-        max: 2,
-        step: 0.01,
-      },
-      {
-        key: "highlightFillWarmth",
-        label: "Warmth",
-        min: -1,
-        max: 1,
-        step: 0.05,
-      },
-      {
-        key: "halationTailGamma",
-        label: "Tail gamma (ultra-highlight bias)",
-        min: 2,
-        max: 6,
-        step: 0.1,
-      },
-      {
-        key: "halationContrastGate",
-        label: "Contrast gate (dark-neighbor)",
-        min: 0,
-        max: 1,
-        step: 0.01,
-      },
-      {
-        key: "halationRimStrength",
-        label: "Rim strength (thin edge)",
-        min: 0,
-        max: 1,
-        step: 0.01,
-      },
-      {
-        key: "halationBloomStrength",
-        label: "Bloom strength (soft halo)",
-        min: 0,
-        max: 1,
-        step: 0.01,
-      },
-      {
-        key: "halationRimRadius",
-        label: "Rim radius (% short edge)",
-        min: 0,
-        max: 0.75,
-        step: 0.05,
-      },
-      {
-        key: "halationBloomRadius",
-        label: "Bloom radius (% short edge)",
-        min: 0,
-        max: 2.5,
-        step: 0.1,
-      },
+      { key: "highlightWarmthHue", label: "Warmth hue (°)", min: 0, max: 360, step: 1 },
+      { key: "highlightWarmthAmount", label: "Warmth amount", min: 0, max: 1, step: 0.01 },
+      { key: "highlightWarmthThreshold", label: "Warmth threshold", min: 0.01, max: 0.5, step: 0.01 },
+      { key: "halationEdge", label: "Halation edge", min: 0, max: 1, step: 0.01 },
+      { key: "halationStrength", label: "Halation strength", min: 0, max: 1, step: 0.01 },
     ],
   },
 ];
@@ -1584,117 +1533,33 @@ export default function LabPage() {
                           </details>
                           <details className="mt-3 border-t pt-2">
                             <summary className="text-[11px] font-medium text-muted-foreground/80 cursor-pointer">
-                              Post-Model 2: Halation
+                              Post-Model 2: Highlight warmth + halation
                             </summary>
-                            <p className="text-[10px] text-muted-foreground mt-1">
-                              Highlight bloom/rim. Lower threshold = more area eligible; top 0.01% still gets strongest halation.
-                            </p>
                             <div className="mt-2 space-y-2">
-                              <div className="flex gap-2 items-center text-[10px]">
-                                <Label className="text-[10px] w-24">Threshold (entry %)</Label>
-                                <Slider
-                                  className="flex-1"
-                                  value={[(lookParams.match.halationThreshold ?? 0.92) * 100]}
-                                  min={90}
-                                  max={99.99}
-                                  step={0.01}
-                                  onValueChange={(v) => setParam("match", "halationThreshold", (v[0] ?? 92) / 100)}
-                                />
-                                <span className="text-[10px] tabular-nums w-10">
-                                  {((lookParams.match.halationThreshold ?? 0.92) * 100).toFixed(2)}%
-                                </span>
-                              </div>
-                              <div className="flex gap-2 items-center text-[10px]">
-                                <Label className="text-[10px] w-24">Strength</Label>
-                                <Slider
-                                  className="flex-1"
-                                  value={[lookParams.match.highlightFillStrength ?? 2.0]}
-                                  min={0}
-                                  max={2}
-                                  step={0.05}
-                                  onValueChange={(v) => setParam("match", "highlightFillStrength", v[0] ?? 2.0)}
-                                />
-                                <span className="text-[10px] tabular-nums w-8">
-                                  {(lookParams.match.highlightFillStrength ?? 2.0).toFixed(2)}
-                                </span>
-                              </div>
-                              <div className="flex gap-2 items-center text-[10px]">
-                                <Label className="text-[10px] w-24">Warmth</Label>
-                                <Slider
-                                  className="flex-1"
-                                  value={[lookParams.match.highlightFillWarmth ?? 0.6]}
-                                  min={-1}
-                                  max={1}
-                                  step={0.05}
-                                  onValueChange={(v) => setParam("match", "highlightFillWarmth", v[0] ?? 0.6)}
-                                />
-                              </div>
-                              <div className="flex gap-2 items-center text-[10px]">
-                                <Label className="text-[10px] w-24">Tail gamma</Label>
-                                <Slider
-                                  className="flex-1"
-                                  value={[lookParams.match.halationTailGamma ?? 4]}
-                                  min={2}
-                                  max={6}
-                                  step={0.1}
-                                  onValueChange={(v) => setParam("match", "halationTailGamma", v[0] ?? 4)}
-                                />
-                              </div>
-                              <div className="flex gap-2 items-center text-[10px]">
-                                <Label className="text-[10px] w-24">Contrast gate</Label>
-                                <Slider
-                                  className="flex-1"
-                                  value={[lookParams.match.halationContrastGate ?? 1]}
-                                  min={0}
-                                  max={1}
-                                  step={0.01}
-                                  onValueChange={(v) => setParam("match", "halationContrastGate", v[0] ?? 1)}
-                                />
-                              </div>
-                              <div className="flex gap-2 items-center text-[10px]">
-                                <Label className="text-[10px] w-24">Rim strength</Label>
-                                <Slider
-                                  className="flex-1"
-                                  value={[lookParams.match.halationRimStrength ?? 0.6]}
-                                  min={0}
-                                  max={1}
-                                  step={0.01}
-                                  onValueChange={(v) => setParam("match", "halationRimStrength", v[0] ?? 0.6)}
-                                />
-                              </div>
-                              <div className="flex gap-2 items-center text-[10px]">
-                                <Label className="text-[10px] w-24">Bloom strength</Label>
-                                <Slider
-                                  className="flex-1"
-                                  value={[lookParams.match.halationBloomStrength ?? 0.8]}
-                                  min={0}
-                                  max={1}
-                                  step={0.01}
-                                  onValueChange={(v) => setParam("match", "halationBloomStrength", v[0] ?? 0.8)}
-                                />
-                              </div>
-                              <div className="flex gap-2 items-center text-[10px]">
-                                <Label className="text-[10px] w-24">Rim radius</Label>
-                                <Slider
-                                  className="flex-1"
-                                  value={[lookParams.match.halationRimRadius ?? 0.1]}
-                                  min={0}
-                                  max={0.75}
-                                  step={0.05}
-                                  onValueChange={(v) => setParam("match", "halationRimRadius", v[0] ?? 0.1)}
-                                />
-                              </div>
-                              <div className="flex gap-2 items-center text-[10px]">
-                                <Label className="text-[10px] w-24">Bloom radius</Label>
-                                <Slider
-                                  className="flex-1"
-                                  value={[lookParams.match.halationBloomRadius ?? 1]}
-                                  min={0}
-                                  max={2.5}
-                                  step={0.1}
-                                  onValueChange={(v) => setParam("match", "halationBloomRadius", v[0] ?? 1)}
-                                />
-                              </div>
+                              {(
+                                [
+                                  ["highlightWarmthHue", "Warmth hue", 0, 360, 1, 35],
+                                  ["highlightWarmthAmount", "Warmth amount", 0, 1, 0.01, 0.15],
+                                  ["highlightWarmthThreshold", "Warmth threshold", 0.01, 0.5, 0.01, 0.25],
+                                  ["halationEdge", "Halation edge", 0, 1, 0.01, 0.5],
+                                  ["halationStrength", "Halation strength", 0, 1, 0.01, 0.4],
+                                ] as const
+                              ).map(([key, label, min, max, step, fallback]) => (
+                                <div key={key} className="flex gap-2 items-center text-[10px]">
+                                  <Label className="text-[10px] w-24">{label}</Label>
+                                  <Slider
+                                    className="flex-1"
+                                    value={[lookParams.match[key] ?? fallback]}
+                                    min={min}
+                                    max={max}
+                                    step={step}
+                                    onValueChange={(v) => setParam("match", key, v[0] ?? fallback)}
+                                  />
+                                  <span className="text-[10px] tabular-nums w-10">
+                                    {(lookParams.match[key] ?? fallback).toFixed(2)}
+                                  </span>
+                                </div>
+                              ))}
                             </div>
                           </details>
                         </>

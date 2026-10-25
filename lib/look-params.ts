@@ -123,26 +123,16 @@ export interface LookParamsMatch {
   bandMidLuma: number;
   bandLowerHighLuma: number;
   bandUpperHighLuma: number;
-  /** Highlight fill (bloom/density) strength (0..1). Gated to top L percentiles and specular texture. */
-  highlightFillStrength: number;
-  /** Optional highlight fill warmth (-1..1). Small warm tint in affected highlights. */
-  highlightFillWarmth?: number;
-  /** Halation tail gamma (2–6). Steeper = stronger in ultra-highlights (99.99%) vs lower (98%). */
-  halationTailGamma?: number;
-  /** Halation contrast gate (0–1). Dark-neighbor gating: highlight vs shadow, not upper vs lower highlight. */
-  halationContrastGate?: number;
-  /** Halation rim strength (0–1). Thin red edge component. */
-  halationRimStrength?: number;
-  /** Halation bloom strength (0–1). Soft halo component. */
-  halationBloomStrength?: number;
-  /** Halation rim radius (% of image short edge, 0–2). Resolution-independent. */
-  halationRimRadius?: number;
-  /** Halation bloom radius (% of image short edge, 0–10). Resolution-independent. */
-  halationBloomRadius?: number;
-  /** Halation interior guard (0–1). Attenuate halation in highlight cores; 0=off, 0.5=default. */
-  halationInteriorGuard?: number;
-  /** Halation threshold (0.90–0.9999). Entry percentile for halation eligibility. Model 2 only; default 0.98. */
-  halationThreshold?: number;
+  /** Highlight warmth tint hue on the wheel (0–360°, HSV convention, 0 = red, 60 = yellow). */
+  highlightWarmthHue?: number;
+  /** Highlight warmth amount (0–1): handle distance from the wheel centre. */
+  highlightWarmthAmount?: number;
+  /** Highlight warmth threshold (0.01–0.5): upper fraction of the tonal range affected. */
+  highlightWarmthThreshold?: number;
+  /** Halation edge (0–1): bleed radius and size of the highlight zone (top 6–20%). */
+  halationEdge?: number;
+  /** Halation strength (0–1): overall opacity, about 14% at max. */
+  halationStrength?: number;
   /** Refraction: shadow wheel (6 nodes: red, yellow, green, teal, blue, purple). Each node { hue: 0..360°, sat: 0..3 }. */
   refractionShadow?: RefractionWheel;
   /** Refraction: highlight wheel. Same shape. */
@@ -181,8 +171,6 @@ export interface LookParamsMatch {
   refractionPostModel2?: number[];
   /** De-vignette: inner diameter / min(w,h), and corner lift in stops. */
   devignette?: { innerDiameterNorm: number; strengthStops: number };
-  /** Halation: lift exposure topology map by 0..3 stops before halation. */
-  halationExposureTopographyLiftStops?: number;
   /**
    * Lab2: multiply all 7 exposure-curve L_out handles (0.25–4, 1 = neutral).
    * Applied in engine build so sliders stay independent of this master.
@@ -294,16 +282,11 @@ export const DEFAULT_LOOK_PARAMS: LookParams = {
     bandLowerHighLuma: 0,
     bandUpperHighLuma: 0,
     colorDensityCurve: defaultColorDensityCurve(),
-    highlightFillStrength: 2.0,
-    highlightFillWarmth: 0.6,
-    halationTailGamma: 4,
-    halationContrastGate: 1,
-    halationRimStrength: 0.6,
-    halationBloomStrength: 0.8,
-    halationRimRadius: 0.1,
-    halationBloomRadius: 1.0,
-    halationInteriorGuard: 0.5,
-    halationThreshold: 0.92,
+    highlightWarmthHue: 35,
+    highlightWarmthAmount: 0.15,
+    highlightWarmthThreshold: 0.25,
+    halationEdge: 0.5,
+    halationStrength: 0.4,
     actuanceStrength: 0,
     actuanceRadius: 0,
     actuanceHighlightGuard: 0,
@@ -317,7 +300,6 @@ export const DEFAULT_LOOK_PARAMS: LookParams = {
     bandUpperHighTemp: 0,
     refractionPostModel2: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
     devignette: { innerDiameterNorm: 0.65, strengthStops: 0 },
-    halationExposureTopographyLiftStops: 0,
     exposureCurveMasterMul: 1,
     colorDensityCurveMasterMul: 1,
   },

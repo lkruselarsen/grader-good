@@ -68,17 +68,15 @@ export function buildEngineParamsFromLookParams(
       upperHigh: m.bandUpperHighTemp ?? 0,
     },
   };
-  engine.highlightFill = {
-    strength: m.highlightFillStrength ?? 0,
-    warmth: m.highlightFillWarmth ?? 0,
-    tailGamma: m.halationTailGamma ?? 4,
-    contrastGate: m.halationContrastGate ?? 1,
-    rimStrength: m.halationRimStrength ?? 0.6,
-    bloomStrength: m.halationBloomStrength ?? 0.8,
-    rimRadius: m.halationRimRadius ?? 0.1,
-    bloomRadius: m.halationBloomRadius ?? 1.0,
-    interiorGuard: m.halationInteriorGuard ?? 0.5,
-    ...(m.halationThreshold != null ? { threshold: m.halationThreshold } : {}),
+  const dm = DEFAULT_LOOK_PARAMS.match;
+  engine.highlightWarmth = {
+    hue: m.highlightWarmthHue ?? dm.highlightWarmthHue ?? 35,
+    amount: m.highlightWarmthAmount ?? dm.highlightWarmthAmount ?? 0,
+    threshold: m.highlightWarmthThreshold ?? dm.highlightWarmthThreshold ?? 0.25,
+  };
+  engine.halation = {
+    edge: m.halationEdge ?? dm.halationEdge ?? 0.5,
+    strength: m.halationStrength ?? dm.halationStrength ?? 0,
   };
   engine.refractionShadow = (m.refractionShadow ?? defaultRefractionWheel()) as typeof engine.refractionShadow;
   engine.refractionHighlight = (m.refractionHighlight ?? defaultRefractionWheel()) as typeof engine.refractionHighlight;
@@ -116,9 +114,23 @@ export function buildEngineParamsFromLookParams(
       strengthStops: m.devignette.strengthStops,
     };
   }
-  if (m.halationExposureTopographyLiftStops != null) {
-    engine.halationExposureTopographyLiftStops =
-      m.halationExposureTopographyLiftStops;
-  }
   return engine;
+}
+
+/**
+ * Lab2 effects toggle: when disabled, the finishing stages (highlight warmth +
+ * halation) become no-ops while the slider values themselves stay untouched.
+ */
+export function gateFinishingEffects<T extends GradingParams>(
+  engine: T,
+  effectsEnabled: boolean
+): T {
+  if (effectsEnabled) return engine;
+  return {
+    ...engine,
+    highlightWarmth: engine.highlightWarmth
+      ? { ...engine.highlightWarmth, amount: 0 }
+      : undefined,
+    halation: engine.halation ? { ...engine.halation, strength: 0 } : undefined,
+  };
 }

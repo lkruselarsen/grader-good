@@ -33,14 +33,11 @@ export interface Lab2LiveWorkState {
   height: number;
   workA: Float32Array;
   workB: Float32Array;
-  halationMaskA: Float32Array;
-  halationMaskB: Float32Array;
   oklabBase: Float32Array;
   oklabBaseSrcRef: Float32Array | null;
 }
 
 export interface Lab2LivePreviewOptions {
-  halationPreview?: boolean;
   interactiveMode?: boolean;
   interactivePreviewScale?: number;
 }
@@ -157,8 +154,6 @@ export function createLab2LiveWorkState(width: number, height: number): Lab2Live
     height,
     workA: new Float32Array(n),
     workB: new Float32Array(n),
-    halationMaskA: new Float32Array(width * height),
-    halationMaskB: new Float32Array(width * height),
     oklabBase: new Float32Array(n),
     oklabBaseSrcRef: null,
   };
@@ -183,7 +178,7 @@ export function applyLivePostModel2OnlyWithState(
   postM2Base: PixelFrameF32,
   grading: GradingParams,
   state: Lab2LiveWorkState,
-  options?: Lab2LivePreviewOptions
+  _options?: Lab2LivePreviewOptions
 ): PixelFrameF32 {
   const width = postM2Base.width;
   const height = postM2Base.height;
@@ -260,9 +255,6 @@ export function applyLivePostModel2OnlyWithState(
       currentFrame = { width, height, data: out };
     }
   }
-  if (options?.halationPreview) {
-    applyApproxHalationPreviewInPlace(out, width, height, grading, state);
-  }
   return currentFrame;
 }
 
@@ -277,141 +269,4 @@ export function applyLivePostModel2Only(
 ): PixelFrameF32 {
   const state = createLab2LiveWorkState(postM2Base.width, postM2Base.height);
   return applyLivePostModel2OnlyWithState(postM2Base, grading, state, options);
-}
-
-function boxBlur3x3(src: Float32Array, dst: Float32Array, width: number, height: number) {
-  for (let y = 0; y < height; y++) {
-    const y0 = Math.max(0, y - 1);
-    const y2 = Math.min(height - 1, y + 1);
-    for (let x = 0; x < width; x++) {
-      const x0 = Math.max(0, x - 1);
-      const x2 = Math.min(width - 1, x + 1);
-      let sum = 0;
-      let count = 0;
-      for (let yy = y0; yy <= y2; yy++) {
-        for (let xx = x0; xx <= x2; xx++) {
-          sum += src[yy * width + xx] ?? 0;
-          count++;
-        }
-      }
-      dst[y * width + x] = sum / Math.max(1, count);
-    }
-  }
-}
-
-function percentileFromSorted(vals: ArrayLike<number>, len: number, p: number): number {
-  if (len === 0) return 1;
-  const idx = Math.min(len - 1, Math.max(0, Math.floor(p * len)));
-  return (vals[idx] as number | undefined) ?? (vals[len - 1] as number | undefined) ?? 1;
-}
-
-/**
- * Preview-only approximation. This is intentionally non-canonical and must never
- * be used for export/apply/training outputs.
- */
-function applyApproxHalationPreviewInPlace(
-  data: Float32Array,
-  width: number,
-  height: number,
-  grading: GradingParams,
-  state: Lab2LiveWorkState
-) {
-  const fill = grading.highlightFill;
-  const threshold = clamp(fill?.threshold ?? 0.92, 0.9, 0.9999);
-  const strength = clamp(fill?.strength ?? 0, 0, 2);
-  const rimStrength = clamp(fill?.rimStrength ?? 0.6, 0, 1);
-  const bloomStrength = clamp(fill?.bloomStrength ?? 0.8, 0, 1);
-  if (strength <= 1e-4) return;
-
-  const nPix = width * height;
-  const mask = state.halationMaskA;
-  const tmp = state.halationMaskB;
-  const vals = new Float32Array(nPix);
-  let count = 0;
-  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
-    const r = data[i] ?? 0;
-    const g = data[i + 1] ?? 0;
-    const b = data[i + 2] ?? 0;
-    const luma = 0.2627 * r + 0.678 * g + 0.0593 * b;
-    mask[p] = luma;
-    vals[count++] = luma;
-  }
-  const sorted = vals.subarray(0, count);
-  sorted.sort();
-  const pThreshold = percentileFromSorted(sorted, count, threshold);
-  const p99_99 = percentileFromSorted(sorted, count, 0.9999);
-  const span = Math.max(1e-6, p99_99 - pThreshold);
-  const rescueSpan = Math.max(span, Math.max(1e-5, p99_99 * 0.02));
-  const rescueStart = pThreshold - rescueSpan * 0.35;
-
-  // Approximate topography lift in preview domain only (canonical remains in pipeline).
-  const topoLift = clamp(
-    (grading as { halationExposureTopographyLiftStops?: number })
-      .halationExposureTopographyLiftStops ?? 0,
-    0,
-    3
-  );
-  const topoMul = 2 ** (topoLift * 0.25);
-  for (let p = 0; p < nPix; p++) {
-    const lifted = Math.min(1.5, (mask[p] ?? 0) * topoMul);
-    const soft = Math.min(
-      1,
-      Math.max(0, (lifted - rescueStart) / Math.max(1e-6, rescueSpan * 1.35))
-    );
-    mask[p] = soft;
-  }
-
-  // Cheap dark-neighbor gate for likely halation boundaries.
-  boxBlur3x3(mask, tmp, width, height);
-  let gateMax = 1e-6;
-  for (let p = 0; p < nPix; p++) {
-    const edge = Math.max(0, (mask[p] ?? 0) - (tmp[p] ?? 0));
-    tmp[p] = edge;
-    if (edge > gateMax) gateMax = edge;
-  }
-  const contrastGate = clamp(fill?.contrastGate ?? 1, 0, 1);
-  for (let p = 0; p < nPix; p++) {
-    tmp[p] = contrastGate * Math.min(1, (tmp[p] ?? 0) / gateMax);
-  }
-
-  // Rim: mask minus local average gives thin-ish line estimation.
-  boxBlur3x3(mask, state.halationMaskB, width, height);
-  for (let p = 0; p < nPix; p++) {
-    state.halationMaskB[p] = Math.max(0, (mask[p] ?? 0) - (state.halationMaskB[p] ?? 0));
-  }
-  let rimSrc = state.halationMaskB;
-  let rimDst = state.halationMaskA;
-  const rimPasses = Math.max(1, Math.round((fill?.rimRadius ?? 0.1) * 5));
-  for (let i = 0; i < rimPasses; i++) {
-    boxBlur3x3(rimSrc, rimDst, width, height);
-    const t = rimSrc;
-    rimSrc = rimDst;
-    rimDst = t;
-  }
-
-  // Bloom: blurred gated highlight mask controls halo thickness.
-  for (let p = 0; p < nPix; p++) {
-    state.halationMaskA[p] = (mask[p] ?? 0) * (tmp[p] ?? 0);
-  }
-  let bloomSrc = state.halationMaskA;
-  let bloomDst = state.halationMaskB;
-  const bloomPasses = Math.max(2, Math.round((fill?.bloomRadius ?? 1) * 2));
-  for (let i = 0; i < bloomPasses; i++) {
-    boxBlur3x3(bloomSrc, bloomDst, width, height);
-    const t = bloomSrc;
-    bloomSrc = bloomDst;
-    bloomDst = t;
-  }
-
-  const warmth = clamp(fill?.warmth ?? 0, -1, 1);
-  const warmR = 1 + 0.3 * Math.max(0, warmth);
-  const warmG = 1 + 0.1 * Math.max(0, warmth);
-  const warmB = 1 - 0.12 * Math.max(0, warmth);
-  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
-    const rimGlow = strength * rimStrength * (rimSrc[p] ?? 0);
-    const bloomGlow = strength * bloomStrength * (bloomSrc[p] ?? 0);
-    data[i] = (data[i] ?? 0) + rimGlow * 0.6 * warmR + bloomGlow * 0.26 * warmR;
-    data[i + 1] = (data[i + 1] ?? 0) + rimGlow * 0.2 * warmG + bloomGlow * 0.12 * warmG;
-    data[i + 2] = (data[i + 2] ?? 0) + rimGlow * 0.05 * warmB + bloomGlow * 0.06 * warmB;
-  }
 }

@@ -1,5 +1,6 @@
 import type { LookParams as LookParamsT } from "@/lib/look-params";
 import { BULK_ITEM_SETTINGS_PREFIX } from "./constants";
+import type { PreviewRenderer } from "./preview-mode";
 import type { ActiveMatchSelection, Lab2TileBlend } from "./types";
 
 export type BulkItemSettings = {
@@ -9,8 +10,11 @@ export type BulkItemSettings = {
   model2Strength: number;
   model2Robust: boolean;
   liveRerenderEnabled?: boolean;
-  halationPreviewEnabled?: boolean;
-  exportHalationActuance?: boolean;
+  /** Include actuance in exports. */
+  exportActuance?: boolean;
+  /** Effects card toggle (highlight warmth + halation). */
+  effectsEnabled?: boolean;
+  previewRenderer?: PreviewRenderer;
   tileBlend?: Lab2TileBlend;
   sourceDecodeRd1?: boolean;
 };
@@ -24,7 +28,14 @@ export function loadBulkItemSettings(id: string): BulkItemSettings | null {
   try {
     const raw = localStorage.getItem(storageKey(id));
     if (!raw) return null;
-    return JSON.parse(raw) as BulkItemSettings;
+    const parsed = JSON.parse(raw) as BulkItemSettings & {
+      exportHalationActuance?: boolean;
+    };
+    if (parsed.exportActuance == null && parsed.exportHalationActuance != null) {
+      parsed.exportActuance = parsed.exportHalationActuance;
+    }
+    delete parsed.exportHalationActuance;
+    return parsed;
   } catch {
     return null;
   }

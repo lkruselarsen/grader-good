@@ -59,8 +59,124 @@ type LightdriftLibRaw = {
     width?: number;
     height?: number;
   }): Promise<{ success?: boolean; buffer?: Buffer }>;
+  createMemoryImage(): Promise<LibRawMemoryImage>;
   close?(): Promise<void>;
 };
+
+type LibRawMemoryImage = {
+  width: number;
+  height: number;
+  colors: number;
+  bits: number;
+  data: Buffer;
+};
+
+function bufferToUint16(buf: Buffer): Uint16Array {
+  const n = Math.floor(buf.byteLength / 2);
+  if (buf.byteOffset % 2 === 0) {
+    return new Uint16Array(buf.buffer, buf.byteOffset, n);
+  }
+  const out = new Uint16Array(n);
+  for (let i = 0; i < n; i++) out[i] = buf.readUInt16LE(i * 2);
+  return out;
+}
+
+/**
+ * Convert a LibRaw 16-bit processed memory image to linear float RGBA.
+ * Throws if LibRaw delivered anything other than 16 bits per sample, so the
+ * pipeline can never silently run on quantised 8-bit RAW data.
+ * When maxEdge is set and smaller than the image, resizes the 16-bit samples
+ * with sharp (no 8-bit intermediate).
+ */
+async function libRawMemoryImageToLinearFloat(
+  img: LibRawMemoryImage,
+  maxEdge?: number
+): Promise<PixelFrameF32> {
+  if (!img || !img.data || img.bits !== 16) {
+    throw new Error(
+      `LibRaw returned ${img?.bits ?? "unknown"}-bit data; 16-bit linear output is required.`
+    );
+  }
+  let width = img.width;
+  let height = img.height;
+  let channels = img.colors;
+  let samples = bufferToUint16(img.data);
+  if (maxEdge && maxEdge > 0 && Math.max(width, height) > maxEdge) {
+    const sharp = (await import("sharp")).default;
+    // sharp infers raw input depth from the typed-array constructor, so the
+    // samples must be passed as a Uint16Array to be read as 16-bit, and the
+    // rgb16 colourspace stops sharp from converting to 8-bit sRGB on output.
+    const { data, info } = await sharp(samples, {
+      raw: { width, height, channels: channels as 1 | 2 | 3 | 4 },
+      limitInputPixels: false,
+    })
+      .resize(maxEdge, maxEdge, { fit: "inside", withoutEnlargement: true })
+      .toColourspace("rgb16")
+      .raw({ depth: "ushort" })
+      .toBuffer({ resolveWithObject: true });
+    samples = bufferToUint16(data);
+    width = info.width;
+    height = info.height;
+    channels = info.channels;
+  }
+  const pixelCount = width * height;
+  if (samples.length < pixelCount * channels) {
+    throw new Error("LibRaw memory image is smaller than its reported dimensions.");
+  }
+  const out = new Float32Array(pixelCount * 4);
+  const inv = 1 / 65535;
+  for (let i = 0, src = 0; i < pixelCount; i++, src += channels) {
+    const dst = i * 4;
+    const r = (samples[src] ?? 0) * inv;
+    out[dst] = r;
+    out[dst + 1] = channels >= 3 ? (samples[src + 1] ?? 0) * inv : r;
+    out[dst + 2] = channels >= 3 ? (samples[src + 2] ?? 0) * inv : r;
+    out[dst + 3] = 1;
+  }
+  return { width, height, data: out };
+}
+
+/**
+ * Run LibRaw on a RAW buffer with 16-bit linear output (gamma 1) and return
+ * linear float RGBA. outputColor: 0 = camera space (matches browser
+ * decodeDngToLinearFloat), 1 = linear sRGB primaries.
+ */
+async function decodeRawToLinearFloat16(
+  buf: Buffer,
+  outputColor: 0 | 1,
+  maxEdge?: number
+): Promise<{ frame: PixelFrameF32; cameraModel: string }> {
+  const mod = await importLightdriftLibraw();
+  const LibRaw = mod.default ?? mod;
+  const libraw = new (LibRaw as new () => LightdriftLibRaw)();
+  try {
+    const ok = await libraw.loadBuffer(buf);
+    if (!ok) {
+      throw new Error("lightdrift-libraw: loadBuffer failed. RAW file may be corrupted or unsupported.");
+    }
+    await libraw.setOutputParams({
+      output_color: outputColor,
+      output_bps: 16,
+      gamma: [1, 1],
+      no_auto_bright: true,
+    });
+    await libraw.processImage();
+    const img = await libraw.createMemoryImage();
+    const frame = await libRawMemoryImageToLinearFloat(img, maxEdge);
+    let cameraModel = "";
+    try {
+      const meta = (await (libraw as unknown as {
+        getMetadata?: () => Promise<{ model?: string; make?: string }>;
+      }).getMetadata?.()) ?? {};
+      cameraModel = `${meta.make ?? ""} ${meta.model ?? ""}`;
+    } catch {
+      /* metadata is optional */
+    }
+    return { frame, cameraModel };
+  } finally {
+    await libraw.close?.();
+  }
+}
 
 /** Native addon typings are not a valid ES module under strict TS. */
 async function importLightdriftLibraw(): Promise<{
@@ -541,59 +657,17 @@ export async function decodeBufferLinearViaLibRaw(
 const RD1_PIPELINE_MAX_EDGE = 8192;
 
 /**
- * Epson R-D1 / problematic DNG: native LibRaw (no WASM), full-res cap, sRGB→linear float,
- * then same linear baseline as browser `decodeDngToLinearFloat` with R-D1 gainBias 1.6.
- * Falls back to `decodeBuffer` (dcraw/sharp) if LibRaw cannot load the buffer.
+ * Epson R-D1 / problematic DNG: native LibRaw (no WASM), 16-bit linear sRGB
+ * primaries, then the same linear baseline as browser `decodeDngToLinearFloat`
+ * with R-D1 gainBias 1.6. Throws instead of falling back to an 8-bit decode.
  */
 export async function decodeBufferRd1ToLinearFloat(
   buffer: Buffer | ArrayBuffer | ArrayBufferView
 ): Promise<PixelFrameF32> {
   const buf = toBuffer(buffer);
-  const rgba =
-    (await decodeBufferRd1ViaLibRawToSrgbRgba(buf)) ??
-    (await decodeBuffer(buf, RD1_PIPELINE_MAX_EDGE));
-  const frame = pixelFrameRgbaSrgb8ToLinearFloat(rgba);
+  const { frame } = await decodeRawToLinearFloat16(buf, 1, RD1_PIPELINE_MAX_EDGE);
   normalizeDngBaselineLinear(frame.data, frame.width, frame.height, 1.6);
   return frame;
-}
-
-async function decodeBufferRd1ViaLibRawToSrgbRgba(
-  buf: Buffer
-): Promise<PixelFrameRGBA | null> {
-  try {
-    const mod = await importLightdriftLibraw();
-    const LibRaw = mod.default ?? mod;
-    const libraw = new (LibRaw as new () => LightdriftLibRaw)();
-    const ok = await libraw.loadBuffer(buf);
-    if (!ok) {
-      await libraw.close?.();
-      return null;
-    }
-
-    await libraw.setOutputParams({
-      output_color: 1, // sRGB
-      no_auto_bright: true,
-      output_tiff: true,
-    });
-    await libraw.processImage();
-    const result = await libraw.createTIFFBuffer({
-      width: RD1_PIPELINE_MAX_EDGE,
-      height: RD1_PIPELINE_MAX_EDGE,
-    });
-    await libraw.close?.();
-
-    if (!result?.success || !result?.buffer || result.buffer.length === 0)
-      return null;
-    if (result.buffer.length > RAW_TIFF_MAX_BYTES) return null;
-
-    const resized = await resizeTiffBufferToMaxEdge(
-      Buffer.from(result.buffer),
-      RD1_PIPELINE_MAX_EDGE
-    );
-    return await decodeWithSharp(resized, RD1_PIPELINE_MAX_EDGE);
-  } catch {
-    return null;
-  }
 }
 
 /** TIFF-based (II/MM + magic 42). DNG, CR2, NEF, etc. Skip sharp probe; go straight to dcraw. */
@@ -610,22 +684,6 @@ function looksLikeTiffBasedRaw(buf: Buffer): boolean {
 }
 
 /**
- * Convert PixelFrameRGBA (8-bit linear, from RAW linear decode) to PixelFrameF32.
- */
-function rgbaLinearToFloat(rgba: PixelFrameRGBA): PixelFrameF32 {
-  const { width, height, data } = rgba;
-  const n = width * height * 4;
-  const floatData = new Float32Array(n);
-  for (let i = 0; i < data.length; i += 4) {
-    floatData[i] = (data[i] ?? 0) / 255;
-    floatData[i + 1] = (data[i + 1] ?? 0) / 255;
-    floatData[i + 2] = (data[i + 2] ?? 0) / 255;
-    floatData[i + 3] = 1;
-  }
-  return { width, height, data: floatData };
-}
-
-/**
  * Decode buffer to linear float (PixelFrameF32).
  * - RAW: uses lightdrift-libraw ONLY. No dcraw, no Sharp. Throws on failure.
  * - Non-RAW: decodes to sRGB 8-bit via Sharp, converts to linear float.
@@ -637,8 +695,7 @@ export async function decodeBufferToLinearFloat(
   const buf = toBuffer(buffer);
 
   if (looksLikeTiffBasedRaw(buf)) {
-    const linearRgba = await decodeBufferLinearViaLibRawStrict(buf, maxEdge);
-    return rgbaLinearToFloat(linearRgba);
+    return decodeBufferLinearViaLibRawStrict(buf, maxEdge);
   }
 
   const rgba = await decodeBuffer(buf, maxEdge);
@@ -646,61 +703,23 @@ export async function decodeBufferToLinearFloat(
 }
 
 /**
- * Decode RAW buffer to linear RGB via lightdrift-libraw. No fallbacks.
- * Throws on failure. Used by training loop so server matches Lab (full RAW only).
+ * Decode RAW buffer to 16-bit linear float via lightdrift-libraw. No fallbacks.
+ * Mirrors browser `decodeDngToLinearFloat` (camera space, gamma 1, 16-bit,
+ * linear baseline normalisation) so server training matches Lab.
+ * Throws on failure.
  */
 export async function decodeBufferLinearViaLibRawStrict(
   buffer: Buffer | ArrayBuffer | ArrayBufferView,
   maxEdge?: number
-): Promise<PixelFrameRGBA> {
+): Promise<PixelFrameF32> {
   const buf = toBuffer(buffer);
   if (!looksLikeTiffBasedRaw(buf)) {
     throw new Error("decodeBufferLinearViaLibRawStrict: input is not TIFF-based RAW (DNG/CR2/NEF)");
   }
-
-  try {
-    const mod = await importLightdriftLibraw();
-    const LibRaw = mod.default ?? mod;
-    const libraw = new (LibRaw as new () => LightdriftLibRaw)();
-    const ok = await libraw.loadBuffer(buf);
-    if (!ok) {
-      await libraw.close?.();
-      throw new Error("lightdrift-libraw: loadBuffer failed. RAW file may be corrupted or unsupported.");
-    }
-
-    await libraw.setOutputParams({
-      output_color: 0, // raw/linear
-      no_auto_bright: true,
-      output_tiff: true,
-    });
-    await libraw.processImage();
-    const result = await libraw.createTIFFBuffer({
-      width: maxEdge && maxEdge > 0 ? maxEdge : undefined,
-      height: maxEdge && maxEdge > 0 ? maxEdge : undefined,
-    });
-    await libraw.close?.();
-
-    if (!result?.success || !result?.buffer || result.buffer.length === 0) {
-      throw new Error("lightdrift-libraw: createTIFFBuffer failed or returned empty. No fallback.");
-    }
-    if (result.buffer.length > RAW_TIFF_MAX_BYTES) {
-      throw new Error(
-        `lightdrift-libraw: TIFF too large (${(result.buffer.length / (1024 * 1024)).toFixed(1)}MB > ${RAW_TIFF_MAX_BYTES / (1024 * 1024)}MB cap)`
-      );
-    }
-
-    const tiffBuf = Buffer.from(result.buffer);
-    if (maxEdge != null && maxEdge > 0) {
-      const resized = await resizeTiffBufferToMaxEdge(tiffBuf, maxEdge);
-      return await decodeWithSharp(resized, maxEdge);
-    }
-    return await decodeWithSharp(tiffBuf, undefined);
-  } catch (err) {
-    if (err instanceof Error) throw err;
-    throw new Error(
-      "lightdrift-libraw RAW decode failed. Install/verify lightdrift-libraw. No dcraw or Sharp fallback."
-    );
-  }
+  const { frame, cameraModel } = await decodeRawToLinearFloat16(buf, 0, maxEdge);
+  const gainBias = cameraModel.toLowerCase().includes("r-d1") ? 1.6 : 1;
+  normalizeDngBaselineLinear(frame.data, frame.width, frame.height, gainBias);
+  return frame;
 }
 
 export async function decodeBufferLinear(

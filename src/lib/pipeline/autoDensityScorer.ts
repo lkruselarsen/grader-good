@@ -134,7 +134,6 @@ export async function findBestAutoDensityForLab2(input: {
   postModel2PreviewBase: PixelFrameF32;
   lookParams: LookParams;
   finalGrading: LookParams["grading"];
-  halationPreviewEnabled: boolean;
   workingState?: Lab2LiveWorkState | null;
   onPhase?: (label: string) => void;
   isStale?: () => boolean;
@@ -169,7 +168,7 @@ export async function findBestAutoDensityForLab2(input: {
     input.postModel2PreviewBase,
     baselineEngine,
     work,
-    { halationPreview: input.halationPreviewEnabled }
+    {}
   );
   const baselineMetrics = computeFrameMetrics(baselineFrame);
 
@@ -191,7 +190,7 @@ export async function findBestAutoDensityForLab2(input: {
       input.postModel2PreviewBase,
       engine,
       work,
-      { halationPreview: input.halationPreviewEnabled }
+      {}
     );
     const modelScoreRaw = await scoreFrameNaturalness(frame);
     if (input.isStale?.()) break;
@@ -237,7 +236,7 @@ export async function findBestAutoDensityForLab2(input: {
       input.postModel2PreviewBase,
       engine,
       work,
-      { halationPreview: input.halationPreviewEnabled }
+      {}
     );
     const modelScoreRaw = await scoreFrameNaturalness(frame);
     if (input.isStale?.()) break;

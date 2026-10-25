@@ -9,7 +9,6 @@ import {
 } from "@/lib/lab2-live-preview";
 import { downscaleLinearFloatMaxEdge, PREVIEW_LIVE_MAX_EDGE } from "@/lib/scale-linear-float-frame";
 import {
-  buildExposureMapFromFloat,
   pixelFrameF32ToPixelFrameRGBA,
   type PixelFrameF32,
 } from "@/src/lib/pipeline";
@@ -102,7 +101,6 @@ export function buildPostModel2ForItem(
   const pipelineParams = {
     strength: model2Strength,
     grading: engine,
-    exposureMap: buildExposureMapFromFloat(decodedSource),
     matchModel: 2 as const,
     model2Strength,
     model2RobustSampling: model2Robust,
@@ -113,9 +111,7 @@ export function buildPostModel2ForItem(
     throw new Error("Preview frame has invalid dimensions after downscale.");
   }
   const tempState = ensureLab2LiveWorkState(null, preview.width, preview.height);
-  const live = applyLivePostModel2OnlyWithState(preview, engine, tempState, {
-    halationPreview: false,
-  });
+  const live = applyLivePostModel2OnlyWithState(preview, engine, tempState);
   return { base, preview, live, grading };
 }
 

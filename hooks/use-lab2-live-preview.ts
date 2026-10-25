@@ -9,6 +9,7 @@ import {
 import {
   createLab2LivePreviewScheduler,
   type Lab2LivePreviewScheduler,
+  type Lab2LivePreviewSchedulerConfig,
   type ScheduleLiveDrawOpts,
 } from "@/lib/lab2/live-preview-scheduler";
 import type { RgbaFrame } from "@/lib/lab2/types";
@@ -18,6 +19,10 @@ import type { PixelFrameF32 } from "@/src/lib/pipeline";
 export type UseLab2LivePreviewOptions = {
   onSettled?: (rgba: RgbaFrame, lookParams: LookParamsT) => void;
   onError?: (message: string) => void;
+  getRenderer?: Lab2LivePreviewSchedulerConfig["getRenderer"];
+  onLinearFrame?: Lab2LivePreviewSchedulerConfig["onLinearFrame"];
+  onFinishOnly?: Lab2LivePreviewSchedulerConfig["onFinishOnly"];
+  hasLinearFrame?: Lab2LivePreviewSchedulerConfig["hasLinearFrame"];
 };
 
 export function useLab2LivePreview(options: UseLab2LivePreviewOptions = {}) {
@@ -26,11 +31,30 @@ export function useLab2LivePreview(options: UseLab2LivePreviewOptions = {}) {
   const schedulerRef = useRef<Lab2LivePreviewScheduler | null>(null);
   const onSettledRef = useRef(options.onSettled);
   const onErrorRef = useRef(options.onError);
+  const surfaceRef = useRef({
+    getRenderer: options.getRenderer,
+    onLinearFrame: options.onLinearFrame,
+    onFinishOnly: options.onFinishOnly,
+    hasLinearFrame: options.hasLinearFrame,
+  });
 
   useEffect(() => {
     onSettledRef.current = options.onSettled;
     onErrorRef.current = options.onError;
-  }, [options.onSettled, options.onError]);
+    surfaceRef.current = {
+      getRenderer: options.getRenderer,
+      onLinearFrame: options.onLinearFrame,
+      onFinishOnly: options.onFinishOnly,
+      hasLinearFrame: options.hasLinearFrame,
+    };
+  }, [
+    options.onSettled,
+    options.onError,
+    options.getRenderer,
+    options.onLinearFrame,
+    options.onFinishOnly,
+    options.hasLinearFrame,
+  ]);
 
   useEffect(() => {
     schedulerRef.current = createLab2LivePreviewScheduler({
@@ -43,6 +67,11 @@ export function useLab2LivePreview(options: UseLab2LivePreviewOptions = {}) {
       onError: (message) => {
         onErrorRef.current?.(message);
       },
+      getRenderer: () => surfaceRef.current.getRenderer?.() ?? "2d",
+      onLinearFrame: (frame, renderMode, lookParams) =>
+        surfaceRef.current.onLinearFrame?.(frame, renderMode, lookParams),
+      onFinishOnly: (lookParams) => surfaceRef.current.onFinishOnly?.(lookParams),
+      hasLinearFrame: () => surfaceRef.current.hasLinearFrame?.() ?? false,
     });
     return () => {
       schedulerRef.current?.terminate();

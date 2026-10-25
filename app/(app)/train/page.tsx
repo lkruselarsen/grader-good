@@ -338,7 +338,7 @@ export default function TrainPage() {
             ? buildExposureMapFromLinearRgb(
                 linearSource.width,
                 linearSource.height,
-                new Uint8Array(linearSource.data),
+                linearSource.data,
                 4
               )
             : buildExposureMapFromSrgb(decodedSource);
@@ -419,7 +419,8 @@ export default function TrainPage() {
                   : {
                       match: {
                         ...currentParams.match,
-                        highlightFillStrength: 0,
+                        halationStrength: 0,
+                      highlightWarmthAmount: 0,
                       },
                       grading: currentParams.grading,
                     };
@@ -527,7 +528,11 @@ export default function TrainPage() {
           // Pass copies of the buffers — transfer neuters the originals, so we
           // keep decodedSource / decodedRef intact for subsequent iterations.
           const paramsSubstep1: LookParams = {
-            match: { ...currentParams.match, highlightFillStrength: 0 },
+            match: {
+              ...currentParams.match,
+              halationStrength: 0,
+              highlightWarmthAmount: 0,
+            },
             grading: currentParams.grading,
           };
           const engine1 = buildEngineParamsFromLookParams(

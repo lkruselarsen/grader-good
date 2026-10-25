@@ -1,5 +1,5 @@
 /**
- * Server-safe pipeline: match → halation → grain only.
+ * Server-safe pipeline: match → post-grade stages → finishing → grain.
  * No decode step, no dependency on ./decode or libraw-wasm.
  *
  * Use in API routes (e.g. /api/train/openai-loop) where frames are already
@@ -9,9 +9,9 @@
  * "Fatal JavaScript invalid size error 169220804" during webpack chunk processing.
  */
 
-import { buildExposureMapFromFloat, liftExposureMapByStops } from "./exposureMap";
 import { grain, grainFloat } from "./grain";
-import { halation, halationFloat } from "./halation";
+import { applyHalationFloat } from "./finishing/halation";
+import { applyHighlightWarmthFloat } from "./finishing/highlight-warmth";
 import { match, matchFloat } from "./match";
 import { applyExposureCurveFloat } from "./stages/exposureCurvePost";
 import { applyDevignetteFloat } from "./stages/devignette";
@@ -42,9 +42,7 @@ export function processFrames(
   params: PipelineParams
 ): PixelFrameRGBA {
   const afterMatch = match(source, reference, params);
-  const afterHalation = halation(afterMatch, params);
-  const afterGrain = grain(afterHalation, params);
-  return afterGrain;
+  return grain(afterMatch, params);
 }
 
 /**
@@ -57,7 +55,6 @@ export function processFramesFloat(
   params: PipelineParams
 ): PixelFrameF32 {
   let afterMatch = matchFloat(source, reference, params);
-  let halationParams: PipelineParams = params;
   if (params.matchModel === 2 && params.grading) {
     if (
       params.grading.exposureCurve?.L_in?.length &&
@@ -103,18 +100,9 @@ export function processFramesFloat(
         params.grading.highlightSmoothing
       );
     }
-    // Build exposure map before actuance so halation hierarchy/topography is taken
-    // from post-Model2 + post-adjustment (pre-actuance) luminance. Trigger
-    // boundaries are still computed later inside halation from post-grade Y.
-    let exposureMap = buildExposureMapFromFloat(afterMatch);
-    const topoLift = params.grading.halationExposureTopographyLiftStops;
-    if (topoLift != null && topoLift > 1e-6) {
-      exposureMap = liftExposureMapByStops(
-        exposureMap,
-        Math.min(3, topoLift)
-      );
-    }
-    halationParams = { ...params, exposureMap };
+    afterMatch = applyHighlightWarmthFloat(afterMatch, params.grading.highlightWarmth, {
+      inPlace: afterMatch.data !== source.data,
+    });
     const actuanceS = params.grading.actuanceStrength;
     if (actuanceS != null && actuanceS > 1e-3) {
       afterMatch = applyActuanceFloat(
@@ -127,7 +115,13 @@ export function processFramesFloat(
       );
     }
   }
-  const afterHalation = halationFloat(afterMatch, halationParams);
-  const afterGrain = grainFloat(afterHalation, params);
-  return afterGrain;
+  if (params.matchModel !== 2) {
+    afterMatch = applyHighlightWarmthFloat(afterMatch, params.grading?.highlightWarmth, {
+      inPlace: afterMatch.data !== source.data,
+    });
+  }
+  const afterHalation = applyHalationFloat(afterMatch, params.grading?.halation, {
+    inPlace: afterMatch.data !== source.data,
+  });
+  return grainFloat(afterHalation, params);
 }

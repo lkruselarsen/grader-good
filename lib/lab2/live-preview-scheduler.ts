@@ -10,6 +10,8 @@ import {
   defaultDrawCache,
   drawRgbaToCanvasPreview,
 } from "@/lib/lab2/canvas-utils";
+import { coreEngineKey } from "@/lib/lab2/finish-params";
+import type { PreviewRenderer } from "@/lib/lab2/preview-mode";
 import type { RgbaFrame } from "@/lib/lab2/types";
 import {
   pixelFrameF32ToPixelFrameRGBA,
@@ -24,6 +26,7 @@ export const INTERACTIVE_PREVIEW_SCALE_AGGRESSIVE = 0.25;
 type WorkerInitedMsg = { type: "inited"; width: number; height: number };
 type WorkerResultMsg = {
   type: "result";
+  format?: "linear";
   requestId: number;
   width: number;
   height: number;
@@ -41,11 +44,9 @@ type WorkerMsg = WorkerInitedMsg | WorkerResultMsg | WorkerErrorMsg;
 export type ScheduleLiveDrawOpts = {
   forceImmediate?: boolean;
   interactiveExpensive?: boolean;
-  halationPreview?: boolean;
   renderMode?: "interactive" | "settled";
   lookParamsOverride?: LookParamsT;
   liveRerenderEnabled?: boolean;
-  halationPreviewEnabled?: boolean;
   isDragging?: boolean;
   dragCost?: "expensive" | "normal" | null;
   adaptiveQualityMode?: "normal" | "degraded" | "aggressive";
@@ -57,6 +58,16 @@ export type Lab2LivePreviewSchedulerConfig = {
   drawCache?: ReturnType<typeof defaultDrawCache>;
   onSettled?: (rgba: RgbaFrame, lookParams: LookParamsT) => void;
   onError?: (message: string) => void;
+  /** Active preview surface. "webgl" routes graded linear frames to onLinearFrame. */
+  getRenderer?: () => PreviewRenderer;
+  onLinearFrame?: (
+    frame: PixelFrameF32,
+    renderMode: "interactive" | "settled",
+    lookParams: LookParamsT | null
+  ) => void;
+  /** WebGL mode: only finishing params changed, so no worker render was needed. */
+  onFinishOnly?: (lookParams: LookParamsT) => void;
+  hasLinearFrame?: () => boolean;
 };
 
 export type Lab2LivePreviewScheduler = {
@@ -91,6 +102,9 @@ export function createLab2LivePreviewScheduler(
   let queuedRenderOptions: Lab2LivePreviewOptions | null = null;
   let queuedLookParams: LookParamsT | null = null;
   let queuedRenderMode: "interactive" | "settled" = "settled";
+  let lastCoreKey: string | null = null;
+
+  const isWebgl = () => config.getRenderer?.() === "webgl";
 
   const drawToCanvas = (rgba: RgbaFrame, renderMode: "interactive" | "settled") => {
     drawRgbaToCanvasPreview(
@@ -118,6 +132,7 @@ export function createLab2LivePreviewScheduler(
       grading: engine,
       options,
       renderMode,
+      ...(isWebgl() ? { output: "linear" as const } : {}),
     });
   };
 
@@ -125,9 +140,7 @@ export function createLab2LivePreviewScheduler(
     if (!queuedEngine || !workerReady || workerInFlight) return;
     const requestId = ++latestRenderReqId;
     workerInFlight = true;
-    const options: Lab2LivePreviewOptions = queuedRenderOptions ?? {
-      halationPreview: false,
-    };
+    const options: Lab2LivePreviewOptions = queuedRenderOptions ?? {};
     const renderMode: "interactive" | "settled" = options.interactiveMode
       ? "interactive"
       : "settled";
@@ -147,6 +160,7 @@ export function createLab2LivePreviewScheduler(
     queuedEngine = null;
     queuedRenderOptions = null;
     queuedLookParams = null;
+    lastCoreKey = null;
   };
 
   const runMainThreadRender = (
@@ -168,6 +182,14 @@ export function createLab2LivePreviewScheduler(
       localWorkState,
       options
     );
+    if (isWebgl()) {
+      config.onLinearFrame?.(
+        { width: live.width, height: live.height, data: new Float32Array(live.data) },
+        renderMode,
+        lookParams
+      );
+      return;
+    }
     const rgba = pixelFrameF32ToPixelFrameRGBA(live);
     drawToCanvas(rgba, renderMode);
   };
@@ -203,13 +225,21 @@ export function createLab2LivePreviewScheduler(
       workerInFlight = false;
       if (msg.requestId < latestDrawnReqId) return;
       latestDrawnReqId = msg.requestId;
-      const rgba: RgbaFrame = {
-        width: msg.width,
-        height: msg.height,
-        data: new Uint8ClampedArray(msg.data),
-      };
       const renderMode = msg.renderMode ?? queuedRenderMode;
-      drawToCanvas(rgba, renderMode);
+      if (msg.format === "linear") {
+        config.onLinearFrame?.(
+          { width: msg.width, height: msg.height, data: new Float32Array(msg.data) },
+          renderMode,
+          queuedLookParams
+        );
+      } else {
+        const rgba: RgbaFrame = {
+          width: msg.width,
+          height: msg.height,
+          data: new Uint8ClampedArray(msg.data),
+        };
+        drawToCanvas(rgba, renderMode);
+      }
 
       if (!workerQueued) return;
       workerQueued = false;
@@ -270,13 +300,10 @@ export function createLab2LivePreviewScheduler(
           : INTERACTIVE_PREVIEW_SCALE;
       const options: Lab2LivePreviewOptions = interactiveExpensive
         ? {
-            halationPreview: false,
             interactiveMode: true,
             interactivePreviewScale: interactiveScale,
           }
         : {
-            halationPreview:
-              opts.halationPreview ?? opts.halationPreviewEnabled ?? false,
             interactiveMode: false,
             interactivePreviewScale: 1,
           };
@@ -292,12 +319,25 @@ export function createLab2LivePreviewScheduler(
         (interactiveExpensive ? "interactive" : "settled");
       queuedRenderMode = renderMode;
 
+      let coreKey: string | null = null;
+      if (isWebgl()) {
+        coreKey = coreEngineKey(
+          engine,
+          options.interactiveMode ? (options.interactivePreviewScale ?? 1) : 1
+        );
+        if (coreKey === lastCoreKey && config.hasLinearFrame?.()) {
+          config.onFinishOnly?.(lookForRender);
+          return;
+        }
+      }
+
       const now = Date.now();
       const throttleMs = interactiveExpensive
         ? EXPENSIVE_DRAG_THROTTLE_MS
         : NORMAL_DRAG_THROTTLE_MS;
       if (!forceImmediate && now - lastDispatchMs < throttleMs) return;
       lastDispatchMs = now;
+      lastCoreKey = coreKey;
 
       if (worker && workerReady) {
         if (workerInFlight) {

@@ -159,21 +159,26 @@ export interface LookParams {
    */
   colorBandOverrides?: ColorBandOverrides;
   /**
-   * Optional highlight fill (bloom/density) for the halation stage. Not fitted
-   * from reference; driven from match UI and corrections.
+   * Finishing stage: chroma tint of the upper tonal range. Not fitted from
+   * reference; driven from the Lab UI. amount 0 = off.
    */
-  highlightFill?: {
+  highlightWarmth?: {
+    /** Wheel hue in degrees (HSV convention: 0 red, 60 yellow, 120 green). */
+    hue: number;
+    /** 0..1, handle distance from the wheel centre. */
+    amount: number;
+    /** 0.01..0.5, upper fraction of the tonal range affected. */
+    threshold: number;
+  };
+  /**
+   * Finishing stage: film halation (orange scatter around highlights).
+   * strength 0 = off.
+   */
+  halation?: {
+    /** 0..1: bleed radius and highlight-zone size. */
+    edge: number;
+    /** 0..1: overall opacity (about 14% at max). */
     strength: number;
-    warmth?: number;
-    tailGamma?: number;
-    contrastGate?: number;
-    rimStrength?: number;
-    bloomStrength?: number;
-    rimRadius?: number;
-    bloomRadius?: number;
-    interiorGuard?: number;
-    /** Entry percentile for halation eligibility (0.90–0.9999). Model 2 only. */
-    threshold?: number;
   };
   /** Refraction: shadow wheel. Six nodes { hue: 0..360°, sat: 0..3 } order: red, yellow, green, teal, blue, purple. */
   refractionShadow?: RefractionWheelEngine;
@@ -206,11 +211,6 @@ export interface LookParams {
   refractionPostModel2?: number[];
   /** Radial exposure lift to counter vignetting; inner disk unchanged. */
   devignette?: { innerDiameterNorm: number; strengthStops: number };
-  /**
-   * Multiply halation topology luminance by 2^stops (0..3) before halation eligibility.
-   * Compensates when colour match lifts exposure but RAW topology was built from pre-lift data.
-   */
-  halationExposureTopographyLiftStops?: number;
 }
 
 /** Six nodes: red, yellow, green, teal, blue, purple. hue 0..360 (degrees), sat 0..3 (multiplier, 1=normal). */
@@ -985,8 +985,6 @@ export function fitLookParamsFromReference(
         bandMidLuma: 0,
         bandLowerHighLuma: 0,
         bandUpperHighLuma: 0,
-        highlightFillStrength: 0,
-        highlightFillWarmth: 0,
       },
       LEARNED_HEURISTICS,
       {
