@@ -300,80 +300,116 @@ type LibRawOpenOptions = {
   gamm?: [number, number];
 };
 
+type LibRawRgb = {
+  width: number;
+  height: number;
+  /** Packed RGB samples (3 per pixel). */
+  samples: Uint16Array | Uint8Array;
+  /** Multiply a sample by this to get 0..1. */
+  scale: number;
+};
+
 /**
- * Decode a DNG file to linear-ish RGB for exposure map extraction.
- * Uses outputColor: 0 (raw/camera) and gamm: [1, 1] for linear when supported.
- * Returns null for non-DNG files. Caller should use buildExposureMapFromSrgb on the main decode for non-RAW.
+ * Normalise libraw-wasm imageData() output into packed RGB samples.
+ * With outputBps: 16 the wasm build may return either a Uint16Array view or the
+ * raw little-endian bytes as a Uint8Array; both are handled. 8-bit output is
+ * rejected so a silent quantisation regression can never reach the pipeline.
  */
-export async function decodeDngLinear(file: File): Promise<PixelFrameRGBA | null> {
+function extractLibRawRgb16(image: unknown, meta: LibRawMetadata): LibRawRgb | null {
+  const obj = image as {
+    width?: unknown;
+    height?: unknown;
+    bits?: unknown;
+    data?: unknown;
+  } | null;
+  let width = meta.width;
+  let height = meta.height;
+  let raw: unknown = image;
+  if (obj && typeof obj.width === "number" && typeof obj.height === "number" && obj.data) {
+    width = obj.width;
+    height = obj.height;
+    raw = obj.data;
+  }
+  const declaredBits = obj && typeof obj.bits === "number" ? obj.bits : null;
+
+  let samples: Uint16Array;
+  if (raw instanceof Uint16Array) {
+    samples = raw;
+  } else if (raw instanceof Uint8Array || raw instanceof Uint8ClampedArray) {
+    const bytes = raw as Uint8Array;
+    const looksLike16 =
+      declaredBits === 16 || (declaredBits == null && bytes.length >= width * height * 6);
+    if (!looksLike16) {
+      throw new Error("LibRaw returned 8-bit data; refusing to decode below 16-bit.");
+    }
+    const n = Math.floor(bytes.length / 2);
+    if (bytes.byteOffset % 2 === 0) {
+      samples = new Uint16Array(bytes.buffer, bytes.byteOffset, n);
+    } else {
+      samples = new Uint16Array(n);
+      for (let i = 0; i < n; i++) {
+        samples[i] = (bytes[2 * i] ?? 0) | ((bytes[2 * i + 1] ?? 0) << 8);
+      }
+    }
+  } else {
+    return null;
+  }
+
+  let pixelCount = width * height;
+  if (samples.length < pixelCount * 3) {
+    const totalPixelsFromData = Math.floor(samples.length / 3);
+    if (totalPixelsFromData <= 0) return null;
+    const aspect = width > 0 && height > 0 ? width / height : 1;
+    height = Math.max(1, Math.round(Math.sqrt(totalPixelsFromData / (aspect || 1))));
+    width = Math.max(1, Math.round(totalPixelsFromData / height));
+    pixelCount = width * height;
+    if (pixelCount * 3 > samples.length) {
+      height = Math.max(1, Math.floor(totalPixelsFromData / width));
+    }
+  }
+  return { width, height, samples, scale: 1 / 65535 };
+}
+
+const LINEAR_16BIT_OPEN_OPTIONS: LibRawOpenOptions = {
+  useCameraWb: true,
+  useAutoWb: false,
+  outputColor: 0,
+  outputBps: 16,
+  noAutoBright: true,
+  expCorrec: false,
+  gamm: [1, 1],
+};
+
+function libRawRgbToLinearFloat(rgb: LibRawRgb): PixelFrameF32 {
+  const { width, height, samples, scale } = rgb;
+  const pixelCount = width * height;
+  const floatData = new Float32Array(pixelCount * 4);
+  for (let i = 0, src = 0; i < pixelCount; i++, src += 3) {
+    const dst = i * 4;
+    floatData[dst] = (samples[src] ?? 0) * scale;
+    floatData[dst + 1] = (samples[src + 1] ?? 0) * scale;
+    floatData[dst + 2] = (samples[src + 2] ?? 0) * scale;
+    floatData[dst + 3] = 1;
+  }
+  return { width, height, data: floatData };
+}
+
+/**
+ * Decode a DNG file to un-normalised linear float (16-bit LibRaw output) for
+ * exposure map extraction. Returns null for non-DNG files or decode failure.
+ */
+export async function decodeDngLinear(file: File): Promise<PixelFrameF32 | null> {
   if (!isDng(file)) return null;
   try {
     const { default: LibRaw } = await loadLibRaw();
     const buf = await file.arrayBuffer();
     const raw = new LibRaw();
-
-    const opts: LibRawOpenOptions = {
-      useCameraWb: true,
-      useAutoWb: false,
-      outputColor: 0,
-      outputBps: 8,
-      noAutoBright: true,
-      expCorrec: false,
-      gamm: [1, 1],
-    };
-
-    await raw.open(new Uint8Array(buf), opts);
-
+    await raw.open(new Uint8Array(buf), LINEAR_16BIT_OPEN_OPTIONS);
     const meta = (await raw.metadata()) as LibRawMetadata;
     const image = await raw.imageData();
-
-    let width: number;
-    let height: number;
-    let rgbData: Uint8Array;
-
-    if (
-      image &&
-      typeof (image as { width?: unknown }).width === "number" &&
-      typeof (image as { height?: unknown }).height === "number" &&
-      (image as { data?: unknown }).data instanceof Uint8Array
-    ) {
-      const img = image as { width: number; height: number; data: Uint8Array };
-      width = img.width;
-      height = img.height;
-      rgbData = img.data;
-    } else {
-      width = meta.width;
-      height = meta.height;
-      rgbData = image as Uint8Array;
-    }
-
-    let pixelCount = width * height;
-    const expectedBytes = pixelCount * 3;
-    if (rgbData.length < expectedBytes) {
-      const totalPixelsFromData = Math.floor(rgbData.length / 3);
-      if (totalPixelsFromData <= 0) return null;
-      const aspect = width > 0 && height > 0 ? width / height : 1;
-      const newHeight = Math.max(1, Math.round(Math.sqrt(totalPixelsFromData / (aspect || 1))));
-      const newWidth = Math.max(1, Math.round(totalPixelsFromData / newHeight));
-      width = newWidth;
-      height = newHeight;
-      pixelCount = width * height;
-    }
-
-    const rgba = new Uint8ClampedArray(pixelCount * 4);
-    let src = 0;
-    for (let i = 0; i < pixelCount; i++) {
-      const r = rgbData[src++];
-      const g = rgbData[src++];
-      const b = rgbData[src++];
-      const dst = i * 4;
-      rgba[dst] = r;
-      rgba[dst + 1] = g;
-      rgba[dst + 2] = b;
-      rgba[dst + 3] = 255;
-    }
-
-    return { width, height, data: rgba };
+    const rgb = extractLibRawRgb16(image, meta);
+    if (!rgb) return null;
+    return libRawRgbToLinearFloat(rgb);
   } catch {
     return null;
   }
@@ -441,8 +477,8 @@ export async function decode(input: DecodeInput): Promise<PixelFrameRGBA> {
 
 /**
  * Decode a DNG/RAW file to linear float (PixelFrameF32).
- * Uses outputColor: 0 (linear), applies normalizeDngBaseline in linear space.
- * Returns null for non-DNG files.
+ * Uses outputColor: 0, gamma 1 and 16 bits per sample, then applies
+ * normalizeDngBaseline in linear space. Returns null for non-DNG files.
  */
 export async function decodeDngToLinearFloat(file: File): Promise<PixelFrameF32 | null> {
   if (!isDng(file)) return null;
@@ -450,64 +486,21 @@ export async function decodeDngToLinearFloat(file: File): Promise<PixelFrameF32 
     const { default: LibRaw } = await loadLibRaw();
     const buf = await file.arrayBuffer();
     const raw = new LibRaw();
-    await raw.open(new Uint8Array(buf), {
-      useCameraWb: true,
-      useAutoWb: false,
-      outputColor: 0,
-      outputBps: 8,
-      noAutoBright: true,
-      expCorrec: false,
-      gamm: [1, 1],
-    });
+    await raw.open(new Uint8Array(buf), LINEAR_16BIT_OPEN_OPTIONS);
     const meta = (await raw.metadata()) as LibRawMetadata;
     const image = await raw.imageData();
-    let width: number;
-    let height: number;
-    let rgbData: Uint8Array;
-    if (
-      image &&
-      typeof (image as { width?: unknown }).width === "number" &&
-      typeof (image as { height?: unknown }).height === "number" &&
-      (image as { data?: unknown }).data instanceof Uint8Array
-    ) {
-      const img = image as { width: number; height: number; data: Uint8Array };
-      width = img.width;
-      height = img.height;
-      rgbData = img.data;
-    } else {
-      width = meta.width;
-      height = meta.height;
-      rgbData = image as Uint8Array;
-    }
-    let pixelCount = width * height;
-    const expectedBytes = pixelCount * 3;
-    if (rgbData.length < expectedBytes) {
-      const totalPixelsFromData = Math.floor(rgbData.length / 3);
-      if (totalPixelsFromData <= 0) return null;
-      const aspect = width > 0 && height > 0 ? width / height : 1;
-      const newHeight = Math.max(1, Math.round(Math.sqrt(totalPixelsFromData / (aspect || 1))));
-      const newWidth = Math.max(1, Math.round(totalPixelsFromData / newHeight));
-      width = newWidth;
-      height = newHeight;
-      pixelCount = width * height;
-    }
-    const floatData = new Float32Array(pixelCount * 4);
-    let src = 0;
-    for (let i = 0; i < pixelCount; i++) {
-      const dst = i * 4;
-      floatData[dst] = (rgbData[src++] ?? 0) / 255;
-      floatData[dst + 1] = (rgbData[src++] ?? 0) / 255;
-      floatData[dst + 2] = (rgbData[src++] ?? 0) / 255;
-      floatData[dst + 3] = 1;
-    }
+    const rgb = extractLibRawRgb16(image, meta);
+    if (!rgb) return null;
+    const frame = libRawRgbToLinearFloat(rgb);
     let gainBias = 1;
     const cameraModel = meta.cameraModel ?? meta.model ?? "";
     if (cameraModel.toLowerCase().includes("r-d1")) {
       gainBias = 1.6;
     }
-    normalizeDngBaselineLinear(floatData, width, height, gainBias);
-    return { width, height, data: floatData };
-  } catch {
+    normalizeDngBaselineLinear(frame.data, frame.width, frame.height, gainBias);
+    return frame;
+  } catch (err) {
+    console.error("[decodeDngToLinearFloat] 16-bit decode failed", err);
     return null;
   }
 }

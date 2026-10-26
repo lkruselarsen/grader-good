@@ -67,7 +67,7 @@ Parameters (deltas to add; omit for no change):
 - colorDensityCurve.scale_0 … scale_6: 0.8–2.5. Per-tonal chroma.
 - actuanceStrength (0–3), actuanceRadius (0.5–5), actuanceHighlightGuard (0.5–0.9), actuanceHighlightGuardFloor (0.2–0.75), actuanceHighlightMinSize (0.002–0.02).
 - bandLowerShadowHue/Temp, bandUpperShadowHue/Temp, bandMidHue/Temp, bandLowerHighHue/Temp, bandUpperHighHue/Temp: ±0.5. Hue/temp per band.
-- highlightFillStrength (0–2), highlightFillWarmth (-1–1), halationThreshold (0.9–0.9999), halationTailGamma (2–6), halationContrastGate (0–1), halationRimStrength/BloomStrength (0–1), halationRimRadius (0–0.75), halationBloomRadius (0–2.5).
+- highlightWarmthHue (0–360°, wheel hue of the highlight tint; 35 = warm orange), highlightWarmthAmount (0–1, tint strength), highlightWarmthThreshold (0.01–0.5, upper fraction of the tonal range tinted; default 0.25), halationAmount (0–1, overall scattered exposure around intense highlights; self-limiting, subtle even at 1), halationSensitivity (0–1, exposure threshold; higher = halation starts fewer stops above middle grey), halationRadius (0–1, physical scattering scale), halationWarmth (0–1, halo colour from red-leaning to orange).
 `;
 
 const SYSTEM_PROMPT = `Your goal is to make the source/result image look like the reference image.

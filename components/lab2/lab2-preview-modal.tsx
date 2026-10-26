@@ -10,6 +10,7 @@ import {
   usePanelSidebar,
 } from "@/components/app/panel-sidebar";
 import { Lab2ControlsPanel } from "@/components/lab2/lab2-controls-panel";
+import { PreviewRendererToggle } from "@/components/lab2/preview-renderer-toggle";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -26,6 +27,7 @@ import {
   isValidRgbaFrame,
 } from "@/lib/lab2/canvas-utils";
 import { saveBulkItemSettings } from "@/lib/lab2/bulk-storage";
+import type { PreviewRenderer } from "@/lib/lab2/preview-mode";
 import type { BulkItem } from "@/lib/lab2/types";
 import type { GrainExportRequest } from "@/components/grain/grain-options-dialog";
 import type { ComponentProps } from "react";
@@ -37,10 +39,14 @@ type Lab2PreviewModalProps = {
   busy: boolean;
   isExporting: boolean;
   hasMatch: boolean;
-  exportHalationActuance: boolean;
+  exportActuance: boolean;
   onClose: () => void;
-  onExportHalationActuanceChange: (v: boolean) => void;
-  onApplyHalationActuance: () => void;
+  onExportActuanceChange: (v: boolean) => void;
+  onApplyFullPipeline: () => void;
+  previewRenderer: PreviewRenderer;
+  onPreviewRendererChange: (value: PreviewRenderer) => void;
+  /** Callback ref for the WebGL-mode canvas (mounted only in WebGL mode). */
+  webglCanvasRef?: (el: HTMLCanvasElement | null) => void;
   onExportPng: () => void;
   onExportPreviewPng: () => void;
   onExportPngLow: () => void;
@@ -87,11 +93,15 @@ function ModalPreviewViewport({
   previewRgba,
   canvasRef: externalCanvasRef,
   onPreviewMaxEdge,
+  previewRenderer = "2d",
+  webglCanvasRef,
   children,
 }: {
   previewRgba?: { width: number; height: number; data: Uint8ClampedArray } | null;
   canvasRef?: React.RefObject<HTMLCanvasElement | null>;
   onPreviewMaxEdge?: (maxEdge: number) => void;
+  previewRenderer?: PreviewRenderer;
+  webglCanvasRef?: (el: HTMLCanvasElement | null) => void;
   children: React.ReactNode;
 }) {
   const { open, width: sidebarWidth, isMobile } = usePanelSidebar();
@@ -106,6 +116,7 @@ function ModalPreviewViewport({
   });
 
   const sidebarPx = isMobile ? 0 : open ? sidebarWidth : PANEL_ICON_WIDTH;
+  const showWebgl = previewRenderer === "webgl" && !!webglCanvasRef;
 
   const redraw = useCallback(() => {
     if (!previewRgba || !isValidRgbaFrame(previewRgba)) return;
@@ -173,8 +184,21 @@ function ModalPreviewViewport({
             maxHeight: layout.maxCanvasH,
             width: "auto",
             height: "auto",
+            display: showWebgl ? "none" : undefined,
           }}
         />
+        {showWebgl && (
+          <canvas
+            ref={webglCanvasRef}
+            className="rounded-lg border bg-black object-contain"
+            style={{
+              maxWidth: layout.maxCanvasW,
+              maxHeight: layout.maxCanvasH,
+              width: "auto",
+              height: "auto",
+            }}
+          />
+        )}
         {children}
       </div>
     </div>
@@ -188,10 +212,13 @@ export function Lab2PreviewModal({
   busy,
   isExporting,
   hasMatch,
-  exportHalationActuance,
+  exportActuance,
   onClose,
-  onExportHalationActuanceChange,
-  onApplyHalationActuance,
+  onExportActuanceChange,
+  onApplyFullPipeline,
+  previewRenderer,
+  onPreviewRendererChange,
+  webglCanvasRef,
   onExportPng,
   onExportPreviewPng,
   onExportPngLow,
@@ -233,6 +260,8 @@ export function Lab2PreviewModal({
           previewRgba={previewRgba}
           canvasRef={canvasRef}
           onPreviewMaxEdge={onPreviewMaxEdge}
+          previewRenderer={previewRenderer}
+          webglCanvasRef={webglCanvasRef}
         >
           <div className="flex flex-wrap items-center justify-center gap-2">
             <DropdownMenu>
@@ -243,19 +272,19 @@ export function Lab2PreviewModal({
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" className="w-56">
                 <DropdownMenuCheckboxItem
-                  checked={exportHalationActuance}
+                  checked={exportActuance}
                   onCheckedChange={(checked) =>
-                    onExportHalationActuanceChange(checked === true)
+                    onExportActuanceChange(checked === true)
                   }
                 >
-                  Halation + actuance
+                  Actuance
                 </DropdownMenuCheckboxItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
                   disabled={!hasMatch || busy}
-                  onClick={onApplyHalationActuance}
+                  onClick={onApplyFullPipeline}
                 >
-                  {busy && !isExporting ? "Applying…" : "Apply halation + actuance"}
+                  {busy && !isExporting ? "Applying…" : "Apply full pipeline"}
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -330,6 +359,10 @@ export function Lab2PreviewModal({
                 )}
               </DropdownMenuContent>
             </DropdownMenu>
+            <PreviewRendererToggle
+              value={previewRenderer}
+              onChange={onPreviewRendererChange}
+            />
           </div>
           {status && (
             <p className="text-xs text-muted-foreground max-w-md text-center">{status}</p>

@@ -1,4 +1,7 @@
-import { buildEngineParamsFromLookParams } from "@/lib/build-engine-params";
+import {
+  buildEngineParamsFromLookParams,
+  gateFinishingEffects,
+} from "@/lib/build-engine-params";
 import type { LookParams as LookParamsT } from "@/lib/look-params";
 import { runExportGradingInWorker } from "@/lib/lab2/export-worker-client";
 import {
@@ -13,7 +16,10 @@ export type BuildExportPngBlobInput = {
   finalGrading: LookParamsT["grading"];
   model2Strength: number;
   model2Robust: boolean;
-  exportHalationActuance: boolean;
+  /** Include actuance (local contrast) in the export. */
+  exportActuance: boolean;
+  /** Effects card toggle: include highlight warmth + halation (matches preview). */
+  effectsEnabled: boolean;
 };
 
 /** Canonical export path: full-resolution RAW-decoded linear float only. */
@@ -21,17 +27,13 @@ export async function buildExportPngBlobFromFrames(
   input: BuildExportPngBlobInput
 ): Promise<Blob> {
   const { decodedSource: src, decodedRef: ref, lookParams, finalGrading } = input;
-  const engine = buildEngineParamsFromLookParams(lookParams, finalGrading);
-  const grading = input.exportHalationActuance
+  const engine = gateFinishingEffects(
+    buildEngineParamsFromLookParams(lookParams, finalGrading),
+    input.effectsEnabled
+  );
+  const grading = input.exportActuance
     ? engine
-    : {
-        ...engine,
-        actuanceStrength: 0,
-        halationExposureTopographyLiftStops: 0,
-        highlightFill: engine.highlightFill
-          ? { ...engine.highlightFill, strength: 0 }
-          : { strength: 0 },
-      };
+    : { ...engine, actuanceStrength: 0 };
   const rgba = await runExportGradingInWorker({
     decodedSource: src,
     decodedRef: ref,
@@ -113,6 +115,21 @@ export async function scalePngBlobToLongEdge(
 }
 
 export { scalePngBlobToDimensions };
+
+/** Encodes an 8-bit preview frame (e.g. the WebGL presenter readback). */
+export function buildPngBlobFromRgba(rgba: {
+  width: number;
+  height: number;
+  data: Uint8ClampedArray;
+}): Promise<Blob> {
+  const canvas = document.createElement("canvas");
+  canvas.width = rgba.width;
+  canvas.height = rgba.height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return Promise.reject(new Error("No 2D context"));
+  ctx.putImageData(frameToImageData(rgba), 0, 0);
+  return buildPreviewPngBlobFromCanvas(canvas);
+}
 
 /** Encodes the current preview canvas only (no full-res pipeline). */
 export function buildPreviewPngBlobFromCanvas(

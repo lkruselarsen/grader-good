@@ -85,23 +85,16 @@ function clampMatchParam(key: string, value: number): number {
     case "bandLowerHighLuma":
     case "bandUpperHighLuma":
       return clamp(value, -0.5, 0.5);
-    case "highlightFillStrength":
+    case "highlightWarmthHue":
+      return ((value % 360) + 360) % 360;
+    case "highlightWarmthAmount":
+    case "halationAmount":
+    case "halationSensitivity":
+    case "halationRadius":
+    case "halationWarmth":
       return clamp(value, 0, 1);
-    case "highlightFillWarmth":
-      return clamp(value, -1, 1);
-    case "halationTailGamma":
-      return clamp(value, 2, 6);
-    case "halationContrastGate":
-      return clamp(value, 0, 1);
-    case "halationRimStrength":
-    case "halationBloomStrength":
-      return clamp(value, 0, 1);
-    case "halationRimRadius":
-      return clamp(value, 0, 2);
-    case "halationBloomRadius":
-      return clamp(value, 0, 10);
-    case "halationThreshold":
-      return clamp(value, 0.9, 0.9999);
+    case "highlightWarmthThreshold":
+      return clamp(value, 0.01, 0.5);
     case "actuanceStrength":
       return clamp(value, 0, 2);
     case "actuanceRadius":

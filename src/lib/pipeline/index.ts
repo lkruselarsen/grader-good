@@ -15,7 +15,13 @@ export {
   type ExposureMap,
 } from "./exposureMap";
 export { match } from "./match";
-export { halation } from "./halation";
+export {
+  applyFinishingFloat,
+  applyHalationFloat,
+  applyHighlightWarmthFloat,
+  hasActiveFinishing,
+  type FinishParams,
+} from "./finishing";
 export { grain } from "./grain";
 export type {
   PixelFrameRGBA,

@@ -20,8 +20,9 @@ type RenderMsg = {
   requestId: number;
   renderMode?: "interactive" | "settled";
   grading: GradingParams;
+  /** "linear": return the graded Float32 frame for the WebGL finishing presenter. */
+  output?: "rgba" | "linear";
   options?: {
-    halationPreview?: boolean;
     interactiveMode?: boolean;
     interactivePreviewScale?: number;
   };
@@ -75,7 +76,6 @@ self.onmessage = (e: MessageEvent<WorkerInMsg>) => {
     }
 
     const renderOptions = {
-      halationPreview: false,
       interactiveMode: false,
       interactivePreviewScale: 1,
       ...(msg.options ?? {}),
@@ -105,6 +105,32 @@ self.onmessage = (e: MessageEvent<WorkerInMsg>) => {
       renderOptions
     );
     const tCompute1 = now();
+    const renderMode =
+      msg.renderMode ?? (renderOptions.interactiveMode ? "interactive" : "settled");
+    if (msg.output === "linear") {
+      // `out` is backed by the reusable work buffer, so transfer a copy.
+      const linear = new Float32Array(out.data);
+      const tPack1 = now();
+      self.postMessage(
+        {
+          type: "result",
+          format: "linear",
+          requestId: msg.requestId,
+          width: out.width,
+          height: out.height,
+          data: linear.buffer,
+          renderMode,
+          telemetry: {
+            computeMs: tCompute1 - tCompute0,
+            packMs: tPack1 - tCompute1,
+            totalWorkerMs: tPack1 - tCompute0,
+          },
+        },
+        // @ts-expect-error transfer list in worker postMessage
+        [linear.buffer]
+      );
+      return;
+    }
     const rgba = pixelFrameF32ToPixelFrameRGBA(out);
     const tPack1 = now();
     self.postMessage(
@@ -114,7 +140,7 @@ self.onmessage = (e: MessageEvent<WorkerInMsg>) => {
         width: rgba.width,
         height: rgba.height,
         data: rgba.data.buffer,
-        renderMode: msg.renderMode ?? (renderOptions.interactiveMode ? "interactive" : "settled"),
+        renderMode,
         telemetry: {
           computeMs: tCompute1 - tCompute0,
           packMs: tPack1 - tCompute1,

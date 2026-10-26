@@ -3,6 +3,7 @@
 import React, {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -12,8 +13,13 @@ import {
   type GrainExportRequest,
 } from "@/components/grain/grain-options-dialog";
 import { useLab2LivePreview } from "@/hooks/use-lab2-live-preview";
+import { useFinishingPreview } from "@/hooks/use-finishing-preview";
+import { finishParamsFromLook } from "@/lib/lab2/finish-params";
+import { PREVIEW_MAX_EDGE } from "@/lib/lab2/constants";
+import type { PreviewRenderer } from "@/lib/lab2/preview-mode";
 import {
   buildExportPngBlobFromFrames,
+  buildPngBlobFromRgba,
   buildPreviewPngBlobFromCanvas,
   downloadPngBlob,
   scalePngBlob,
@@ -79,10 +85,21 @@ export function BulkPreviewEditor({
   }));
   const [model2Strength, setModel2Strength] = useState(item.model2Strength);
   const [model2Robust, setModel2Robust] = useState(item.model2Robust);
-  const [halationPreviewEnabled, setHalationPreviewEnabled] = useState(false);
   const [liveRerenderEnabled, setLiveRerenderEnabled] = useState(false);
   const [showPerfDebug, setShowPerfDebug] = useState(false);
-  const [exportHalationActuance, setExportHalationActuance] = useState(false);
+  const [exportActuance, setExportActuance] = useState(false);
+  const previewMaxEdgeRef = useRef(PREVIEW_MAX_EDGE);
+  const presenterReadyRef = useRef<() => void>(() => {});
+  const {
+    effectsEnabled,
+    previewRenderer,
+    api: finishing,
+  } = useFinishingPreview({
+    getMaxEdge: () => previewMaxEdgeRef.current,
+    onPresenterReady: () => presenterReadyRef.current(),
+  });
+  const effectsEnabledRef = useRef(effectsEnabled);
+  effectsEnabledRef.current = effectsEnabled;
   const [busy, setBusy] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgressPct, setExportProgressPct] = useState(0);
@@ -116,12 +133,13 @@ export function BulkPreviewEditor({
           tileBlend: patch.tileBlend ?? current.tileBlend,
           sourceDecodeRd1: patch.sourceDecodeRd1 ?? current.sourceDecodeRd1,
           liveRerenderEnabled,
-          halationPreviewEnabled,
-          exportHalationActuance,
+          exportActuance,
+          effectsEnabled,
+          previewRenderer,
         });
       }, 500);
     },
-    [exportHalationActuance, halationPreviewEnabled, itemId, itemsRef, liveRerenderEnabled]
+    [effectsEnabled, exportActuance, itemId, itemsRef, liveRerenderEnabled, previewRenderer]
   );
 
   const handleSettledPreview = useCallback(
@@ -144,15 +162,34 @@ export function BulkPreviewEditor({
     [itemId, itemsRef, onPatchItem, scheduleSave]
   );
 
+  const finishFor = useCallback(
+    (look: LookParamsT) => finishParamsFromLook(look, effectsEnabledRef.current),
+    []
+  );
+
   const {
     canvasRef,
     setMaxEdge,
     initPreviewBase,
     terminate,
-    drawRgba,
+    drawRgba: drawRgba2d,
     scheduleDraw,
   } = useLab2LivePreview({
     onSettled: handleSettledPreview,
+    getRenderer: () => (finishing.isWebglActive() ? "webgl" : "2d"),
+    hasLinearFrame: () => finishing.presenterRef.current?.hasLinearFrame ?? false,
+    onLinearFrame: (frame, renderMode, look) => {
+      const settledLook = look ?? lookParamsRef.current;
+      finishing.presentLinear(frame, finishFor(settledLook));
+      if (renderMode === "settled") {
+        const rgba = finishing.readbackRgba();
+        if (rgba) handleSettledPreview(rgba, settledLook);
+      }
+    },
+    onFinishOnly: (look) => {
+      finishing.updateFinish(finishFor(look));
+      finishing.scheduleSettledReadback((rgba) => handleSettledPreview(rgba, look));
+    },
     onError: (message) => {
       onPatchItem(itemId, {
         status: `Live preview failed: ${message}`,
@@ -161,10 +198,18 @@ export function BulkPreviewEditor({
     },
   });
 
+  /** Draw an already-finished 8-bit frame on whichever surface is active. */
+  const drawRgba = useCallback(
+    (rgba: RgbaFrame) => {
+      if (finishing.isWebglActive()) finishing.presentRgba(rgba);
+      else drawRgba2d(rgba);
+    },
+    [drawRgba2d, finishing]
+  );
+
   const scheduleLiveDraw = useCallback(
     (opts?: {
       forceImmediate?: boolean;
-      halationPreview?: boolean;
       lookParamsOverride?: LookParamsT;
       interactiveExpensive?: boolean;
       renderMode?: "interactive" | "settled";
@@ -176,12 +221,53 @@ export function BulkPreviewEditor({
         ...opts,
         lookParamsOverride: lookForRender,
         liveRerenderEnabled: liveRerenderRef.current,
-        halationPreviewEnabled,
         isDragging: isDraggingRef.current,
         dragCost: lastChangedControlRef.current,
       });
     },
-    [halationPreviewEnabled, itemId, itemsRef, scheduleDraw]
+    [itemId, itemsRef, scheduleDraw]
+  );
+
+  presenterReadyRef.current = () => {
+    const current = itemsRef.current?.find((entry) => entry.id === itemId);
+    if (current?.previewRgba) finishing.presentRgba(current.previewRgba);
+    scheduleLiveDraw({ forceImmediate: true });
+  };
+
+  const finishKey = JSON.stringify(finishParamsFromLook(lookParams, effectsEnabled));
+  const finishParams = useMemo(
+    () => (JSON.parse(finishKey) as ReturnType<typeof finishParamsFromLook>),
+    [finishKey]
+  );
+  useEffect(() => {
+    if (!finishing.isWebglActive()) return;
+    finishing.updateFinish(finishParams);
+    finishing.scheduleSettledReadback((rgba) =>
+      handleSettledPreview(rgba, lookParamsRef.current)
+    );
+  }, [finishParams, finishing, handleSettledPreview]);
+
+  const handlePreviewRendererChange = useCallback(
+    (value: PreviewRenderer) => {
+      if (value === "2d" && effectsEnabledRef.current) {
+        onPatchItem(itemId, { status: "Effects paused in 2D preview." });
+      }
+      finishing.setPreviewRenderer(value);
+      if (value === "2d") {
+        window.setTimeout(() => scheduleLiveDraw({ forceImmediate: true }), 0);
+      }
+    },
+    [finishing, itemId, onPatchItem, scheduleLiveDraw]
+  );
+
+  const handleEffectsEnabledChange = useCallback(
+    (value: boolean) => {
+      finishing.setEffectsEnabled(value);
+      if (!value) {
+        window.setTimeout(() => scheduleLiveDraw({ forceImmediate: true }), 0);
+      }
+    },
+    [finishing, scheduleLiveDraw]
   );
 
   const syncLookParamsToItem = useCallback(() => {
@@ -214,15 +300,18 @@ export function BulkPreviewEditor({
       setModel2Strength(saved.model2Strength ?? current.model2Strength);
       setModel2Robust(saved.model2Robust ?? current.model2Robust);
       setLiveRerenderEnabled(saved.liveRerenderEnabled ?? false);
-      setHalationPreviewEnabled(saved.halationPreviewEnabled ?? false);
-      setExportHalationActuance(saved.exportHalationActuance ?? false);
+      setExportActuance(saved.exportActuance ?? false);
+      finishing.replaceMode({
+        previewRenderer: saved.previewRenderer ?? "2d",
+        effectsEnabled: saved.effectsEnabled ?? false,
+      });
       liveRerenderRef.current = saved.liveRerenderEnabled ?? false;
     } else {
       setModel2Strength(current.model2Strength);
       setModel2Robust(current.model2Robust);
       setLiveRerenderEnabled(false);
-      setHalationPreviewEnabled(false);
-      setExportHalationActuance(false);
+      setExportActuance(false);
+      finishing.replaceMode({ previewRenderer: "2d", effectsEnabled: false });
       liveRerenderRef.current = false;
     }
 
@@ -473,10 +562,12 @@ export function BulkPreviewEditor({
       finalGrading: current.finalGrading,
       model2Strength,
       model2Robust,
-      exportHalationActuance,
+      exportActuance,
+      effectsEnabled,
     });
   }, [
-    exportHalationActuance,
+    effectsEnabled,
+    exportActuance,
     item,
     itemId,
     itemsRef,
@@ -531,8 +622,13 @@ export function BulkPreviewEditor({
             : "Export…",
       });
       try {
+        const webglPreview = isPreview && finishing.isWebglActive()
+          ? finishing.readbackRgba()
+          : null;
         let blob = isPreview
-          ? await buildPreviewPngBlobFromCanvas(canvasRef.current!)
+          ? webglPreview
+            ? await buildPngBlobFromRgba(webglPreview)
+            : await buildPreviewPngBlobFromCanvas(canvasRef.current!)
           : await buildItemExportBlob();
 
         if (withGrain) {
@@ -589,7 +685,7 @@ export function BulkPreviewEditor({
         setBusy(false);
       }
     },
-    [buildItemExportBlob, canvasRef, itemId, onPatchItem]
+    [buildItemExportBlob, canvasRef, finishing, itemId, onPatchItem]
   );
 
   const startPlainExport = useCallback(
@@ -643,19 +739,21 @@ export function BulkPreviewEditor({
         tileBlend: current.tileBlend,
         sourceDecodeRd1: current.sourceDecodeRd1,
         liveRerenderEnabled,
-        halationPreviewEnabled,
-        exportHalationActuance,
+        exportActuance,
+        effectsEnabled,
+        previewRenderer,
       });
     }
     onClose();
   }, [
-    exportHalationActuance,
-    halationPreviewEnabled,
+    effectsEnabled,
+    exportActuance,
     itemId,
     itemsRef,
     liveRerenderEnabled,
     onClose,
     onPatchItem,
+    previewRenderer,
   ]);
 
   return (
@@ -667,10 +765,13 @@ export function BulkPreviewEditor({
       busy={busy}
       isExporting={isExporting}
       hasMatch={!!item.postM2Base}
-      exportHalationActuance={exportHalationActuance}
+      exportActuance={exportActuance}
       onClose={handleClose}
-      onExportHalationActuanceChange={setExportHalationActuance}
-      onApplyHalationActuance={() => {}}
+      onExportActuanceChange={setExportActuance}
+      onApplyFullPipeline={() => {}}
+      previewRenderer={previewRenderer}
+      onPreviewRendererChange={handlePreviewRendererChange}
+      webglCanvasRef={finishing.webglCanvasRef}
       onExportPng={exportPng}
       onExportPreviewPng={() =>
         startPlainExport({ source: "preview", scale: 1 })
@@ -684,7 +785,7 @@ export function BulkPreviewEditor({
         sourceDecodeRd1: item.sourceDecodeRd1,
         model2Strength,
         model2Robust,
-        halationPreviewEnabled,
+        effectsEnabled,
         liveRerenderEnabled,
         showPerfDebug,
         busy,
@@ -705,18 +806,7 @@ export function BulkPreviewEditor({
         onModel2RobustChange: (v) => {
           void handleModel2SettingsChange(model2Strength, v);
         },
-        onHalationPreviewToggle: () => {
-          setHalationPreviewEnabled((prev) => {
-            const next = !prev;
-            if (liveRerenderRef.current) {
-              scheduleLiveDraw({
-                forceImmediate: true,
-                halationPreview: next,
-              });
-            }
-            return next;
-          });
-        },
+        onEffectsEnabledChange: handleEffectsEnabledChange,
         onLiveRerenderChange: setLiveRerenderEnabled,
         onPerfDebugChange: setShowPerfDebug,
         onMatchSelect: (blend, rank) => void handleRowMatchSelect(blend, rank),
@@ -732,7 +822,10 @@ export function BulkPreviewEditor({
       }}
       previewRgba={item.previewRgba}
       canvasRef={canvasRef}
-      onPreviewMaxEdge={setMaxEdge}
+      onPreviewMaxEdge={(edge) => {
+        previewMaxEdgeRef.current = edge;
+        setMaxEdge(edge);
+      }}
     />
     <GrainOptionsDialog
       open={grainModalOpen}

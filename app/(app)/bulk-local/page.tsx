@@ -405,7 +405,7 @@ export default function BulkLocalPage() {
                 sourceDecodeRd1={sourceDecodeRd1}
                 model2Strength={1}
                 model2Robust
-                halationPreviewEnabled={false}
+                effectsEnabled={false}
                 liveRerenderEnabled={false}
                 showPerfDebug={false}
                 busy={bulkProgress.running}
@@ -421,7 +421,7 @@ export default function BulkLocalPage() {
                 onSourceDecodeRd1Change={setSourceDecodeRd1}
                 onModel2StrengthChange={() => {}}
                 onModel2RobustChange={() => {}}
-                onHalationPreviewToggle={() => {}}
+                onEffectsEnabledChange={() => {}}
                 onLiveRerenderChange={() => {}}
                 onPerfDebugChange={() => {}}
                 onBulkFiles={(files) => {

@@ -14,6 +14,11 @@ import {
   PanelSidebarTrigger,
 } from "@/components/app/panel-sidebar";
 import { Lab2ControlsPanel } from "@/components/lab2/lab2-controls-panel";
+import { PreviewRendererToggle } from "@/components/lab2/preview-renderer-toggle";
+import { useFinishingPreview } from "@/hooks/use-finishing-preview";
+import { coreEngineKey, finishParamsFromLook } from "@/lib/lab2/finish-params";
+import type { PreviewRenderer } from "@/lib/lab2/preview-mode";
+import { runFinishingParityCheck } from "@/lib/lab2/gpu-finish/parity";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
@@ -30,13 +35,17 @@ import {
   defaultExposureCurve,
   type LookParams as LookParamsT,
 } from "@/lib/look-params";
-import { buildEngineParamsFromLookParams } from "@/lib/build-engine-params";
+import {
+  buildEngineParamsFromLookParams,
+  gateFinishingEffects,
+} from "@/lib/build-engine-params";
 import { applyLab2ResetWithUndo } from "@/lib/lab2/reset-defaults-undo";
 import { processSourceFileAuto } from "@/lib/lab2/auto-match";
 import { terminateAutoMatchWorker } from "@/lib/lab2/auto-match-worker-client";
 import { createThrottledCallback } from "@/lib/throttled-callback";
 import {
   buildExportPngBlobFromFrames,
+  buildPngBlobFromRgba,
   buildPreviewPngBlobFromCanvas,
   downloadPngBlob,
   scalePngBlob,
@@ -64,7 +73,6 @@ import { decodeToLinearFloat } from "@/src/lib/pipeline/decode";
 import { decodeRd1ToLinearFloat } from "@/src/lib/pipeline/decodeRd1";
 import {
   processFramesFloat,
-  buildExposureMapFromFloat,
   pixelFrameF32ToPixelFrameRGBA,
   frameToImageData,
   type PixelFrameF32,
@@ -439,9 +447,8 @@ export default function Lab2Page() {
   const [bulkTotal, setBulkTotal] = useState(0);
   const [bulkRunning, setBulkRunning] = useState(false);
   const [showPerfDebug, setShowPerfDebug] = useState(false);
-  const [halationPreviewEnabled, setHalationPreviewEnabled] = useState(false);
-  /** When false (default), PNG exports skip halation + actuance for speed. */
-  const [exportHalationActuance, setExportHalationActuance] = useState(false);
+  /** When false (default), PNG exports skip actuance for speed. */
+  const [exportActuance, setExportActuance] = useState(false);
   const [grainModalOpen, setGrainModalOpen] = useState(false);
   const [grainExportRequest, setGrainExportRequest] =
     useState<GrainExportRequest | null>(null);
@@ -450,6 +457,48 @@ export default function Lab2Page() {
   const [sourceDecodeRd1, setSourceDecodeRd1] = useState(false);
   const [adaptiveQualityMode, setAdaptiveQualityMode] = useState<"normal" | "degraded" | "aggressive">("normal");
   const [expensiveDragBlocked, setExpensiveDragBlocked] = useState(false);
+  const presenterReadyRef = useRef<() => void>(() => {});
+  const {
+    effectsEnabled,
+    previewRenderer,
+    api: finishing,
+  } = useFinishingPreview({
+    getMaxEdge: () => PREVIEW_MAX_EDGE,
+    onPresenterReady: () => presenterReadyRef.current(),
+  });
+  const effectsEnabledRef = useRef(effectsEnabled);
+  effectsEnabledRef.current = effectsEnabled;
+  const lookParamsRef = useRef<LookParamsT>(lookParams);
+  lookParamsRef.current = lookParams;
+  /** WebGL mode: core-grade key of the last worker render (finish-only changes skip the worker). */
+  const lastCoreKeyRef = useRef<string | null>(null);
+
+  /** Draw an already-finished 8-bit frame on whichever preview surface is active. */
+  const drawRgbaActive = useCallback(
+    (rgba: RgbaFrame) => {
+      if (finishing.isWebglActive()) {
+        finishing.presentRgba(rgba);
+        return;
+      }
+      drawRgbaToCanvasPreview(rgba, canvasRef.current, PREVIEW_MAX_EDGE, drawCacheRef.current);
+    },
+    [finishing]
+  );
+
+  /** Draw a graded linear preview frame; WebGL mode applies the finishing passes. */
+  const drawFloatActive = useCallback(
+    (frame: PixelFrameF32, look: LookParamsT) => {
+      if (finishing.isWebglActive()) {
+        finishing.presentLinear(
+          { width: frame.width, height: frame.height, data: new Float32Array(frame.data) },
+          finishParamsFromLook(look, effectsEnabledRef.current)
+        );
+        return;
+      }
+      drawFloatToCanvasPreview(frame, canvasRef.current, PREVIEW_MAX_EDGE, drawCacheRef.current);
+    },
+    [finishing]
+  );
 
   const decodeSourceToLinearFloat = useCallback(async (file: File) => {
     if (sourceDecodeRd1Ref.current) {
@@ -541,12 +590,14 @@ export default function Lab2Page() {
     queuedEngineRef.current = null;
     queuedRenderOptionsRef.current = null;
     renderRequestItemIdRef.current.clear();
+    lastCoreKeyRef.current = null;
 
     worker.onmessage = (e: MessageEvent<unknown>) => {
       const msg = e.data as
         | { type: "inited"; width: number; height: number }
         | {
             type: "result";
+            format?: "linear";
             requestId: number;
             width: number;
             height: number;
@@ -584,17 +635,28 @@ export default function Lab2Page() {
         return;
       }
       const tDraw0 = performance.now();
-      const rgba = {
-        width: msg.width,
-        height: msg.height,
-        data: new Uint8ClampedArray(msg.data),
-      };
-      drawRgbaToCanvasPreview(
-        rgba,
-        canvasRef.current,
-        PREVIEW_MAX_EDGE,
-        drawCacheRef.current
-      );
+      let rgba: RgbaFrame | null = null;
+      if (msg.format === "linear") {
+        finishing.presentLinear(
+          { width: msg.width, height: msg.height, data: new Float32Array(msg.data) },
+          finishParamsFromLook(lookParamsRef.current, effectsEnabledRef.current)
+        );
+        if (requestItemId && (msg.renderMode ?? "settled") === "settled") {
+          rgba = finishing.readbackRgba();
+        }
+      } else {
+        rgba = {
+          width: msg.width,
+          height: msg.height,
+          data: new Uint8ClampedArray(msg.data),
+        };
+        drawRgbaToCanvasPreview(
+          rgba,
+          canvasRef.current,
+          PREVIEW_MAX_EDGE,
+          drawCacheRef.current
+        );
+      }
       const tDraw1 = performance.now();
       const dispatch = latestDispatchPerfRef.current;
       const transferMs =
@@ -619,7 +681,7 @@ export default function Lab2Page() {
           : telemetryRollingRef.current.settledMs;
       bucket.push(sample.totalMs);
       if (bucket.length > 12) bucket.shift();
-      if (requestItemId) {
+      if (requestItemId && rgba) {
         patchBulkItem(requestItemId, {
           previewRgba: cloneRgbaFrame(rgba),
         });
@@ -635,10 +697,7 @@ export default function Lab2Page() {
       const requestId = ++latestRenderReqIdRef.current;
       workerInFlightRef.current = true;
       setLiveBusy(true);
-      const options: Lab2LivePreviewOptions =
-        queuedRenderOptionsRef.current ?? {
-          halationPreview: false,
-        };
+      const options: Lab2LivePreviewOptions = queuedRenderOptionsRef.current ?? {};
       const renderMode: "interactive" | "settled" =
         options.interactiveMode ? "interactive" : "settled";
       latestDispatchPerfRef.current = {
@@ -647,7 +706,14 @@ export default function Lab2Page() {
         mode: renderMode,
       };
       renderRequestItemIdRef.current.set(requestId, activeBulkIdRef.current);
-      worker.postMessage({ type: "render", requestId, grading: queuedEngine, options, renderMode });
+      worker.postMessage({
+        type: "render",
+        requestId,
+        grading: queuedEngine,
+        options,
+        renderMode,
+        ...(finishing.isWebglActive() ? { output: "linear" as const } : {}),
+      });
     };
     worker.onerror = (err) => {
       workerInFlightRef.current = false;
@@ -660,7 +726,7 @@ export default function Lab2Page() {
       { type: "init", width: base.width, height: base.height, base: baseCopy.buffer },
       [baseCopy.buffer]
     );
-  }, [patchBulkItem]);
+  }, [finishing, patchBulkItem]);
 
   const activateBulkItem = useCallback((item: BulkItem) => {
     setActiveBulkId(item.id);
@@ -687,12 +753,7 @@ export default function Lab2Page() {
     const previewBase = postM2PreviewBaseRef.current;
     if (!baseFrame || !previewBase) return;
     if (item.previewRgba) {
-      drawRgbaToCanvasPreview(
-        item.previewRgba,
-        canvasRef.current,
-        PREVIEW_MAX_EDGE,
-        drawCacheRef.current
-      );
+      drawRgbaActive(item.previewRgba);
       // Defer worker re-init so thumbnail switching feels instant.
       window.setTimeout(() => {
         if (postM2BaseRef.current === baseFrame) {
@@ -714,16 +775,10 @@ export default function Lab2Page() {
     const live = applyLivePostModel2OnlyWithState(
       previewBase,
       engine,
-      liveLocalStateRef.current,
-      { halationPreview: false }
+      liveLocalStateRef.current
     );
-    drawFloatToCanvasPreview(
-      live,
-      canvasRef.current,
-      PREVIEW_MAX_EDGE,
-      drawCacheRef.current
-    );
-  }, [initLiveWorker]);
+    drawFloatActive(live, item.liveLookParams);
+  }, [drawFloatActive, drawRgbaActive, initLiveWorker]);
 
   const activateBulkItemById = useCallback((id: string) => {
     const item = bulkItemsRef.current.find((entry) => entry.id === id);
@@ -741,7 +796,6 @@ export default function Lab2Page() {
     const pipelineParams = {
       strength: model2Strength,
       grading: engine,
-      exposureMap: buildExposureMapFromFloat(decodedSource),
       matchModel: 2 as const,
       model2Strength,
       model2RobustSampling: model2Robust,
@@ -753,9 +807,7 @@ export default function Lab2Page() {
     );
     const preview = downscaleLinearFloatMaxEdge(base, PREVIEW_LIVE_MAX_EDGE);
     const tempState = ensureLab2LiveWorkState(null, preview.width, preview.height);
-    const live = applyLivePostModel2OnlyWithState(preview, engine, tempState, {
-      halationPreview: false,
-    });
+    const live = applyLivePostModel2OnlyWithState(preview, engine, tempState);
     return { base, preview, live };
   }, [model2Robust, model2Strength]);
 
@@ -781,15 +833,10 @@ export default function Lab2Page() {
     setHasMatch(true);
     bakedRgbaRef.current = null;
     setHasBaked(false);
-    drawFloatToCanvasPreview(
-      live,
-      canvasRef.current,
-      PREVIEW_MAX_EDGE,
-      drawCacheRef.current
-    );
+    drawFloatActive(live, activeLookParams);
     setStatus(completionStatus);
     return { base, live };
-  }, [buildPostModel2Artifacts, initLiveWorker, lookParams, reportPipelineStatus, setPostM2Bases]);
+  }, [buildPostModel2Artifacts, drawFloatActive, initLiveWorker, lookParams, reportPipelineStatus, setPostM2Bases]);
 
   const syncMatchPreviewsFromAllBlends = useCallback(
     async (
@@ -1240,7 +1287,6 @@ export default function Lab2Page() {
   const scheduleLiveDraw = useCallback((opts?: {
     forceImmediate?: boolean;
     interactiveExpensive?: boolean;
-    halationPreviewEnabled?: boolean;
     renderMode?: "interactive" | "settled";
     lookParamsOverride?: LookParamsT;
   }) => {
@@ -1258,17 +1304,31 @@ export default function Lab2Page() {
           : INTERACTIVE_PREVIEW_SCALE;
       const options: Lab2LivePreviewOptions = interactiveExpensive
         ? {
-            halationPreview: false,
             interactiveMode: true,
             interactivePreviewScale: interactiveScale,
           }
         : {
-            halationPreview: opts?.halationPreviewEnabled ?? halationPreviewEnabled,
             interactiveMode: false,
             interactivePreviewScale: 1,
           };
       const lookForRender = opts?.lookParamsOverride ?? liveLookParams;
       const engine = buildEngineParamsFromLookParams(lookForRender, finalGrading);
+      const webgl = finishing.isWebglActive();
+      const coreKey = webgl
+        ? coreEngineKey(engine, interactiveExpensive ? interactiveScale : 1)
+        : null;
+      if (
+        webgl &&
+        coreKey === lastCoreKeyRef.current &&
+        finishing.presenterRef.current?.hasLinearFrame
+      ) {
+        finishing.updateFinish(finishParamsFromLook(lookParamsRef.current, effectsEnabledRef.current));
+        if (!workerInFlightRef.current) {
+          setLiveBusy(false);
+          setLiveDirty(false);
+        }
+        return;
+      }
       queuedEngineRef.current = engine;
       queuedRenderOptionsRef.current = options;
       setLiveDirty(true);
@@ -1278,6 +1338,7 @@ export default function Lab2Page() {
         : NORMAL_DRAG_THROTTLE_MS;
       if (!forceImmediate && now - lastDispatchMsRef.current < throttleMs) return;
       lastDispatchMsRef.current = now;
+      lastCoreKeyRef.current = coreKey;
 
       const worker = liveWorkerRef.current;
       if (worker && workerReadyRef.current) {
@@ -1297,7 +1358,14 @@ export default function Lab2Page() {
           mode: renderMode,
         };
         renderRequestItemIdRef.current.set(requestId, activeBulkIdRef.current);
-        worker.postMessage({ type: "render", requestId, grading: engine, options, renderMode });
+        worker.postMessage({
+          type: "render",
+          requestId,
+          grading: engine,
+          options,
+          renderMode,
+          ...(webgl ? { output: "linear" as const } : {}),
+        });
         return;
       }
       setLiveBusy(true);
@@ -1313,13 +1381,19 @@ export default function Lab2Page() {
         options
       );
       const tDraw0 = performance.now();
-      const rgba = pixelFrameF32ToPixelFrameRGBA(live);
-      drawRgbaToCanvasPreview(
-        rgba,
-        canvasRef.current,
-        PREVIEW_MAX_EDGE,
-        drawCacheRef.current
-      );
+      let rgba: RgbaFrame | null;
+      if (webgl) {
+        drawFloatActive(live, lookParamsRef.current);
+        rgba = finishing.readbackRgba();
+      } else {
+        rgba = pixelFrameF32ToPixelFrameRGBA(live);
+        drawRgbaToCanvasPreview(
+          rgba,
+          canvasRef.current,
+          PREVIEW_MAX_EDGE,
+          drawCacheRef.current
+        );
+      }
       const tDraw1 = performance.now();
       setLastRenderTelemetry({
         mode: opts?.renderMode ?? (interactiveExpensive ? "interactive" : "settled"),
@@ -1330,7 +1404,7 @@ export default function Lab2Page() {
         totalMs: tDraw1 - tDraw0,
       });
       const activeId = activeBulkIdRef.current;
-      if (activeId) {
+      if (activeId && rgba) {
         patchBulkItem(activeId, {
           previewRgba: cloneRgbaFrame(rgba),
           liveLookParams: cloneLab2LookParams(lookForRender),
@@ -1343,8 +1417,9 @@ export default function Lab2Page() {
     });
   }, [
     adaptiveQualityMode,
+    drawFloatActive,
     finalGrading,
-    halationPreviewEnabled,
+    finishing,
     liveRerenderEnabled,
     liveLookParams,
     lookParams,
@@ -1357,18 +1432,74 @@ export default function Lab2Page() {
     scheduleLiveDraw({ forceImmediate: true, lookParamsOverride: lookParams });
   }, [hasMatch, lookParams, scheduleLiveDraw]);
 
-  const toggleHalationPreview = useCallback(() => {
-    if (!hasMatch) return;
-    const next = !halationPreviewEnabled;
-    setHalationPreviewEnabled(next);
-    setLiveLookParams(lookParams);
-    scheduleLiveDraw({
-      forceImmediate: true,
-      halationPreviewEnabled: next,
-      lookParamsOverride: lookParams,
-    });
-    setStatus(next ? "Halation preview mode enabled (approximate)." : "Halation preview mode disabled.");
-  }, [halationPreviewEnabled, hasMatch, lookParams, scheduleLiveDraw]);
+  presenterReadyRef.current = () => {
+    if (!postM2PreviewBaseRef.current) return;
+    const activeId = activeBulkIdRef.current;
+    const active = activeId
+      ? bulkItemsRef.current.find((entry) => entry.id === activeId)
+      : null;
+    if (active?.previewRgba) finishing.presentRgba(active.previewRgba);
+    scheduleLiveDraw({ forceImmediate: true, lookParamsOverride: lookParamsRef.current });
+  };
+
+  const finishKey = JSON.stringify(finishParamsFromLook(lookParams, effectsEnabled));
+  useEffect(() => {
+    if (!finishing.isWebglActive()) return;
+    finishing.updateFinish(JSON.parse(finishKey) as ReturnType<typeof finishParamsFromLook>);
+    const activeId = activeBulkIdRef.current;
+    if (activeId) {
+      finishing.scheduleSettledReadback((rgba) =>
+        patchBulkItem(activeId, { previewRgba: rgba })
+      );
+    }
+  }, [finishKey, finishing, patchBulkItem]);
+
+  /** Perf debug: compare the WebGL finishing preview with the CPU export stages. */
+  const runParityCheck = useCallback(() => {
+    const base = postM2PreviewBaseRef.current;
+    if (!base) {
+      setStatus("Run match first.");
+      return;
+    }
+    const engine = buildEngineParamsFromLookParams(lookParams, finalGrading);
+    const state = ensureLab2LiveWorkState(null, base.width, base.height);
+    const live = applyLivePostModel2OnlyWithState(base, engine, state);
+    const result = runFinishingParityCheck(
+      { width: live.width, height: live.height, data: new Float32Array(live.data) },
+      finishParamsFromLook(lookParams, true)
+    );
+    setStatus(
+      result
+        ? `GPU vs CPU (${result.width}×${result.height}): mean ΔE ${result.meanDeltaE.toFixed(3)}, p99 ${result.p99DeltaE.toFixed(3)}, max ${result.maxDeltaE.toFixed(3)}, max code diff ${result.maxCodeDiff}`
+        : "GPU vs CPU: WebGL2 with float render targets is unavailable."
+    );
+  }, [finalGrading, lookParams]);
+
+  const rerenderAfterModeChange = useCallback(() => {
+    window.setTimeout(() => {
+      if (!postM2PreviewBaseRef.current) return;
+      scheduleLiveDraw({ forceImmediate: true, lookParamsOverride: lookParamsRef.current });
+    }, 0);
+  }, [scheduleLiveDraw]);
+
+  const handlePreviewRendererChange = useCallback(
+    (value: PreviewRenderer) => {
+      if (value === "2d" && effectsEnabledRef.current) {
+        setStatus("Effects paused in 2D preview.");
+      }
+      finishing.setPreviewRenderer(value);
+      if (value === "2d") rerenderAfterModeChange();
+    },
+    [finishing, rerenderAfterModeChange]
+  );
+
+  const handleEffectsEnabledChange = useCallback(
+    (value: boolean) => {
+      finishing.setEffectsEnabled(value);
+      if (!value) rerenderAfterModeChange();
+    },
+    [finishing, rerenderAfterModeChange]
+  );
 
   useEffect(() => {
     setLiveDirty(true);
@@ -1511,7 +1642,7 @@ export default function Lab2Page() {
     };
   }, []);
 
-  const applyHalationActuance = useCallback(async () => {
+  const applyFullPipeline = useCallback(async () => {
     const src = decodedSourceRef.current;
     const base = postM2BaseRef.current;
     if (!src || !base) {
@@ -1519,15 +1650,16 @@ export default function Lab2Page() {
       return;
     }
     setBusy(true);
-    setStatus("Full pipeline (halation + actuance)…");
+    setStatus("Full pipeline…");
     try {
       const ref = decodedRefRef.current;
-      const engine = buildEngineParamsFromLookParams(lookParams, finalGrading);
-      const exposureMap = buildExposureMapFromFloat(src);
+      const engine = gateFinishingEffects(
+        buildEngineParamsFromLookParams(lookParams, finalGrading),
+        effectsEnabled
+      );
       const resultFloat = processFramesFloat(src, ref, {
         strength: model2Strength,
         grading: engine,
-        exposureMap,
         matchModel: 2,
         model2Strength,
         model2RobustSampling: model2Robust,
@@ -1535,12 +1667,7 @@ export default function Lab2Page() {
       const rgba = pixelFrameF32ToPixelFrameRGBA(resultFloat);
       bakedRgbaRef.current = rgba;
       setHasBaked(true);
-      drawRgbaToCanvasPreview(
-        rgba,
-        canvasRef.current,
-        PREVIEW_MAX_EDGE,
-        drawCacheRef.current
-      );
+      drawRgbaActive(rgba);
       setStatus("Apply complete. Hold eye icon to compare with live edits.");
       if (activeBulkId) {
         patchBulkItem(activeBulkId, {
@@ -1559,6 +1686,8 @@ export default function Lab2Page() {
     }
   }, [
     activeBulkId,
+    drawRgbaActive,
+    effectsEnabled,
     lookParams,
     liveLookParams,
     finalGrading,
@@ -1586,9 +1715,10 @@ export default function Lab2Page() {
       finalGrading: item.finalGrading,
       model2Strength,
       model2Robust,
-      exportHalationActuance,
+      exportActuance,
+      effectsEnabled,
     });
-  }, [exportHalationActuance, model2Robust, model2Strength]);
+  }, [effectsEnabled, exportActuance, model2Robust, model2Strength]);
 
   const buildExportPngBlob = useCallback(async (): Promise<Blob> => {
     const active: Pick<BulkItem, "decodedSource" | "decodedRef" | "lookParams" | "finalGrading"> = {
@@ -1698,8 +1828,12 @@ export default function Lab2Page() {
       try {
         await nextPaint();
         const canvas = canvasRef.current;
+        const webglPreview =
+          isPreview && finishing.isWebglActive() ? finishing.readbackRgba() : null;
         let blob = isPreview
-          ? await buildPreviewPngBlobFromCanvas(canvas!)
+          ? webglPreview
+            ? await buildPngBlobFromRgba(webglPreview)
+            : await buildPreviewPngBlobFromCanvas(canvas!)
           : await buildExportPngBlob();
 
         if (withGrain) {
@@ -1758,7 +1892,7 @@ export default function Lab2Page() {
         setBusy(false);
       }
     },
-    [buildExportPngBlob, downloadBlob, nextPaint, scalePngBlob]
+    [buildExportPngBlob, downloadBlob, finishing, nextPaint, scalePngBlob]
   );
 
   const startPlainExport = useCallback(
@@ -1814,7 +1948,7 @@ export default function Lab2Page() {
               <PageHeader
                 title="Lab 2"
                 href="/lab2"
-                description='Model 2 match is full-res; live sliders run on preview-resolution linear float (~1600px). Halation and actuance apply on "Apply". Exports full decode resolution. Omit halation/actuance on export unless enabled from the more menu (faster default export).'
+                description='Model 2 match is full-res; live sliders run on preview-resolution linear float (~1600px). Highlight warmth + halation preview in WebGL and export at full decode resolution when their card is on. Actuance applies on "Apply" and on export only when enabled from the more menu (faster default export).'
               />
 
               <div className="space-y-3">
@@ -1913,8 +2047,17 @@ export default function Lab2Page() {
             )}
             <canvas
               ref={canvasRef}
-              className="w-full max-h-[70vh] rounded-lg border bg-black object-contain"
+              className={cn(
+                "w-full max-h-[70vh] rounded-lg border bg-black object-contain",
+                previewRenderer === "webgl" && "hidden"
+              )}
             />
+            {previewRenderer === "webgl" && (
+              <canvas
+                ref={finishing.webglCanvasRef}
+                className="w-full max-h-[70vh] rounded-lg border bg-black object-contain"
+              />
+            )}
             {(liveBusy || (liveRerenderEnabled && liveDirty)) && (
               <ProgressWithLabel indeterminate label="Updating preview…" />
             )}
@@ -1936,6 +2079,17 @@ export default function Lab2Page() {
                 {" | "}draw {lastRenderTelemetry.drawMs.toFixed(0)}ms
               </p>
             )}
+            {showPerfDebug && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={!hasMatch}
+                onClick={runParityCheck}
+              >
+                GPU vs CPU
+              </Button>
+            )}
             {(adaptiveQualityMode === "degraded" || adaptiveQualityMode === "aggressive") && (
               <p className="text-[11px] text-amber-600 dark:text-amber-400">
                 interactive quality mode: {adaptiveQualityMode}
@@ -1955,19 +2109,19 @@ export default function Lab2Page() {
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start" className="w-56">
                   <DropdownMenuCheckboxItem
-                    checked={exportHalationActuance}
+                    checked={exportActuance}
                     onCheckedChange={(checked) =>
-                      setExportHalationActuance(checked === true)
+                      setExportActuance(checked === true)
                     }
                   >
-                    Halation + actuance
+                    Actuance
                   </DropdownMenuCheckboxItem>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem
                     disabled={!hasMatch || busy}
-                    onClick={() => void applyHalationActuance()}
+                    onClick={() => void applyFullPipeline()}
                   >
-                    {busy && !isExporting ? "Applying…" : "Apply halation + actuance"}
+                    {busy && !isExporting ? "Applying…" : "Apply full pipeline"}
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -2048,6 +2202,10 @@ export default function Lab2Page() {
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
+              <PreviewRendererToggle
+                value={previewRenderer}
+                onChange={handlePreviewRendererChange}
+              />
               </div>
             </div>
             </div>
@@ -2062,7 +2220,7 @@ export default function Lab2Page() {
                 sourceDecodeRd1={sourceDecodeRd1}
                 model2Strength={model2Strength}
                 model2Robust={model2Robust}
-                halationPreviewEnabled={halationPreviewEnabled}
+                effectsEnabled={effectsEnabled}
                 liveRerenderEnabled={liveRerenderEnabled}
                 showPerfDebug={showPerfDebug}
                 busy={busy}
@@ -2097,7 +2255,7 @@ export default function Lab2Page() {
                 }}
                 onModel2StrengthChange={setModel2Strength}
                 onModel2RobustChange={setModel2Robust}
-                onHalationPreviewToggle={toggleHalationPreview}
+                onEffectsEnabledChange={handleEffectsEnabledChange}
                 onLiveRerenderChange={setLiveRerenderEnabled}
                 onPerfDebugChange={setShowPerfDebug}
                 onSourceFiles={(files) => {

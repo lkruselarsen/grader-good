@@ -27,13 +27,13 @@ Return ONLY valid JSON.`;
 const OPENAI_SUBSTEP1_PROMPT = `Focus on exposure, contrast, color density, curves, refraction, per-band controls. Do NOT adjust halation.
 
 Adjust: exposureStrength, exposureCurve.L_out_0…6, blackPoint, blackRange, blackStrength; contrastCurve.values_0…6; colorDensityCurve.scale_0…6; colorStrength, bandMidTemp/Hue/Sat, band*Hue/Temp/Sat/Luma; refractionShadow/Highlight.<color>.hue/.sat, refractionSplitL.
-Omit: highlightFillStrength, highlightFillWarmth, halationTailGamma, halationContrastGate, halationRimStrength, halationBloomStrength, halationRimRadius, halationBloomRadius.
+Omit: highlightWarmthHue, highlightWarmthAmount, highlightWarmthThreshold, halationAmount, halationSensitivity, halationRadius, halationWarmth.
 EV: exposureCurve L_out 1=0 EV, 1.4≈+0.5 EV. Refraction green=120°; 120→115=orange, 120→125=greener.
 Return JSON of deltas only. Omit keys for no change.`;
 
-const OPENAI_SUBSTEP2_PROMPT = `Focus ONLY on halation (highlight bloom/rim). Compare bloom and rim to reference.
+const OPENAI_SUBSTEP2_PROMPT = `Focus ONLY on highlight warmth and halation (warm tint of the top tones, orange glow at highlight/shadow edges). Compare to reference.
 
-Adjust only: highlightFillStrength (0–2), highlightFillWarmth (-1–1), halationTailGamma (2–6), halationContrastGate (0–1), halationRimStrength (0–1), halationBloomStrength (0–1), halationRimRadius (0–0.75), halationBloomRadius (0–2.5).
+Adjust only: highlightWarmthHue (0–360°, wheel hue of the highlight tint; 35 = warm orange), highlightWarmthAmount (0–1, tint strength), highlightWarmthThreshold (0.01–0.5, upper fraction of the tonal range tinted; default 0.25), halationAmount (0–1, overall scattered exposure around intense highlights; self-limiting, subtle even at 1), halationSensitivity (0–1, exposure threshold; higher = halation starts fewer stops above middle grey), halationRadius (0–1, physical scattering scale), halationWarmth (0–1, halo colour from red-leaning to orange).
 Return JSON of deltas only. Omit keys for no change.`;
 
 const PHASE_PROMPTS: Record<
@@ -81,9 +81,9 @@ Return JSON of deltas only. Omit keys for no change.`,
 Parameters: actuanceStrength (0.75–3): higher = stronger crispness. actuanceRadius (0.5–5): lower = fine detail only, higher = coarser structures. actuanceHighlightGuard (0.5–0.9, default 0.65): L above which actuance is suppressed to avoid dark strokes at shadow–highlight edges. actuanceHighlightGuardFloor (0.2–0.75, default 0.5): L below which actuance is full; ramps to zero at highlight guard. Lower = wider transition. actuanceHighlightMinSize (0.002–0.02, default 0.005): fraction of shortest edge; highlights in regions smaller than this are drowned out. Lower = more small highlights get actuance.
 
 Return JSON of deltas only. Omit keys for no change.`,
-  8: `Phase 8: Halation only. Highlight bloom and rim.
+  8: `Phase 8: Highlight warmth and halation only.
 
-Parameters: highlightFillStrength (0–2), highlightFillWarmth (-1–1), halationTailGamma (2–6, default 4), halationContrastGate (0–1), halationRimStrength (0–1), halationBloomStrength (0–1), halationRimRadius (0–0.75), halationBloomRadius (0–2.5).
+Parameters: highlightWarmthHue (0–360°, wheel hue of the highlight tint; 35 = warm orange), highlightWarmthAmount (0–1, tint strength), highlightWarmthThreshold (0.01–0.5, upper fraction of the tonal range tinted; default 0.25), halationAmount (0–1, overall scattered exposure around intense highlights; self-limiting, subtle even at 1), halationSensitivity (0–1, exposure threshold; higher = halation starts fewer stops above middle grey), halationRadius (0–1, physical scattering scale), halationWarmth (0–1, halo colour from red-leaning to orange).
 
 Return JSON of deltas only. Omit keys for no change.`,
 };
@@ -105,9 +105,9 @@ Distinguish halation warmth (bloom/glow around bright edges) from per-band highl
 Parameters: bandLowerShadowHue, bandUpperShadowHue, bandMidHue, bandLowerHighHue, bandUpperHighHue; bandLowerShadowTemp, bandUpperShadowTemp, bandMidTemp, bandLowerHighTemp, bandUpperHighTemp. All max 0.5, min -0.5. Hue: + = clockwise, − = counter-clockwise. Temp: − = cooler, + = warmer.
 
 Return JSON of deltas only. Omit keys for no change.`,
-  3: `Phase 3: Halation only. Highlight bloom and rim.
+  3: `Phase 3: Highlight warmth and halation only.
 
-Parameters: highlightFillStrength (0–2), highlightFillWarmth (-1–1), halationThreshold (0.90–0.9999, default 0.98; lower = more area eligible; top 0.01% still gets strongest halation), halationTailGamma (2–6), halationContrastGate (0–1), halationRimStrength (0–1), halationBloomStrength (0–1), halationRimRadius (0–0.75), halationBloomRadius (0–2.5).
+Parameters: highlightWarmthHue (0–360°, wheel hue of the highlight tint; 35 = warm orange), highlightWarmthAmount (0–1, tint strength), highlightWarmthThreshold (0.01–0.5, upper fraction of the tonal range tinted; default 0.25), halationAmount (0–1, overall scattered exposure around intense highlights; self-limiting, subtle even at 1), halationSensitivity (0–1, exposure threshold; higher = halation starts fewer stops above middle grey), halationRadius (0–1, physical scattering scale), halationWarmth (0–1, halo colour from red-leaning to orange).
 
 Return JSON of deltas only. Omit keys for no change.`,
 };

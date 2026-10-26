@@ -14,14 +14,19 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Slider } from "@/components/ui/slider";
+import { Switch } from "@/components/ui/switch";
 import {
   defaultColorDensityCurve,
   defaultExposureCurve,
+  halationFromLook,
   type LookParams as LookParamsT,
+  type LookParamsMatch,
 } from "@/lib/look-params";
 import { REFRACTION_HUE_NAMES } from "@/lib/lab2/constants";
+import { cn } from "@/lib/utils";
 import type { BulkQueueProgress, Lab2TileBlend } from "@/lib/lab2/types";
 import { REFRACTION_POST_MODEL2_HUES_DEG } from "@/src/lib/pipeline/stages/refractionPostModel2";
+import { HueSatWheel } from "./hue-sat-wheel";
 import { MatchThumbnailPicker } from "./match-thumbnail-picker";
 import type { ComponentProps, RefObject } from "react";
 
@@ -36,7 +41,8 @@ export type Lab2ControlsPanelProps = {
   sourceDecodeRd1: boolean;
   model2Strength: number;
   model2Robust: boolean;
-  halationPreviewEnabled: boolean;
+  /** Effects card toggle (highlight warmth + halation). */
+  effectsEnabled: boolean;
   liveRerenderEnabled: boolean;
   showPerfDebug: boolean;
   busy: boolean;
@@ -53,7 +59,7 @@ export type Lab2ControlsPanelProps = {
   onSourceDecodeRd1Change: (v: boolean) => void;
   onModel2StrengthChange: (v: number) => void;
   onModel2RobustChange: (v: boolean) => void;
-  onHalationPreviewToggle: () => void;
+  onEffectsEnabledChange: (v: boolean) => void;
   onLiveRerenderChange: (v: boolean) => void;
   onPerfDebugChange: (v: boolean) => void;
   onSourceFiles?: (files: FileList | null) => void;
@@ -80,7 +86,7 @@ export function Lab2ControlsPanel({
   sourceDecodeRd1,
   model2Strength,
   model2Robust,
-  halationPreviewEnabled,
+  effectsEnabled,
   liveRerenderEnabled,
   showPerfDebug,
   busy,
@@ -97,7 +103,7 @@ export function Lab2ControlsPanel({
   onSourceDecodeRd1Change,
   onModel2StrengthChange,
   onModel2RobustChange,
-  onHalationPreviewToggle,
+  onEffectsEnabledChange,
   onLiveRerenderChange,
   onPerfDebugChange,
   onSourceFiles,
@@ -207,7 +213,6 @@ export function Lab2ControlsPanel({
               "devignette",
               "highlights",
               "actuance",
-              "halation",
             ]}
             className="w-full"
           >
@@ -331,17 +336,6 @@ export function Lab2ControlsPanel({
                     Robust sampling (exclude clipped L)
                   </Label>
                 </div>
-                <Button
-                  type="button"
-                  variant={halationPreviewEnabled ? "secondary" : "outline"}
-                  className="w-full min-h-11"
-                  disabled={busy || !hasMatch}
-                  onClick={onHalationPreviewToggle}
-                >
-                  {halationPreviewEnabled
-                    ? "Disable halation preview (approx)"
-                    : "Enable halation preview (approx)"}
-                </Button>
                 <div className="flex items-center gap-2 min-h-11 touch-manipulation">
                   <Checkbox
                     id="live-rerender"
@@ -682,67 +676,14 @@ export function Lab2ControlsPanel({
               </AccordionContent>
             </AccordionItem>
 
-            <AccordionItem value="halation">
-              <AccordionTrigger className="py-3 text-xs font-medium text-muted-foreground/80 hover:no-underline">
-                Halation (apply/export canonical)
-              </AccordionTrigger>
-              <AccordionContent className="space-y-3">
-                {(
-                  [
-                    ["halationExposureTopographyLiftStops", "Exposure topography lift (stops)", 0, 3, 0.05],
-                    ["halationThreshold", "Threshold (%)", 90, 99.99, 0.1, true],
-                    ["highlightFillStrength", "Highlight fill strength", 0, 2, 0.05],
-                    ["highlightFillWarmth", "Warmth", -1, 1, 0.05],
-                    ["halationContrastGate", "Contrast gate", 0, 1, 0.01],
-                    ["halationRimStrength", "Rim strength", 0, 1, 0.01],
-                    ["halationBloomStrength", "Bloom strength", 0, 1, 0.01],
-                    ["halationRimRadius", "Rim radius", 0, 0.75, 0.05],
-                    ["halationBloomRadius", "Bloom radius", 0, 2.5, 0.1],
-                  ] as const
-                ).map(([key, label, min, max, step, isPct]) => {
-                  const raw =
-                    key === "halationThreshold"
-                      ? (lookParams.match.halationThreshold ?? 0.92) * 100
-                      : (lookParams.match[key] as number) ??
-                        (key === "halationRimStrength"
-                          ? 0.6
-                          : key === "halationBloomStrength"
-                            ? 0.8
-                            : key === "halationRimRadius"
-                              ? 0.1
-                              : key === "halationBloomRadius"
-                                ? 1
-                                : key === "halationContrastGate"
-                                  ? 1
-                                  : 0);
-                  return (
-                    <div key={key} className="space-y-2">
-                      <div className="flex justify-between text-xs text-muted-foreground">
-                        <span>{label}</span>
-                        <span>
-                          {isPct ? `${raw.toFixed(1)}%` : raw.toFixed(2)}
-                        </span>
-                      </div>
-                      <Slider
-                        className={SLIDER_CLASS}
-                        min={min}
-                        max={max}
-                        step={step}
-                        value={[raw]}
-                        onValueChange={(v) => {
-                          const val = v[0] ?? raw;
-                          updateMatch(
-                            key,
-                            (isPct ? val / 100 : val) as LookParamsT["match"][typeof key]
-                          );
-                        }}
-                      />
-                    </div>
-                  );
-                })}
-              </AccordionContent>
-            </AccordionItem>
           </Accordion>
+
+          <FinishingEffectsCard
+            lookParams={lookParams}
+            enabled={effectsEnabled}
+            onEnabledChange={onEffectsEnabledChange}
+            updateMatch={updateMatch}
+          />
 
           <Separator />
 
@@ -767,5 +708,108 @@ export function Lab2ControlsPanel({
         </div>
       </div>
     </div>
+  );
+}
+
+const DEFAULT_WARMTH_HUE = 35;
+
+function FinishingEffectsCard({
+  lookParams,
+  enabled,
+  onEnabledChange,
+  updateMatch,
+}: {
+  lookParams: LookParamsT;
+  enabled: boolean;
+  onEnabledChange: (v: boolean) => void;
+  updateMatch: Lab2ControlsPanelProps["updateMatch"];
+}) {
+  const m = lookParams.match;
+  const hue = m.highlightWarmthHue ?? DEFAULT_WARMTH_HUE;
+  const amount = m.highlightWarmthAmount ?? 0;
+  const thresholdPct = Math.round((m.highlightWarmthThreshold ?? 0.25) * 100);
+  const halation = halationFromLook(m);
+  const halationSliders: {
+    key: Extract<
+      keyof LookParamsMatch,
+      "halationAmount" | "halationSensitivity" | "halationRadius" | "halationWarmth"
+    >;
+    label: string;
+    value: number;
+    fallback: number;
+  }[] = [
+    { key: "halationAmount", label: "Amount", value: halation.amount, fallback: 0.35 },
+    { key: "halationSensitivity", label: "Sensitivity", value: halation.sensitivity, fallback: 0.5 },
+    { key: "halationRadius", label: "Radius", value: halation.radius, fallback: 0.5 },
+    { key: "halationWarmth", label: "Warmth", value: halation.warmth, fallback: 0.5 },
+  ];
+  return (
+    <section className="rounded-lg border bg-card/40">
+      <div className="flex items-center justify-between gap-3 px-3 py-2.5">
+        <Label htmlFor="finishing-effects-toggle" className="cursor-pointer text-sm font-medium text-muted-foreground">
+          Highlight Warmth + Halation
+        </Label>
+        <Switch
+          id="finishing-effects-toggle"
+          checked={enabled}
+          onCheckedChange={(checked) => onEnabledChange(checked === true)}
+        />
+      </div>
+      <Separator />
+      <div className={cn("space-y-5 p-3 transition-opacity", !enabled && "opacity-50")}>
+        <div className="space-y-3">
+          <p className="text-xs font-medium text-muted-foreground/80">Highlight Warmth</p>
+          <HueSatWheel
+            hue={hue}
+            amount={amount}
+            defaultHue={DEFAULT_WARMTH_HUE}
+            defaultAmount={0}
+            onChange={(h, a) => {
+              updateMatch("highlightWarmthHue", h);
+              updateMatch("highlightWarmthAmount", a);
+            }}
+          />
+          <div className="space-y-2">
+            <div className="flex justify-between text-xs text-muted-foreground">
+              <span>Threshold</span>
+              <span>Top {thresholdPct}%</span>
+            </div>
+            <Slider
+              className={SLIDER_CLASS}
+              inverted
+              min={1}
+              max={50}
+              step={1}
+              value={[thresholdPct]}
+              onValueChange={(v) =>
+                updateMatch("highlightWarmthThreshold", (v[0] ?? 25) / 100)
+              }
+            />
+          </div>
+        </div>
+        <div className="space-y-3">
+          <p className="text-xs font-medium text-muted-foreground/80">Halation</p>
+          {halationSliders.map(({ key, label, value, fallback }) => {
+            const pct = Math.round(value * 100);
+            return (
+              <div key={key} className="space-y-2">
+                <div className="flex justify-between text-xs text-muted-foreground">
+                  <span>{label}</span>
+                  <span>{pct}%</span>
+                </div>
+                <Slider
+                  className={SLIDER_CLASS}
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={[pct]}
+                  onValueChange={(v) => updateMatch(key, (v[0] ?? fallback * 100) / 100)}
+                />
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </section>
   );
 }
