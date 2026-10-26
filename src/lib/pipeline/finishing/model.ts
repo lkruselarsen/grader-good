@@ -142,6 +142,8 @@ export const HALATION_SOURCE_SUPPRESSION = 0.6;
 export const HALATION_LIMIT = 0.16;
 /** Exposure gain per film layer; green spans warmth 0 → 1. */
 export const HALATION_LAYER_GAIN = { r: 1.0, gMin: 0.18, gMax: 0.42, b: 0.04 } as const;
+/** Exposure multiplier at amount = 1. */
+export const HALATION_AMOUNT_SCALE = 1.33;
 /** White point of the film shoulder F(E) = W·(1 − exp(−E / W)). */
 export const HALATION_SHOULDER_WHITE = 1.0;
 
@@ -169,6 +171,7 @@ export function computeHalationUniforms(
   const warmth = clamp(p.warmth ?? 0.5, 0, 1);
   const rs = lerp(HALATION_RADIUS_SCALE[0], HALATION_RADIUS_SCALE[1], radius);
   const startEV = lerp(HALATION_START_EV[0], HALATION_START_EV[1], sensitivity);
+  const a = amount * HALATION_AMOUNT_SCALE;
   return {
     amount,
     startEV,
@@ -176,9 +179,9 @@ export function computeHalationUniforms(
     startY: HALATION_REF_GREY * 2 ** startEV,
     sigmas: [HALATION_SIGMAS[0] * rs, HALATION_SIGMAS[1] * rs, HALATION_SIGMAS[2] * rs],
     gain: [
-      amount * HALATION_LAYER_GAIN.r,
-      amount * lerp(HALATION_LAYER_GAIN.gMin, HALATION_LAYER_GAIN.gMax, warmth),
-      amount * HALATION_LAYER_GAIN.b,
+      a * HALATION_LAYER_GAIN.r,
+      a * lerp(HALATION_LAYER_GAIN.gMin, HALATION_LAYER_GAIN.gMax, warmth),
+      a * HALATION_LAYER_GAIN.b,
     ],
   };
 }
