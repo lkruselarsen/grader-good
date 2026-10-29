@@ -5,8 +5,11 @@ import { decodeBufferToLinearFloat } from "@/src/lib/pipeline/decodeNode";
 
 process.env.TRANSFORMERS_CACHE_DIR ??= "/tmp/transformers-cache";
 
-/** Batch renders: a few photos at a time so a 30-file batch finishes in about an hour. */
-const batchQueue = queue({ name: "cloud-batch", concurrencyLimit: 3 });
+/**
+ * Batch renders. Compute is billed per second, so parallel photos cost the same
+ * as serial ones; 6 at a time keeps a 30-photo batch within about an hour.
+ */
+const batchQueue = queue({ name: "cloud-batch", concurrencyLimit: 6 });
 /** Interactive work (open in editor, re-export) never waits behind a batch. */
 const interactiveQueue = queue({ name: "cloud-interactive", concurrencyLimit: 2 });
 

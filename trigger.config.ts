@@ -2,7 +2,7 @@ import { defineConfig } from "@trigger.dev/sdk";
 import { aptGet } from "@trigger.dev/build/extensions/core";
 
 export default defineConfig({
-  project: process.env.TRIGGER_PROJECT_REF ?? "proj_grader_good_unset",
+  project: "proj_vucaytuhpumjnzjistwk",
   runtime: "node",
   logLevel: "log",
   dirs: ["./trigger"],
