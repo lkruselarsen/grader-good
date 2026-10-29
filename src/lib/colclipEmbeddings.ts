@@ -14,12 +14,12 @@ import {
 const TILE_PROGRESS_MIN_MS = 200;
 
 export const COLCLIP_TILE_DIM = 384; // Same as DINOv2 for now
-const TILE_MODEL_INPUT_SIZE = 224;
+export const TILE_MODEL_INPUT_SIZE = 224;
 
 /**
  * Extract a single tile from ImageData as a new ImageData (native tile size).
  */
-function getTile(
+export function getTile(
   img: ImageData,
   tileIndex: number,
   gridCols: number,

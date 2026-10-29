@@ -1,9 +1,6 @@
-import {
-  buildEngineParamsFromLookParams,
-  gateFinishingEffects,
-} from "@/lib/build-engine-params";
 import type { LookParams as LookParamsT } from "@/lib/look-params";
 import { runExportGradingInWorker } from "@/lib/lab2/export-worker-client";
+import { buildExportPipelineParams } from "@/lib/lab2/export-pipeline-params";
 import {
   frameToImageData,
   type PixelFrameF32,
@@ -26,24 +23,11 @@ export type BuildExportPngBlobInput = {
 export async function buildExportPngBlobFromFrames(
   input: BuildExportPngBlobInput
 ): Promise<Blob> {
-  const { decodedSource: src, decodedRef: ref, lookParams, finalGrading } = input;
-  const engine = gateFinishingEffects(
-    buildEngineParamsFromLookParams(lookParams, finalGrading),
-    input.effectsEnabled
-  );
-  const grading = input.exportActuance
-    ? engine
-    : { ...engine, actuanceStrength: 0 };
+  const { decodedSource: src, decodedRef: ref } = input;
   const rgba = await runExportGradingInWorker({
     decodedSource: src,
     decodedRef: ref,
-    pipelineParams: {
-      strength: input.model2Strength,
-      grading,
-      matchModel: 2,
-      model2Strength: input.model2Strength,
-      model2RobustSampling: input.model2Robust,
-    },
+    pipelineParams: buildExportPipelineParams(input),
   });
   const canvas = document.createElement("canvas");
   canvas.width = rgba.width;
