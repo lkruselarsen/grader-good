@@ -8,6 +8,12 @@ export type GrainExportParams = {
   pointillistOpacityMagnitude: number;
 };
 
+/** Creates a 2D canvas of the given size (DOM canvas in browsers, @napi-rs/canvas in Node). */
+export type GrainCanvasFactory = (
+  width: number,
+  height: number
+) => { getContext(type: "2d"): CanvasRenderingContext2D | null };
+
 export type GrainProgress = {
   stage: string;
   percentage: number;

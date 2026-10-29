@@ -15,105 +15,17 @@
 
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase/server";
-import { EMBEDDING_CHROMA_DIM, EMBEDDING_DIM } from "@/src/lib/embeddings";
+import {
+  isTileSearchBody,
+  searchTiles,
+  TileSearchError,
+} from "@/lib/dataset/search-tiles";
+import { EMBEDDING_DIM } from "@/src/lib/embeddings";
 import { SEMANTIC_EMBEDDING_DIM } from "@/src/lib/semanticEmbeddings";
 
 function validateEmbedding(arr: unknown, dim: number): arr is number[] {
   if (!Array.isArray(arr) || arr.length !== dim) return false;
   return arr.every((x) => typeof x === "number");
-}
-
-function validateTileEmbeddings(
-  payload: unknown
-): payload is Array<{ tile_index: number; embedding: number[] }> {
-  if (!Array.isArray(payload) || payload.length === 0) return false;
-  return payload.every(
-    (t) =>
-      typeof t === "object" &&
-      t !== null &&
-      typeof (t as { tile_index?: unknown }).tile_index === "number" &&
-      validateEmbedding((t as { embedding?: unknown }).embedding, SEMANTIC_EMBEDDING_DIM)
-  );
-}
-
-function validateHybridChromaTileEmbeddings(
-  payload: unknown
-): payload is Array<{
-  tile_index: number;
-  embedding: number[];
-  embedding_tonal_chroma: number[];
-}> {
-  if (!Array.isArray(payload) || payload.length === 0) return false;
-  return payload.every(
-    (t) =>
-      typeof t === "object" &&
-      t !== null &&
-      typeof (t as { tile_index?: unknown }).tile_index === "number" &&
-      validateEmbedding((t as { embedding?: unknown }).embedding, SEMANTIC_EMBEDDING_DIM) &&
-      validateEmbedding(
-        (t as { embedding_tonal_chroma?: unknown }).embedding_tonal_chroma,
-        EMBEDDING_CHROMA_DIM
-      )
-  );
-}
-
-const HYBRID_TILE_WEIGHT_PRESETS: Array<{ w_semantic: number; w_tonal: number }> = [
-  { w_semantic: 0.5, w_tonal: 0.5 },
-  { w_semantic: 0.1, w_tonal: 0.9 },
-];
-
-function resolveHybridTileWeights(
-  wSemRaw: unknown,
-  wTonRaw: unknown
-):
-  | { ok: true; w_semantic: number; w_tonal: number }
-  | { ok: false; message: string } {
-  const semMissing = wSemRaw === undefined;
-  const tonMissing = wTonRaw === undefined;
-  if (semMissing && tonMissing) {
-    return { ok: true, w_semantic: 0.5, w_tonal: 0.5 };
-  }
-  if (semMissing || tonMissing) {
-    return {
-      ok: false,
-      message:
-        "combineTileTonal requires both w_semantic and w_tonal, or omit both for 50/50",
-    };
-  }
-  if (typeof wSemRaw !== "number" || typeof wTonRaw !== "number") {
-    return { ok: false, message: "w_semantic and w_tonal must be numbers" };
-  }
-  if (
-    !Number.isFinite(wSemRaw) ||
-    !Number.isFinite(wTonRaw) ||
-    wSemRaw < 0 ||
-    wTonRaw < 0
-  ) {
-    return {
-      ok: false,
-      message:
-        "w_semantic and w_tonal must be finite and non-negative",
-    };
-  }
-  if (Math.abs(wSemRaw + wTonRaw - 1) >= 1e-6) {
-    return {
-      ok: false,
-      message: "w_semantic + w_tonal must equal 1",
-    };
-  }
-  const match = HYBRID_TILE_WEIGHT_PRESETS.some(
-    (p) =>
-      Math.abs(p.w_semantic - wSemRaw) < 1e-9 &&
-      Math.abs(p.w_tonal - wTonRaw) < 1e-9
-  );
-  if (!match) {
-    return {
-      ok: false,
-      message:
-        "w_semantic/w_tonal must be one of: 0.5/0.5 or 0.1/0.9",
-    };
-  }
-  return { ok: true, w_semantic: wSemRaw, w_tonal: wTonRaw };
 }
 
 export async function POST(request: Request) {
@@ -148,136 +60,19 @@ export async function POST(request: Request) {
     Math.max(1, parseInt(limitParam ?? "5", 10) || 5)
   );
 
-  const combineTileTonal = body.combineTileTonal === true;
-
-  // Hybrid tile search: weighted semantic + per-tile chroma tonal (16-D a/b only), default 50/50.
-  if (combineTileTonal) {
-    const hybridWeights = resolveHybridTileWeights(body.w_semantic, body.w_tonal);
-    if (!hybridWeights.ok) {
-      return NextResponse.json({ error: hybridWeights.message }, { status: 400 });
-    }
-    if (!validateHybridChromaTileEmbeddings(body.tileEmbeddings)) {
-      return NextResponse.json(
-        {
-          error: `combineTileTonal requires tileEmbeddings: each item needs embedding: number[${SEMANTIC_EMBEDDING_DIM}] and embedding_tonal_chroma: number[${EMBEDDING_CHROMA_DIM}]`,
-        },
-        { status: 400 }
-      );
-    }
-
-    const queryTiles = (
-      body.tileEmbeddings as Array<{
-        tile_index: number;
-        embedding: number[];
-        embedding_tonal_chroma: number[];
-      }>
-    ).map((t) => ({
-      tile_index: t.tile_index,
-      embedding: t.embedding,
-      embedding_tonal_chroma: t.embedding_tonal_chroma,
-    }));
-
-    const { data: tileData, error: tileError } = await supabaseAdmin.rpc(
-      "match_grading_samples_by_tiles_hybrid",
-      // Keys alphabetical — PostgREST often binds RPC args positionally in this order.
-      {
-        match_limit: limit,
-        query_tiles_json: queryTiles,
-        use_chroma_tonal: true,
-        w_semantic: hybridWeights.w_semantic,
-        w_tonal: hybridWeights.w_tonal,
+  if (isTileSearchBody(body)) {
+    try {
+      const matches = await searchTiles(supabaseAdmin, body, limit);
+      return NextResponse.json({ matches });
+    } catch (e) {
+      if (e instanceof TileSearchError) {
+        return NextResponse.json(
+          e.hint ? { error: e.message, hint: e.hint } : { error: e.message },
+          { status: e.status }
+        );
       }
-    );
-    if (tileError) {
-      return NextResponse.json(
-        {
-          error: tileError.message,
-          hint: "Apply migrations through 00019_hybrid_rpc_param_order_postgrest.sql (and 00018 if chroma column missing)",
-        },
-        { status: 500 }
-      );
+      throw e;
     }
-    const sampleIdsHybrid = (tileData ?? [])
-      .map((r: { sample_id?: string }) => r.sample_id as string)
-      .filter(Boolean);
-    if (sampleIdsHybrid.length === 0) {
-      return NextResponse.json({ matches: [] });
-    }
-    const { data: samplesHybrid, error: samplesErrorHybrid } =
-      await supabaseAdmin
-        .from("grading_samples")
-        .select(
-          "id, name, image_url, look_params, created_at, reference_exposure, reference_chroma_distribution"
-        )
-        .in("id", sampleIdsHybrid);
-    if (samplesErrorHybrid) {
-      return NextResponse.json(
-        { error: samplesErrorHybrid.message },
-        { status: 500 }
-      );
-    }
-    const simByIdHybrid = new Map(
-      (tileData ?? []).map((r: { sample_id?: string; similarity?: number }) => [
-        r.sample_id,
-        r.similarity,
-      ])
-    );
-    const matchesHybrid = (samplesHybrid ?? []).map((s) => ({
-      ...s,
-      similarity: simByIdHybrid.get(s.id) ?? 0,
-    }));
-    matchesHybrid.sort(
-      (a, b) => Number(b.similarity ?? 0) - Number(a.similarity ?? 0)
-    );
-    return NextResponse.json({ matches: matchesHybrid });
-  }
-
-  // Tile-based search (Phase 2): when tile embeddings provided, use RPC and fetch full rows
-  // Pass array directly so Postgres receives jsonb array; stringifying would send a scalar string and break jsonb_array_elements.
-  if (validateTileEmbeddings(body.tileEmbeddings)) {
-    const queryTiles = (
-      body.tileEmbeddings as Array<{ tile_index: number; embedding: number[] }>
-    ).map((t) => ({ tile_index: t.tile_index, embedding: t.embedding }));
-    const { data: tileData, error: tileError } = await supabaseAdmin.rpc(
-      "match_grading_samples_by_tiles",
-      { query_tiles_json: queryTiles, match_limit: limit }
-    );
-    if (tileError) {
-      return NextResponse.json(
-        { error: tileError.message, hint: "Run migration 00007_grading_tiles.sql" },
-        { status: 500 }
-      );
-    }
-    const sampleIds = (tileData ?? []).map(
-      (r: { sample_id?: string }) => r.sample_id as string
-    ).filter(Boolean);
-    if (sampleIds.length === 0) {
-      return NextResponse.json({ matches: [] });
-    }
-    const { data: samples, error: samplesError } = await supabaseAdmin
-      .from("grading_samples")
-      .select("id, name, image_url, look_params, created_at, reference_exposure, reference_chroma_distribution")
-      .in("id", sampleIds);
-    if (samplesError) {
-      return NextResponse.json(
-        { error: samplesError.message },
-        { status: 500 }
-      );
-    }
-    const simById = new Map(
-      (tileData ?? []).map((r: { sample_id?: string; similarity?: number }) => [
-        r.sample_id,
-        r.similarity,
-      ])
-    );
-    const matches = (samples ?? []).map((s) => ({
-      ...s,
-      similarity: simById.get(s.id) ?? 0,
-    }));
-    matches.sort(
-      (a, b) => Number(b.similarity ?? 0) - Number(a.similarity ?? 0)
-    );
-    return NextResponse.json({ matches });
   }
 
   const hasSemantic = validateEmbedding(

@@ -1,6 +1,13 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import Image from "next/image";
 import { ChevronDown, Loader2, MoreHorizontal } from "lucide-react";
 import { LoadingButton } from "@/components/app/loading-button";
@@ -15,6 +22,16 @@ import {
 } from "@/components/app/panel-sidebar";
 import { Lab2ControlsPanel } from "@/components/lab2/lab2-controls-panel";
 import { PreviewRendererToggle } from "@/components/lab2/preview-renderer-toggle";
+import { CloudBatchSheet } from "@/components/lab2/cloud-batch-sheet";
+import { CloudStorageToast } from "@/components/cloud/storage-toast";
+import { CloudExportReadyDialog } from "@/components/cloud/cloud-export-ready-dialog";
+import { useCloudEditSession } from "@/hooks/use-cloud-edit-session";
+import {
+  fetchCloudOutput,
+  preparePngFiles,
+  startCloudRender,
+  type CloudEditSessionView,
+} from "@/lib/cloud/client";
 import { useFinishingPreview } from "@/hooks/use-finishing-preview";
 import { coreEngineKey, finishParamsFromLook } from "@/lib/lab2/finish-params";
 import type { PreviewRenderer } from "@/lib/lab2/preview-mode";
@@ -82,6 +99,8 @@ import { engineToGrading } from "@/lib/look-params";
 import JSZip from "jszip";
 
 const LAB2_DEFAULTS_STORAGE_KEY = "grader-good:lab2-defaults";
+const CLOUD_RENDER_POLL_MS = 3000;
+const noopSubscribe = () => () => {};
 const PREVIEW_MAX_EDGE = 1600;
 const LAB2_AUTO_DENSITY_ENABLED = false;
 const EXPENSIVE_DRAG_THROTTLE_MS = 340;
@@ -452,6 +471,25 @@ export default function Lab2Page() {
   const [grainModalOpen, setGrainModalOpen] = useState(false);
   const [grainExportRequest, setGrainExportRequest] =
     useState<GrainExportRequest | null>(null);
+  const [cloudSheetOpen, setCloudSheetOpen] = useState(false);
+  const [cloudFiles, setCloudFiles] = useState<File[]>([]);
+  const cloudOutputParam = useSyncExternalStore(
+    noopSubscribe,
+    () => new URLSearchParams(window.location.search).get("cloudOutput"),
+    () => null
+  );
+  /** Set while editing a cloud export: exports go to the cloud render instead of the local worker. */
+  const cloudEditRef = useRef<{ outputId: string; name: string } | null>(null);
+  const [cloudEdit, setCloudEdit] = useState<{
+    outputId: string;
+    name: string;
+    slug: string | null;
+  } | null>(null);
+  const [cloudExportFiles, setCloudExportFiles] = useState<{
+    files: File[];
+    name: string;
+    downloadUrl: string | null;
+  } | null>(null);
   const [lastRenderTelemetry, setLastRenderTelemetry] = useState<RenderTelemetrySample | null>(null);
   const [tileBlend, setTileBlend] = useState<Lab2TileBlend>("semantic");
   const [sourceDecodeRd1, setSourceDecodeRd1] = useState(false);
@@ -837,6 +875,69 @@ export default function Lab2Page() {
     setStatus(completionStatus);
     return { base, live };
   }, [buildPostModel2Artifacts, drawFloatActive, initLiveWorker, lookParams, reportPipelineStatus, setPostM2Bases]);
+
+  /**
+   * Cloud edit: the cloud rebuilt the Model 2 base from the full DNG and sent
+   * it at live-preview size. Sliders run on it like on desktop; exports are
+   * re-rendered from the DNG in the cloud, never from this preview.
+   */
+  const loadCloudEditSession = useCallback(
+    (preview: PixelFrameF32, session: CloudEditSessionView) => {
+      const settings = session.output.renderSettings;
+      const look = deepMergeLab2(LAB2_DEFAULT_LOOK_PARAMS, session.output.lookParams);
+      cloudEditRef.current = { outputId: session.output.id, name: session.output.name };
+      setCloudEdit({
+        outputId: session.output.id,
+        name: session.output.name,
+        slug: session.output.slug,
+      });
+      autoMatchRunIdRef.current += 1;
+      setBulkRunning(false);
+      setBulkQueue([]);
+      setActiveBulkId(null);
+      sourceFileRef.current = null;
+      decodedSourceRef.current = null;
+      decodedRefRef.current = null;
+      postM2BaseRef.current = preview;
+      postM2PreviewBaseRef.current = preview;
+      bakedRgbaRef.current = null;
+      setHasBaked(false);
+      setLookParams(look);
+      setLiveLookParams(look);
+      setFinalGrading(session.output.finalGrading);
+      setModel2Strength(settings.model2Strength);
+      setModel2Robust(settings.model2Robust);
+      setExportActuance(settings.exportActuance);
+      finishing.setEffectsEnabled(settings.effectsEnabled);
+      effectsEnabledRef.current = settings.effectsEnabled;
+      setMatchPreviews([]);
+      setShowUploadDropzones(true);
+      liveLocalStateRef.current = ensureLab2LiveWorkState(
+        liveLocalStateRef.current,
+        preview.width,
+        preview.height
+      );
+      initLiveWorker(preview);
+      const engine = buildEngineParamsFromLookParams(look, session.output.finalGrading);
+      drawFloatActive(
+        applyLivePostModel2OnlyWithState(preview, engine, liveLocalStateRef.current),
+        look
+      );
+      setHasMatch(true);
+      setStatus(
+        `Editing ${session.output.name} from the cloud. Exports re-render the full DNG in the cloud.`
+      );
+    },
+    [drawFloatActive, finishing, initLiveWorker]
+  );
+  const cloudEditSession = useCloudEditSession(cloudOutputParam, loadCloudEditSession);
+
+  const exitCloudEdit = useCallback(() => {
+    if (!cloudEditRef.current) return;
+    cloudEditRef.current = null;
+    setCloudEdit(null);
+    window.history.replaceState(null, "", "/lab2");
+  }, []);
 
   const syncMatchPreviewsFromAllBlends = useCallback(
     async (
@@ -1808,8 +1909,70 @@ export default function Lab2Page() {
     setGrainModalOpen(true);
   }, []);
 
+  /** Cloud edit export: full-resolution re-render of the original DNG in the cloud. */
+  const runCloudExport = useCallback(
+    async (params: GrainExportParams, request: GrainExportRequest) => {
+      const cloud = cloudEditRef.current;
+      if (!cloud) return;
+      const withGrain = request.withGrain !== false;
+      setBusy(true);
+      setIsExporting(true);
+      setExportProgressPct(10);
+      setExportProgressLabel("Sending edits to the cloud");
+      setStatus("Rendering the full DNG in the cloud…");
+      try {
+        const queued = await startCloudRender(cloud.outputId, {
+          lookParams,
+          effectsEnabled,
+          exportActuance,
+          model2Strength,
+          model2Robust,
+          withGrain,
+          grain: params,
+          exportScale: request.scale,
+        });
+        setExportProgressPct(25);
+        setExportProgressLabel(`Rendering ${queued.name} in the cloud`);
+        let view = await fetchCloudOutput(queued.outputId);
+        let pct = 25;
+        while (view.status === "pending" || view.status === "processing") {
+          await new Promise((r) => setTimeout(r, CLOUD_RENDER_POLL_MS));
+          pct = Math.min(90, pct + 3);
+          setExportProgressPct(pct);
+          view = await fetchCloudOutput(queued.outputId);
+        }
+        if (view.status !== "done" || !view.pngUrl) {
+          throw new Error(view.error ?? "The cloud render failed.");
+        }
+        setExportProgressPct(95);
+        setExportProgressLabel("Downloading");
+        const files = await preparePngFiles([{ url: view.pngUrl, name: view.name }]);
+        setCloudExportFiles({ files, name: view.name, downloadUrl: view.downloadUrl });
+        setExportProgressPct(100);
+        setExportProgressLabel("Done");
+        setStatus(`${view.name}.png is ready.`);
+        setGrainModalOpen(false);
+        setGrainExportRequest(null);
+      } catch (e) {
+        setStatus(e instanceof Error ? e.message : String(e));
+      } finally {
+        window.setTimeout(() => {
+          setExportProgressPct(0);
+          setExportProgressLabel("");
+          setIsExporting(false);
+        }, 300);
+        setBusy(false);
+      }
+    },
+    [effectsEnabled, exportActuance, lookParams, model2Robust, model2Strength]
+  );
+
   const runModalExport = useCallback(
     async (params: GrainExportParams, request: GrainExportRequest) => {
+      if (cloudEditRef.current && request.source !== "preview") {
+        await runCloudExport(params, request);
+        return;
+      }
       const withGrain = request.withGrain !== false;
       const isPreview = request.source === "preview";
       setBusy(true);
@@ -1892,7 +2055,7 @@ export default function Lab2Page() {
         setBusy(false);
       }
     },
-    [buildExportPngBlob, downloadBlob, finishing, nextPaint, scalePngBlob]
+    [buildExportPngBlob, downloadBlob, finishing, nextPaint, runCloudExport, scalePngBlob]
   );
 
   const startPlainExport = useCallback(
@@ -2045,6 +2208,27 @@ export default function Lab2Page() {
                 </div>
               </Card>
             )}
+            {cloudOutputParam && !cloudEdit && cloudEditSession.phase !== "idle" && (
+              <Card className="flex items-center gap-2 border bg-muted/30 p-3 text-sm">
+                {cloudEditSession.phase !== "failed" && <Loader2 className="size-4 animate-spin" />}
+                <span className={cn(cloudEditSession.phase === "failed" && "text-destructive")}>
+                  {cloudEditSession.message || "Preparing your photo in the cloud…"}
+                </span>
+              </Card>
+            )}
+            {cloudEdit && (
+              <Card className="flex flex-wrap items-center justify-between gap-2 border bg-muted/30 p-3 text-sm">
+                <span>
+                  Cloud edit · <span className="font-mono">{cloudEdit.name}</span> — exports
+                  re-render the full DNG in the cloud.
+                </span>
+                {cloudEdit.slug && (
+                  <Button asChild size="sm" variant="outline">
+                    <a href={`/c/${cloudEdit.slug}`}>Back to download page</a>
+                  </Button>
+                )}
+              </Card>
+            )}
             <canvas
               ref={canvasRef}
               className={cn(
@@ -2118,7 +2302,7 @@ export default function Lab2Page() {
                   </DropdownMenuCheckboxItem>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem
-                    disabled={!hasMatch || busy}
+                    disabled={!hasMatch || busy || !!cloudEdit}
                     onClick={() => void applyFullPipeline()}
                   >
                     {busy && !isExporting ? "Applying…" : "Apply full pipeline"}
@@ -2261,6 +2445,7 @@ export default function Lab2Page() {
                 onSourceFiles={(files) => {
                   const f = files?.[0] ?? null;
                   const blendSnapshot = tileBlend;
+                  exitCloudEdit();
                   setBulkRunning(false);
                   setBulkQueue([]);
                   setBulkProcessingIndex(0);
@@ -2288,11 +2473,16 @@ export default function Lab2Page() {
                 onBulkFiles={(files) => {
                   const fileList = Array.from(files ?? []);
                   if (!fileList.length) return;
+                  exitCloudEdit();
                   startBulkUpload(fileList);
                 }}
                 onReferenceFiles={(files) => {
                   refFileRef.current = files?.[0] ?? null;
                   setHasMatch(false);
+                }}
+                onCloudFiles={(files) => {
+                  setCloudFiles(files);
+                  setCloudSheetOpen(true);
                 }}
                 onUploadNewSource={() => setShowUploadDropzones(true)}
                 onMatchSelect={(blend, rank) => void applyMatchCandidate(blend, rank)}
@@ -2319,6 +2509,24 @@ export default function Lab2Page() {
           if (!open) setGrainExportRequest(null);
         }}
         onConfirm={(params, request) => void runModalExport(params, request)}
+      />
+      <CloudStorageToast />
+      <CloudExportReadyDialog
+        result={cloudExportFiles}
+        onClose={() => setCloudExportFiles(null)}
+      />
+      <CloudBatchSheet
+        open={cloudSheetOpen}
+        files={cloudFiles}
+        lookParams={lookParams}
+        updateMatch={updateMatch}
+        effectsEnabled={effectsEnabled}
+        onEffectsEnabledChange={handleEffectsEnabledChange}
+        exportActuance={exportActuance}
+        model2Strength={model2Strength}
+        model2Robust={model2Robust}
+        defaultAlgorithm={tileBlend}
+        onOpenChange={setCloudSheetOpen}
       />
     </>
   );
