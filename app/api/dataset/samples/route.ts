@@ -1,6 +1,6 @@
 /**
  * GET /api/dataset/samples
- * Paginated read-only list of grading samples for the match list page.
+ * Paginated list of grading samples for the match list and dataset library.
  */
 
 import { NextResponse } from "next/server";
@@ -27,7 +27,7 @@ export async function GET(request: Request) {
 
   const { data, error, count } = await supabaseAdmin
     .from("grading_samples")
-    .select("id, name, image_url, created_at, embedding, embedding_semantic", {
+    .select("id, name, image_url, thumb_url, created_at, embedding, embedding_semantic", {
       count: "exact",
     })
     .order("created_at", { ascending: false })
@@ -41,6 +41,7 @@ export async function GET(request: Request) {
     id: row.id as string,
     name: (row.name as string | null) ?? null,
     image_url: row.image_url as string,
+    thumb_url: (row.thumb_url as string | null) ?? null,
     created_at: row.created_at as string,
     hasTonal: row.embedding != null,
     hasSemantic: row.embedding_semantic != null,

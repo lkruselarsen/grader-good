@@ -159,6 +159,14 @@ export function clearCloudStorage(scope: "dngs" | "exports" | "all") {
   });
 }
 
+/** Removes a reference from the dataset (row, tile embeddings and stored images). */
+export function deleteDatasetSample(sampleId: string) {
+  return cloudFetch<{ deleted: string; storageError: string | null }>(
+    `/api/dataset/samples/${sampleId}`,
+    { method: "DELETE" }
+  );
+}
+
 export function formatBytes(bytes: number): string {
   if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
   if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(0)} MB`;
