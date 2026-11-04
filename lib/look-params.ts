@@ -129,6 +129,8 @@ export interface LookParamsMatch {
   highlightWarmthAmount?: number;
   /** Highlight warmth threshold (0.01–0.5): upper fraction of the tonal range affected. */
   highlightWarmthThreshold?: number;
+  /** Highlight warmth softness (0–1): width of the blue → neutral → warm rolloff around the threshold. */
+  highlightWarmthSoftness?: number;
   /** Halation amount (0–1): overall scattered exposure; self-limiting, photographic even at 1. */
   halationAmount?: number;
   /** Halation sensitivity (0–1): exposure threshold; higher starts fewer stops above middle grey. */
@@ -289,6 +291,7 @@ export const DEFAULT_LOOK_PARAMS: LookParams = {
     highlightWarmthHue: 35,
     highlightWarmthAmount: 0.15,
     highlightWarmthThreshold: 0.25,
+    highlightWarmthSoftness: 0.5,
     halationAmount: 0.35,
     halationSensitivity: 0.5,
     halationRadius: 0.5,
@@ -311,6 +314,19 @@ export const DEFAULT_LOOK_PARAMS: LookParams = {
   },
   grading: defaultGrading(),
 };
+
+/** Engine highlight warmth params from the UI match params (missing values → defaults). */
+export function highlightWarmthFromLook(
+  m: Partial<LookParamsMatch>
+): NonNullable<EngineLookParams["highlightWarmth"]> {
+  const d = DEFAULT_LOOK_PARAMS.match;
+  return {
+    hue: m.highlightWarmthHue ?? d.highlightWarmthHue ?? 35,
+    amount: m.highlightWarmthAmount ?? d.highlightWarmthAmount ?? 0,
+    threshold: m.highlightWarmthThreshold ?? d.highlightWarmthThreshold ?? 0.25,
+    softness: m.highlightWarmthSoftness ?? d.highlightWarmthSoftness ?? 0.5,
+  };
+}
 
 /** Engine halation params from the UI match params (missing values → defaults). */
 export function halationFromLook(
