@@ -82,7 +82,9 @@ export async function processCloudItem(itemId: string, log: CloudLog = noopLog):
       const t1 = Date.now();
       const embeddings = await computeTileEmbeddingsNode(source);
       log("embedded", { ms: Date.now() - t1 });
-      const candidates = await searchAllCandidates(embeddings);
+      const tSearch = Date.now();
+      const candidates = await searchAllCandidates(embeddings, log);
+      log("candidates", { ms: Date.now() - tSearch });
       await supabase.from("cloud_items").update({ match_candidates: candidates }).eq("id", itemId);
       const ids = { jobId: job.id as string, itemId };
 

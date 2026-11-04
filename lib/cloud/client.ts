@@ -147,11 +147,18 @@ export function fetchCloudEditSession(sessionId: string) {
   return cloudFetch<CloudEditSessionView>(`/api/cloud/edit-sessions/${sessionId}`);
 }
 
-/** sampleId switches the export to another of the photo's matched references. */
-export function startCloudRender(outputId: string, settings: CloudRenderSettings, sampleId?: string) {
+/**
+ * `reference` switches the export to another of the photo's matched references;
+ * its algorithm decides the download-page folder of the new version.
+ */
+export function startCloudRender(
+  outputId: string,
+  settings: CloudRenderSettings,
+  reference?: { sampleId: string; algorithm: CloudOutputView["algorithm"] }
+) {
   return cloudFetch<{ outputId: string; name: string }>(`/api/cloud/outputs/${outputId}/render`, {
     method: "POST",
-    body: JSON.stringify(sampleId ? { ...settings, sampleId } : settings),
+    body: JSON.stringify(reference ? { ...settings, ...reference } : settings),
   });
 }
 

@@ -11,6 +11,7 @@ import { dispatchCloudTask } from "@/lib/cloud/server/dispatch";
 import { jsonError, requireCloudKey } from "@/lib/cloud/server/http";
 import { cloudOutputName } from "@/lib/cloud/naming";
 import { sanitizeRenderSettings } from "@/lib/cloud/settings";
+import { ALL_TILE_BLENDS, type Lab2TileBlend } from "@/lib/lab2/types";
 
 export const runtime = "nodejs";
 
@@ -20,10 +21,14 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
   const { id } = await ctx.params;
   let settings;
   let sampleId: string | null = null;
+  let pickedAlgorithm: Lab2TileBlend | null = null;
   try {
     const body = (await request.json()) as Record<string, unknown>;
     settings = sanitizeRenderSettings(body);
     if (typeof body?.sampleId === "string" && body.sampleId) sampleId = body.sampleId;
+    if (ALL_TILE_BLENDS.includes(body?.algorithm as Lab2TileBlend)) {
+      pickedAlgorithm = body.algorithm as Lab2TileBlend;
+    }
   } catch (e) {
     return jsonError(errorMessage(e), 400);
   }
@@ -54,7 +59,7 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
       .maybeSingle();
     if (!base) return jsonError("That reference is not one of this photo's matches.", 400);
     reference = {
-      algorithm: base.algorithm as string,
+      algorithm: pickedAlgorithm ?? (base.algorithm as string),
       sampleId: base.sample_id as string,
       sampleName: (base.sample_name as string | null) ?? null,
       finalGrading: base.final_grading,

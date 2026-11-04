@@ -479,7 +479,12 @@ export default function Lab2Page() {
     () => null
   );
   /** Set while editing a cloud export: exports go to the cloud render instead of the local worker. */
-  const cloudEditRef = useRef<{ outputId: string; name: string; sampleId: string | null } | null>(null);
+  const cloudEditRef = useRef<{
+    outputId: string;
+    name: string;
+    sampleId: string | null;
+    algorithm: Lab2TileBlend;
+  } | null>(null);
   const [cloudEdit, setCloudEdit] = useState<{
     outputId: string;
     name: string;
@@ -889,6 +894,7 @@ export default function Lab2Page() {
         outputId: session.output.id,
         name: session.output.name,
         sampleId: session.output.sampleId,
+        algorithm: session.output.algorithm,
       };
       setCloudEdit({
         outputId: session.output.id,
@@ -951,10 +957,10 @@ export default function Lab2Page() {
             url: c.thumbUrl ?? "",
             label:
               c.status === "ready"
-                ? (c.name ?? "Reference")
+                ? (c.name ?? "dataset match")
                 : c.status === "failed"
-                  ? `${c.name ?? "Reference"} (unavailable)`
-                  : `${c.name ?? "Reference"} (preparing…)`,
+                  ? `${c.name ?? "dataset match"} (unavailable)`
+                  : `${c.name ?? "dataset match"} (preparing…)`,
           }))
         : matchPreviews,
     [cloudCandidates, cloudEdit, matchPreviews]
@@ -1013,7 +1019,7 @@ export default function Lab2Page() {
           (c) => c.algorithm === tileBlend && c.rank === rank
         );
         if (!cloudCandidate) return;
-        const label = cloudCandidate.name ?? "reference";
+        const label = cloudCandidate.name ?? "dataset match";
         setSwitchingMatch(true);
         reportPipelineStatus(
           cloudCandidate.status === "ready"
@@ -1025,6 +1031,7 @@ export default function Lab2Page() {
           const cloud = cloudEditRef.current;
           if (!cloud || !candidate.finalGrading) return;
           cloud.sampleId = candidate.sampleId;
+          cloud.algorithm = tileBlend;
           setActiveMatch({ tileBlend, rank });
           postM2BaseRef.current = preview;
           postM2PreviewBaseRef.current = preview;
@@ -2016,7 +2023,7 @@ export default function Lab2Page() {
             grain: params,
             exportScale: request.scale,
           },
-          cloud.sampleId ?? undefined
+          cloud.sampleId ? { sampleId: cloud.sampleId, algorithm: cloud.algorithm } : undefined
         );
         setExportProgressPct(25);
         setExportProgressLabel(`Rendering ${queued.name} in the cloud`);

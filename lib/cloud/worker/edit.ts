@@ -142,7 +142,7 @@ export async function prepareCloudEdit(sessionId: string, log: CloudLog = noopLo
     let candidates = context.candidates;
     if (!candidates) {
       const embeddings = await computeTileEmbeddingsNode(await getSource());
-      candidates = await searchAllCandidates(embeddings);
+      candidates = await searchAllCandidates(embeddings, log);
       await supabase.from("cloud_items").update({ match_candidates: candidates }).eq("id", ids.itemId);
     }
     await warmCandidates(ids, m, candidates, bases, context.output.algorithm, getSource, lookParams, log);

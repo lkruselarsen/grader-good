@@ -25,24 +25,29 @@ export type CandidateSlot = {
   candidate: CloudMatchCandidate;
 };
 
-/** Top 3 dataset matches for every algorithm (the same 3×3 lab2 offers). */
-export async function searchAllCandidates(embeddings: {
-  semantic: number[][];
-  chromatic: number[][];
-}): Promise<CloudMatchCandidates> {
+/**
+ * Top 3 dataset matches for every algorithm (the same 3×3 lab2 offers). Searches
+ * run one at a time so a batch of parallel photos does not flood the database;
+ * an algorithm whose search fails gets an empty list.
+ */
+export async function searchAllCandidates(
+  embeddings: { semantic: number[][]; chromatic: number[][] },
+  log: (message: string, extra?: Record<string, unknown>) => void = () => {}
+): Promise<CloudMatchCandidates> {
   const supabase = cloudSupabase();
-  const lists = await Promise.all(
-    ALL_TILE_BLENDS.map((algorithm) =>
-      searchTiles(
+  const out = {} as CloudMatchCandidates;
+  for (const algorithm of ALL_TILE_BLENDS) {
+    let matches: Awaited<ReturnType<typeof searchTiles>> = [];
+    try {
+      matches = await searchTiles(
         supabase,
         buildTileSearchBody(algorithm, embeddings.semantic, embeddings.chromatic),
         CANDIDATES_PER_ALGORITHM
-      )
-    )
-  );
-  const out = {} as CloudMatchCandidates;
-  ALL_TILE_BLENDS.forEach((algorithm, i) => {
-    out[algorithm] = lists[i]!
+      );
+    } catch (e) {
+      log("candidate search failed", { algorithm, error: e instanceof Error ? e.message : String(e) });
+    }
+    out[algorithm] = matches
       .filter((m) => !!m.image_url)
       .slice(0, CANDIDATES_PER_ALGORITHM)
       .map((m) => ({
@@ -52,7 +57,7 @@ export async function searchAllCandidates(embeddings: {
         thumbUrl: m.thumb_url ?? null,
         similarity: Number(m.similarity ?? 0),
       }));
-  });
+  }
   return out;
 }
 
