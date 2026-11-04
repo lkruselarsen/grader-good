@@ -1,6 +1,7 @@
 "use client";
 
 import type {
+  CloudEditCandidateView,
   CloudJobSettings,
   CloudJobView,
   CloudOutputView,
@@ -123,13 +124,17 @@ export type CloudEditSessionView = {
   id: string;
   status: "pending" | "processing" | "ready" | "failed";
   error: string | null;
+  warmStatus: "pending" | "processing" | "done" | "failed";
   previewUrl: string | null;
   width: number | null;
   height: number | null;
+  channels: number;
+  candidates: CloudEditCandidateView[];
   output: {
     id: string;
     name: string;
     algorithm: CloudOutputView["algorithm"];
+    sampleId: string | null;
     sampleName: string | null;
     lookParams: CloudRenderSettings["lookParams"];
     finalGrading: CloudRenderSettings["lookParams"]["grading"];
@@ -142,10 +147,11 @@ export function fetchCloudEditSession(sessionId: string) {
   return cloudFetch<CloudEditSessionView>(`/api/cloud/edit-sessions/${sessionId}`);
 }
 
-export function startCloudRender(outputId: string, settings: CloudRenderSettings) {
+/** sampleId switches the export to another of the photo's matched references. */
+export function startCloudRender(outputId: string, settings: CloudRenderSettings, sampleId?: string) {
   return cloudFetch<{ outputId: string; name: string }>(`/api/cloud/outputs/${outputId}/render`, {
     method: "POST",
-    body: JSON.stringify(settings),
+    body: JSON.stringify(sampleId ? { ...settings, sampleId } : settings),
   });
 }
 
@@ -173,19 +179,32 @@ export function formatBytes(bytes: number): string {
   return `${Math.max(0, Math.round(bytes / 1024))} KB`;
 }
 
-/** Decodes a gzipped Float32 RGBA preview published by the cloud edit task. */
+/**
+ * Decodes a gzipped Float32 preview published by the cloud edit task: RGBA, or
+ * RGB when alpha was uniformly 1 (restored here, so the frame is identical).
+ */
 export async function fetchFloatPreview(
   url: string,
   width: number,
-  height: number
+  height: number,
+  channels = 4
 ): Promise<{ width: number; height: number; data: Float32Array }> {
   const res = await fetch(url);
   if (!res.ok || !res.body) throw new Error(`Preview download failed (${res.status})`);
   const stream = res.body.pipeThrough(new DecompressionStream("gzip"));
   const buf = await new Response(stream).arrayBuffer();
-  const data = new Float32Array(buf);
-  if (data.length !== width * height * 4) {
+  const packed = new Float32Array(buf);
+  const px = width * height;
+  if (packed.length !== px * channels) {
     throw new Error("Preview size does not match the edit session.");
+  }
+  if (channels === 4) return { width, height, data: packed };
+  const data = new Float32Array(px * 4);
+  for (let p = 0; p < px; p++) {
+    data[p * 4] = packed[p * 3]!;
+    data[p * 4 + 1] = packed[p * 3 + 1]!;
+    data[p * 4 + 2] = packed[p * 3 + 2]!;
+    data[p * 4 + 3] = 1;
   }
   return { width, height, data };
 }

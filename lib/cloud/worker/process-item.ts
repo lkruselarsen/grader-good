@@ -4,7 +4,8 @@ import { cloudOutputName } from "@/lib/cloud/naming";
 import { sanitizeJobSettings } from "@/lib/cloud/settings";
 import { CLOUD_EXPORT_BUCKET, type CloudRenderSettings } from "@/lib/cloud/types";
 import { rollUpJobStatus } from "./job-status";
-import { decodeCloudDng, matchReference, renderCloudExport } from "./render";
+import { buildAndStoreEditBase, matchReference, searchAllCandidates } from "./edit-bases";
+import { decodeCloudDng, renderCloudExport } from "./render";
 
 export type CloudLog = (message: string, extra?: Record<string, unknown>) => void;
 
@@ -81,12 +82,15 @@ export async function processCloudItem(itemId: string, log: CloudLog = noopLog):
       const t1 = Date.now();
       const embeddings = await computeTileEmbeddingsNode(source);
       log("embedded", { ms: Date.now() - t1 });
+      const candidates = await searchAllCandidates(embeddings);
+      await supabase.from("cloud_items").update({ match_candidates: candidates }).eq("id", itemId);
+      const ids = { jobId: job.id as string, itemId };
 
       for (const out of todo) {
         const t2 = Date.now();
         await supabase.from("cloud_outputs").update({ status: "processing", error: null, updated_at: now() }).eq("id", out.id);
         try {
-          const match = await matchReference(out.algorithm, embeddings);
+          const match = await matchReference(out.algorithm, candidates);
           const result = await renderCloudExport(source, match.decodedRef, match.grading, render);
           const paths = exportPaths(job.id as string, out.name);
           await uploadObject(CLOUD_EXPORT_BUCKET, paths.png, result.png, "image/png");
@@ -99,8 +103,8 @@ export async function processCloudItem(itemId: string, log: CloudLog = noopLog):
               png_bytes: result.png.byteLength,
               thumb_path: paths.thumb,
               thumb_bytes: result.thumb.byteLength,
-              sample_id: match.sample.id,
-              sample_name: match.sample.name,
+              sample_id: match.slot.candidate.sampleId,
+              sample_name: match.slot.candidate.name,
               final_grading: match.grading,
               look_params: settings.lookParams,
               render_settings: render,
@@ -110,6 +114,13 @@ export async function processCloudItem(itemId: string, log: CloudLog = noopLog):
             })
             .eq("id", out.id);
           log("rendered", { output: out.name, ms: Date.now() - t2 });
+          const t3 = Date.now();
+          try {
+            await buildAndStoreEditBase(ids, match.slot, render, source, match, render.lookParams);
+            log("edit base cached", { output: out.name, ms: Date.now() - t3 });
+          } catch (e) {
+            log("edit base failed", { output: out.name, error: errorMessage(e) });
+          }
         } catch (e) {
           log("output failed", { output: out.name, error: errorMessage(e) });
           await supabase

@@ -73,8 +73,36 @@ export type CloudJobView = {
   outputs: CloudOutputView[];
 };
 
+/** One dataset reference the cloud matched for an item (top 3 per algorithm). */
+export type CloudMatchCandidate = {
+  sampleId: string;
+  name: string | null;
+  imageUrl: string;
+  thumbUrl: string | null;
+  similarity: number;
+};
+
+export type CloudMatchCandidates = Record<Lab2TileBlend, CloudMatchCandidate[]>;
+
+/** A reference choice in cloud edit mode with the state of its cached base. */
+export type CloudEditCandidateView = {
+  algorithm: Lab2TileBlend;
+  rank: 1 | 2 | 3;
+  sampleId: string;
+  name: string | null;
+  thumbUrl: string | null;
+  status: CloudEditStatus | "missing";
+  previewUrl: string | null;
+  width: number | null;
+  height: number | null;
+  channels: number;
+  finalGrading: LookParamsT["grading"] | null;
+};
+
 export type CloudStorageUsage = {
   dngBytes: number;
+  /** Cached edit previews; useless without their DNG, so cleared with it. */
+  editBytes: number;
   exportBytes: number;
   usedBytes: number;
   quotaBytes: number;

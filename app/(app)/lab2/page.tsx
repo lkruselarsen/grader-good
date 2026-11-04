@@ -479,7 +479,7 @@ export default function Lab2Page() {
     () => null
   );
   /** Set while editing a cloud export: exports go to the cloud render instead of the local worker. */
-  const cloudEditRef = useRef<{ outputId: string; name: string } | null>(null);
+  const cloudEditRef = useRef<{ outputId: string; name: string; sampleId: string | null } | null>(null);
   const [cloudEdit, setCloudEdit] = useState<{
     outputId: string;
     name: string;
@@ -885,7 +885,11 @@ export default function Lab2Page() {
     (preview: PixelFrameF32, session: CloudEditSessionView) => {
       const settings = session.output.renderSettings;
       const look = deepMergeLab2(LAB2_DEFAULT_LOOK_PARAMS, session.output.lookParams);
-      cloudEditRef.current = { outputId: session.output.id, name: session.output.name };
+      cloudEditRef.current = {
+        outputId: session.output.id,
+        name: session.output.name,
+        sampleId: session.output.sampleId,
+      };
       setCloudEdit({
         outputId: session.output.id,
         name: session.output.name,
@@ -911,7 +915,13 @@ export default function Lab2Page() {
       finishing.setEffectsEnabled(settings.effectsEnabled);
       effectsEnabledRef.current = settings.effectsEnabled;
       setMatchPreviews([]);
-      setShowUploadDropzones(true);
+      matchCandidatesRef.current = emptyMatchCandidateSlots();
+      const own = session.candidates.find((c) => c.sampleId === session.output.sampleId);
+      setActiveMatch({
+        tileBlend: own?.algorithm ?? session.output.algorithm,
+        rank: own?.rank ?? 1,
+      });
+      setShowUploadDropzones(false);
       liveLocalStateRef.current = ensureLab2LiveWorkState(
         liveLocalStateRef.current,
         preview.width,
@@ -931,6 +941,24 @@ export default function Lab2Page() {
     [drawFloatActive, finishing, initLiveWorker]
   );
   const cloudEditSession = useCloudEditSession(cloudOutputParam, loadCloudEditSession);
+  const cloudCandidates = cloudEditSession.candidates;
+  const displayedMatchPreviews = useMemo<MatchPreview[]>(
+    () =>
+      cloudEdit
+        ? cloudCandidates.map((c) => ({
+            tileBlend: c.algorithm,
+            rank: c.rank,
+            url: c.thumbUrl ?? "",
+            label:
+              c.status === "ready"
+                ? (c.name ?? "Reference")
+                : c.status === "failed"
+                  ? `${c.name ?? "Reference"} (unavailable)`
+                  : `${c.name ?? "Reference"} (preparing…)`,
+          }))
+        : matchPreviews,
+    [cloudCandidates, cloudEdit, matchPreviews]
+  );
 
   const exitCloudEdit = useCallback(() => {
     if (!cloudEditRef.current) return;
@@ -980,6 +1008,50 @@ export default function Lab2Page() {
       ) {
         return;
       }
+      if (cloudEditRef.current) {
+        const cloudCandidate = cloudCandidates.find(
+          (c) => c.algorithm === tileBlend && c.rank === rank
+        );
+        if (!cloudCandidate) return;
+        const label = cloudCandidate.name ?? "reference";
+        setSwitchingMatch(true);
+        reportPipelineStatus(
+          cloudCandidate.status === "ready"
+            ? `Loading ${TILE_BLEND_SHORT_LABELS[tileBlend]} #${rank} (${label})…`
+            : `Preparing ${TILE_BLEND_SHORT_LABELS[tileBlend]} #${rank} (${label}) in the cloud…`
+        );
+        try {
+          const { preview, candidate } = await cloudEditSession.loadCandidate(cloudCandidate.sampleId);
+          const cloud = cloudEditRef.current;
+          if (!cloud || !candidate.finalGrading) return;
+          cloud.sampleId = candidate.sampleId;
+          setActiveMatch({ tileBlend, rank });
+          postM2BaseRef.current = preview;
+          postM2PreviewBaseRef.current = preview;
+          bakedRgbaRef.current = null;
+          setHasBaked(false);
+          setFinalGrading(candidate.finalGrading);
+          liveLocalStateRef.current = ensureLab2LiveWorkState(
+            liveLocalStateRef.current,
+            preview.width,
+            preview.height
+          );
+          initLiveWorker(preview);
+          const engine = buildEngineParamsFromLookParams(liveLookParams, candidate.finalGrading);
+          drawFloatActive(
+            applyLivePostModel2OnlyWithState(preview, engine, liveLocalStateRef.current),
+            liveLookParams
+          );
+          setStatus(
+            `Editing ${cloud.name} with ${TILE_BLEND_SHORT_LABELS[tileBlend]} #${rank} (${label}). Exports re-render the full DNG in the cloud.`
+          );
+        } catch (e) {
+          setStatus(e instanceof Error ? e.message : String(e));
+        } finally {
+          setSwitchingMatch(false);
+        }
+        return;
+      }
       const source = decodedSourceRef.current;
       const candidate = matchCandidatesRef.current[tileBlend][rank - 1];
       if (!source || !candidate) return;
@@ -1007,7 +1079,18 @@ export default function Lab2Page() {
         setSwitchingMatch(false);
       }
     },
-    [activeMatch.rank, activeMatch.tileBlend, renderPostModel2Preview, reportPipelineStatus, switchingMatch]
+    [
+      activeMatch.rank,
+      activeMatch.tileBlend,
+      cloudCandidates,
+      cloudEditSession,
+      drawFloatActive,
+      initLiveWorker,
+      liveLookParams,
+      renderPostModel2Preview,
+      reportPipelineStatus,
+      switchingMatch,
+    ]
   );
 
   const runAutoEmbeddingModel2Match = useCallback(async (
@@ -1921,16 +2004,20 @@ export default function Lab2Page() {
       setExportProgressLabel("Sending edits to the cloud");
       setStatus("Rendering the full DNG in the cloud…");
       try {
-        const queued = await startCloudRender(cloud.outputId, {
-          lookParams,
-          effectsEnabled,
-          exportActuance,
-          model2Strength,
-          model2Robust,
-          withGrain,
-          grain: params,
-          exportScale: request.scale,
-        });
+        const queued = await startCloudRender(
+          cloud.outputId,
+          {
+            lookParams,
+            effectsEnabled,
+            exportActuance,
+            model2Strength,
+            model2Robust,
+            withGrain,
+            grain: params,
+            exportScale: request.scale,
+          },
+          cloud.sampleId ?? undefined
+        );
         setExportProgressPct(25);
         setExportProgressLabel(`Rendering ${queued.name} in the cloud`);
         let view = await fetchCloudOutput(queued.outputId);
@@ -2413,7 +2500,7 @@ export default function Lab2Page() {
                 showUploadDropzones={showUploadDropzones}
                 status={status}
                 statusRef={statusRef}
-                matchPreviews={matchPreviews}
+                matchPreviews={displayedMatchPreviews}
                 activeMatch={activeMatch}
                 switchingMatch={switchingMatch}
                 onTileBlendChange={setTileBlend}

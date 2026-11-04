@@ -16,6 +16,7 @@ export type TileSearchMatch = {
   id: string;
   name: string | null;
   image_url: string | null;
+  thumb_url: string | null;
   look_params: unknown;
   created_at: string;
   reference_exposure: unknown;
@@ -27,7 +28,7 @@ type TileRow = { tile_index: number; embedding: number[] };
 type HybridTileRow = TileRow & { embedding_tonal_chroma: number[] };
 
 const SAMPLE_COLUMNS =
-  "id, name, image_url, look_params, created_at, reference_exposure, reference_chroma_distribution";
+  "id, name, image_url, thumb_url, look_params, created_at, reference_exposure, reference_chroma_distribution";
 
 function validateEmbedding(arr: unknown, dim: number): arr is number[] {
   if (!Array.isArray(arr) || arr.length !== dim) return false;
