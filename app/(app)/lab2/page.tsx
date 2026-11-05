@@ -2300,6 +2300,37 @@ export default function Lab2Page() {
     updateMatch,
   };
 
+  // On mobile these render over the preview so they never move the controls under a finger.
+  const transientStatus = (
+    <>
+      {(liveBusy || (liveRerenderEnabled && liveDirty)) && (
+        <ProgressWithLabel indeterminate label="Updating preview…" />
+      )}
+      {!liveRerenderEnabled && liveDirty && !liveBusy && (
+        <p className="text-xs text-amber-600 dark:text-amber-400">edits not yet applied</p>
+      )}
+      {liveRerenderEnabled && expensiveDragBlocked && (
+        <p className="text-[11px] text-muted-foreground">
+          Expensive sliders render on pointer-up for responsiveness.
+        </p>
+      )}
+      {showPerfDebug && lastRenderTelemetry && (
+        <p className="text-[11px] text-muted-foreground">
+          render {lastRenderTelemetry.mode}: total {lastRenderTelemetry.totalMs.toFixed(0)}ms
+          {" | "}compute {lastRenderTelemetry.computeMs.toFixed(0)}ms
+          {" | "}pack {lastRenderTelemetry.packMs.toFixed(0)}ms
+          {" | "}transfer {lastRenderTelemetry.transferMs.toFixed(0)}ms
+          {" | "}draw {lastRenderTelemetry.drawMs.toFixed(0)}ms
+        </p>
+      )}
+      {(adaptiveQualityMode === "degraded" || adaptiveQualityMode === "aggressive") && (
+        <p className="text-[11px] text-amber-600 dark:text-amber-400">
+          interactive quality mode: {adaptiveQualityMode}
+        </p>
+      )}
+    </>
+  );
+
   return (
     <>
       <PanelSidebarProvider defaultOpen>
@@ -2454,44 +2485,34 @@ export default function Lab2Page() {
                   )}
                 </Card>
               ))}
-            <canvas
-              ref={canvasRef}
-              className={cn(
-                "w-full rounded-lg border bg-black object-contain",
-                isMobile ? "max-h-[45dvh]" : "max-h-[70vh]",
-                previewRenderer === "webgl" && "hidden"
-              )}
-            />
-            {previewRenderer === "webgl" && (
+            <div className={cn(isMobile && "relative")}>
               <canvas
-                ref={finishing.webglCanvasRef}
+                ref={canvasRef}
                 className={cn(
                   "w-full rounded-lg border bg-black object-contain",
-                  isMobile ? "max-h-[45dvh]" : "max-h-[70vh]"
+                  isMobile ? "max-h-[45dvh]" : "max-h-[70vh]",
+                  previewRenderer === "webgl" && "hidden"
                 )}
               />
-            )}
-            {(liveBusy || (liveRerenderEnabled && liveDirty)) && (
-              <ProgressWithLabel indeterminate label="Updating preview…" />
-            )}
-            {!liveRerenderEnabled && liveDirty && !liveBusy && (
-              <p className="text-xs text-amber-600 dark:text-amber-400">edits not yet applied</p>
-            )}
-            {liveRerenderEnabled && expensiveDragBlocked && (
-              <p className={cn("text-[11px] text-muted-foreground", isMobile && "truncate")}>
-                Expensive sliders render on pointer-up for responsiveness.
-              </p>
-            )}
-            <p className={cn("text-xs text-muted-foreground", isMobile && "truncate")}>{status}</p>
-            {showPerfDebug && lastRenderTelemetry && (
-              <p className="text-[11px] text-muted-foreground">
-                render {lastRenderTelemetry.mode}: total {lastRenderTelemetry.totalMs.toFixed(0)}ms
-                {" | "}compute {lastRenderTelemetry.computeMs.toFixed(0)}ms
-                {" | "}pack {lastRenderTelemetry.packMs.toFixed(0)}ms
-                {" | "}transfer {lastRenderTelemetry.transferMs.toFixed(0)}ms
-                {" | "}draw {lastRenderTelemetry.drawMs.toFixed(0)}ms
-              </p>
-            )}
+              {previewRenderer === "webgl" && (
+                <canvas
+                  ref={finishing.webglCanvasRef}
+                  className={cn(
+                    "w-full rounded-lg border bg-black object-contain",
+                    isMobile ? "max-h-[45dvh]" : "max-h-[70vh]"
+                  )}
+                />
+              )}
+              {isMobile && (
+                <div className="pointer-events-none absolute inset-x-px bottom-px space-y-1 rounded-b-lg bg-black/60 px-2 py-1.5 empty:hidden [&_p]:truncate">
+                  {transientStatus}
+                </div>
+              )}
+            </div>
+            {!isMobile && transientStatus}
+            <p className={cn("text-xs text-muted-foreground", isMobile && "h-4 truncate")}>
+              {status}
+            </p>
             {showPerfDebug && (
               <Button
                 type="button"
@@ -2502,11 +2523,6 @@ export default function Lab2Page() {
               >
                 GPU vs CPU
               </Button>
-            )}
-            {(adaptiveQualityMode === "degraded" || adaptiveQualityMode === "aggressive") && (
-              <p className="text-[11px] text-amber-600 dark:text-amber-400">
-                interactive quality mode: {adaptiveQualityMode}
-              </p>
             )}
             <div className="flex flex-wrap items-center gap-2 w-full max-w-xl">
               <DropdownMenu>

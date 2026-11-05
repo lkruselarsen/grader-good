@@ -61,7 +61,7 @@ function CloudUploadButton({ onFiles }: { onFiles: (files: File[]) => void }) {
   );
 }
 
-const SLIDER_CLASS = "w-full touch-pan-y";
+const SLIDER_CLASS = "w-full";
 
 export type Lab2ControlsPanelProps = {
   mode: "full" | "bulk-upload";

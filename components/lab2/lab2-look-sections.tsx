@@ -22,7 +22,7 @@ import { REFRACTION_POST_MODEL2_HUES_DEG } from "@/src/lib/pipeline/stages/refra
 import type { ReactNode } from "react";
 import { HueSatWheel } from "./hue-sat-wheel";
 
-const SLIDER_CLASS = "w-full touch-pan-y";
+const SLIDER_CLASS = "w-full";
 
 export type UpdateLookMatch = <K extends keyof LookParamsT["match"]>(
   key: K,
