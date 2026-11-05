@@ -42,3 +42,7 @@ env.local
 next-env.d.ts
 
 
+
+# local scratch output and Trigger.dev CLI cache
+/.scratch/
+/.trigger/
