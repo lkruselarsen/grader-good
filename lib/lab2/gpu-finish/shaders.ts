@@ -6,6 +6,8 @@
  */
 
 import {
+  HALATION_ALIGNED_DESAT,
+  HALATION_DESAT_FULL_RATIO,
   HALATION_LAYER_LOBES,
   HALATION_LIMIT,
   HALATION_REF_GREY,
@@ -175,6 +177,7 @@ const vec3 LG = vec3(${f(HALATION_LAYER_LOBES.g[0])}, ${f(HALATION_LAYER_LOBES.g
 const vec3 LB = vec3(${f(HALATION_LAYER_LOBES.b[0])}, ${f(HALATION_LAYER_LOBES.b[1])}, ${f(HALATION_LAYER_LOBES.b[2])});
 const float HMAX = ${f(HALATION_LIMIT)};
 const float SW = ${f(HALATION_SHOULDER_WHITE)};
+const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
 
 void main() {
   vec2 uv = u_flipY == 1 ? vec2(v_uv.x, 1.0 - v_uv.y) : v_uv;
@@ -184,10 +187,24 @@ void main() {
   if (u_halation == 1) {
     vec3 l = vec3(texture(u_lobe0, uv).r, texture(u_lobe1, uv).r, texture(u_lobe2, uv).r);
     if (l.x + l.y + l.z >= 1e-6) {
-      float vis = 1.0 - ${f(HALATION_SOURCE_SUPPRESSION)} * halationActivation(dot(rgb, vec3(0.2126, 0.7152, 0.0722)));
+      float Y = dot(rgb, LUMA);
+      float vis = 1.0 - ${f(HALATION_SOURCE_SUPPRESSION)} * halationActivation(Y);
       vec3 halo = vec3(dot(LR, l), dot(LG, l), dot(LB, l)) * vis;
       vec3 h = u_gain * HMAX * (1.0 - exp(-halo / HMAX));
-      rgb = rgb + exp(-max(rgb, vec3(0.0)) / SW) * SW * (1.0 - exp(-h / SW));
+      vec3 d = exp(-max(rgb, vec3(0.0)) / SW) * SW * (1.0 - exp(-h / SW));
+      vec3 cb = rgb - Y;
+      vec3 qd = d - dot(d, LUMA);
+      float c2 = dot(cb, cb);
+      float q2 = dot(qd, qd);
+      if (c2 > 1e-12 && q2 > 1e-12) {
+        float nc = sqrt(c2);
+        float nq = sqrt(q2);
+        float t = clamp(nq / nc / ${f(HALATION_DESAT_FULL_RATIO)}, 0.0, 1.0);
+        float wd = t * t * (3.0 - 2.0 * t);
+        float opp = min(1.0 - dot(cb, qd) / (nc * nq), 1.0);
+        rgb = Y + cb * (1.0 - wd * (${f(HALATION_ALIGNED_DESAT)} + (1.0 - ${f(HALATION_ALIGNED_DESAT)}) * opp));
+      }
+      rgb = rgb + d;
     }
   }
   o = vec4(linearToSrgb(rgb), 1.0);
