@@ -9,7 +9,8 @@
  * 2. Scatter: 3-lobe PSF (cascaded Gaussians, O(N) box blurs); each layer
  *    mixes the lobes with weights summing to 1.
  * 3. Suppression inside the emitting region, then a self-limiting curve.
- * 4. Extra exposure per film layer through a differential film shoulder.
+ * 4. Hue-aware rolloff: colours opposing the halo fade toward luminance.
+ * 5. Extra exposure per film layer through a differential film shoulder.
  *
  * This is the reference implementation; the preview shader in
  * lib/lab2/gpu-finish/shaders.ts mirrors the per-pixel math.
@@ -18,6 +19,8 @@
 import type { PixelFrameF32 } from "../types";
 import { gaussianBlurCascade, gaussianBlurPlane } from "./box-blur";
 import {
+  HALATION_ALIGNED_DESAT,
+  HALATION_DESAT_FULL_RATIO,
   HALATION_LAYER_LOBES,
   HALATION_LIMIT,
   HALATION_SHOULDER_WHITE,
@@ -27,6 +30,13 @@ import {
   halationSource,
   type HalationParams,
 } from "./model";
+
+/** smoothstep(0, 1, t) */
+function ramp(t: number): number {
+  if (t <= 0) return 0;
+  if (t >= 1) return 1;
+  return t * t * (3 - 2 * t);
+}
 
 export function applyHalationFloat(
   frame: PixelFrameF32,
@@ -87,6 +97,7 @@ export function applyHalationFloat(
   const invHmax = 1 / hmax;
   const W = HALATION_SHOULDER_WHITE;
   const invW = 1 / W;
+  const invFull = 1 / HALATION_DESAT_FULL_RATIO;
 
   const out = opts?.inPlace ? data : new Float32Array(data);
   for (let p = 0, i = 0; p < n; p++, i += 4) {
@@ -96,18 +107,43 @@ export function applyHalationFloat(
     const l2 = lobe2[p];
     // Below 1e-6 the added light is under 0.01 of an 8-bit code even in black.
     if (l0 + l1 + l2 < 1e-6) continue;
-    const r = data[i];
-    const g = data[i + 1];
-    const b = data[i + 2];
-    const vis =
-      1 - HALATION_SOURCE_SUPPRESSION * halationActivation(0.2126 * r + 0.7152 * g + 0.0722 * b, u);
+    let r = data[i];
+    let g = data[i + 1];
+    let b = data[i + 2];
+    const Y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    const vis = 1 - HALATION_SOURCE_SUPPRESSION * halationActivation(Y, u);
     const hr = gr * hmax * (1 - Math.exp(-(wr0 * l0 + wr1 * l1 + wr2 * l2) * vis * invHmax));
     const hg = gg * hmax * (1 - Math.exp(-(wg0 * l0 + wg1 * l1 + wg2 * l2) * vis * invHmax));
     const hb = gb * hmax * (1 - Math.exp(-(wb0 * l0 + wb1 * l1 + wb2 * l2) * vis * invHmax));
     // F(E + h) − F(E) with F(E) = W·(1 − exp(−E/W)).
-    out[i] = r + Math.exp(-(r > 0 ? r : 0) * invW) * W * (1 - Math.exp(-hr * invW));
-    out[i + 1] = g + Math.exp(-(g > 0 ? g : 0) * invW) * W * (1 - Math.exp(-hg * invW));
-    out[i + 2] = b + Math.exp(-(b > 0 ? b : 0) * invW) * W * (1 - Math.exp(-hb * invW));
+    const dr = Math.exp(-(r > 0 ? r : 0) * invW) * W * (1 - Math.exp(-hr * invW));
+    const dg = Math.exp(-(g > 0 ? g : 0) * invW) * W * (1 - Math.exp(-hg * invW));
+    const db = Math.exp(-(b > 0 ? b : 0) * invW) * W * (1 - Math.exp(-hb * invW));
+    // Rolloff: colours opposing the halo fade toward their luminance before
+    // the halo's chroma is comparable to theirs.
+    const Yd = 0.2126 * dr + 0.7152 * dg + 0.0722 * db;
+    const cr = r - Y;
+    const cg = g - Y;
+    const cb = b - Y;
+    const qr = dr - Yd;
+    const qg = dg - Yd;
+    const qb = db - Yd;
+    const c2 = cr * cr + cg * cg + cb * cb;
+    const q2 = qr * qr + qg * qg + qb * qb;
+    if (c2 > 1e-12 && q2 > 1e-12) {
+      const nc = Math.sqrt(c2);
+      const nq = Math.sqrt(q2);
+      const wd = ramp((nq / nc) * invFull);
+      const cos = (cr * qr + cg * qg + cb * qb) / (nc * nq);
+      const opp = 1 - cos < 1 ? 1 - cos : 1;
+      const keep = 1 - wd * (HALATION_ALIGNED_DESAT + (1 - HALATION_ALIGNED_DESAT) * opp);
+      r = Y + cr * keep;
+      g = Y + cg * keep;
+      b = Y + cb * keep;
+    }
+    out[i] = r + dr;
+    out[i + 1] = g + dg;
+    out[i + 2] = b + db;
   }
   return { width, height, data: out };
 }

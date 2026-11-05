@@ -153,7 +153,12 @@ export function smoothstep(lo: number, hi: number, x: number): number {
 //   4. Conservative suppression inside the emitting region.
 //   5. Self-limiting exposure: HMAX·(1 − exp(−x / HMAX)).
 //   6. Extra exposure per film layer: red dominant, minority green, minimal blue.
-//   7. Differential film shoulder: out = E + F(E + h) − F(E). Added light shows
+//   7. Rolloff before the halo lands: the pixel's own colour fades toward its
+//      luminance when it opposes the halo hue (blue sky under a red halo), so
+//      it passes through neutral instead of mixing into purple. The fade
+//      completes while the halo's chroma is still small next to the pixel's;
+//      hues aligned with the halo keep their colour.
+//   8. Differential film shoulder: out = E + F(E + h) − F(E). Added light shows
 //      in dark neighbours and barely moves dense highlights; h = 0 is identity.
 // ---------------------------------------------------------------------------
 
@@ -187,6 +192,13 @@ export const HALATION_LAYER_GAIN = { r: 1.0, gMin: 0.18, gMax: 0.42, b: 0.04 } a
 export const HALATION_AMOUNT_SCALE = 1.33;
 /** White point of the film shoulder F(E) = W·(1 − exp(−E / W)). */
 export const HALATION_SHOULDER_WHITE = 1.0;
+/**
+ * Halo chroma / pixel chroma ratio at which an opposing colour has fully
+ * faded (chroma = linear RGB offset from luminance).
+ */
+export const HALATION_DESAT_FULL_RATIO = 0.25;
+/** Fade kept for hues aligned with the halo; hues 90° or more away get 1. */
+export const HALATION_ALIGNED_DESAT = 0;
 
 export type HalationUniforms = {
   amount: number;
