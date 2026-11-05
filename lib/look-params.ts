@@ -175,6 +175,8 @@ export interface LookParamsMatch {
   bandUpperHighTemp?: number;
   /** Post–Model 2: twelve sat multipliers; hues fixed at 30° (see pipeline refractionPostModel2). */
   refractionPostModel2?: number[];
+  /** Post–Model 2: twelve per-colour luminance offsets in stops (-2..+2); same hue nodes as refraction. */
+  hueLuminancePostModel2?: number[];
   /** De-vignette: inner diameter / min(w,h), and corner lift in stops. */
   devignette?: { innerDiameterNorm: number; strengthStops: number };
   /**
@@ -308,6 +310,7 @@ export const DEFAULT_LOOK_PARAMS: LookParams = {
     bandLowerHighTemp: 0,
     bandUpperHighTemp: 0,
     refractionPostModel2: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    hueLuminancePostModel2: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     devignette: { innerDiameterNorm: 0.65, strengthStops: 0 },
     exposureCurveMasterMul: 1,
     colorDensityCurveMasterMul: 1,

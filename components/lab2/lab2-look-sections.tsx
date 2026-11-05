@@ -18,6 +18,11 @@ import {
 } from "@/lib/look-params";
 import { REFRACTION_HUE_NAMES } from "@/lib/lab2/constants";
 import { cn } from "@/lib/utils";
+import {
+  defaultHueLuminancePostModel2,
+  HUE_LUMINANCE_MAX_STOPS,
+  HUE_LUMINANCE_MIN_STOPS,
+} from "@/src/lib/pipeline/stages/hueLuminancePostModel2";
 import { REFRACTION_POST_MODEL2_HUES_DEG } from "@/src/lib/pipeline/stages/refractionPostModel2";
 import type { ReactNode } from "react";
 import { HueSatWheel } from "./hue-sat-wheel";
@@ -197,6 +202,47 @@ export function getLab2LookSections({ lookParams, updateMatch }: LookSectionArgs
                     ];
                     arr[idx] = v[0] ?? 1;
                     updateMatch("refractionPostModel2", arr);
+                  }}
+                />
+              </div>
+            )
+          )}
+        </>
+      ),
+    },
+    {
+      id: "hue-luminance",
+      title: "Per-colour luminance",
+      content: (
+        <>
+          <p className="text-xs text-muted-foreground">
+            Same hues as refraction. Brightens or darkens each colour in stops; neutrals are left alone.
+          </p>
+          {(lookParams.match.hueLuminancePostModel2 ?? defaultHueLuminancePostModel2()).map(
+            (stops, idx) => (
+              <div key={idx} className="space-y-1">
+                <div className="flex justify-between text-xs text-muted-foreground">
+                  <span>
+                    {REFRACTION_POST_MODEL2_HUES_DEG[idx]}° ({REFRACTION_HUE_NAMES[idx]})
+                  </span>
+                  <span>
+                    {stops > 0 ? "+" : ""}
+                    {stops.toFixed(2)} EV
+                  </span>
+                </div>
+                <Slider
+                  className={SLIDER_CLASS}
+                  min={HUE_LUMINANCE_MIN_STOPS}
+                  max={HUE_LUMINANCE_MAX_STOPS}
+                  step={0.01}
+                  value={[stops]}
+                  onValueChange={(v) => {
+                    const arr = [
+                      ...(lookParams.match.hueLuminancePostModel2 ??
+                        defaultHueLuminancePostModel2()),
+                    ];
+                    arr[idx] = v[0] ?? 0;
+                    updateMatch("hueLuminancePostModel2", arr);
                   }}
                 />
               </div>

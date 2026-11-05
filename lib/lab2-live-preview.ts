@@ -10,6 +10,10 @@ import type { LookParams as GradingParams } from "@/src/lib/pipeline/stages/matc
 import { matchFloat } from "@/src/lib/pipeline/match";
 import { linearRgbToOklab, oklabToLinearRgb } from "@/src/lib/pipeline/stages/oklab";
 import { applyHighlightSmoothingFloat } from "@/src/lib/pipeline/stages/postModel2Grading";
+import {
+  hasNonIdentityHueLuminance,
+  hueLuminanceGain,
+} from "@/src/lib/pipeline/stages/hueLuminancePostModel2";
 
 export function clonePixelFrameF32(frame: PixelFrameF32): PixelFrameF32 {
   return {
@@ -192,9 +196,11 @@ export function applyLivePostModel2OnlyWithState(
   const denCurve = grading.colorDensityCurve;
   const ref12 = grading.refractionPostModel2;
   const applyRef12 = hasNonIdentityRefraction12(ref12);
+  const hueLum = grading.hueLuminancePostModel2;
+  const applyHueLum = hasNonIdentityHueLuminance(hueLum);
   const hasExp = !!(expCurve?.L_in?.length && expCurve?.L_out?.length);
   const hasDen = !!(denCurve?.L_anchors?.length && denCurve?.scale?.length);
-  const doOklab = hasExp || hasDen || applyRef12;
+  const doOklab = hasExp || hasDen || applyHueLum || applyRef12;
 
   if (doOklab) {
     const baseLab = state.oklabBase;
@@ -226,6 +232,12 @@ export function applyLivePostModel2OnlyWithState(
         const denMul = clamp(interpolateDensity(L, denCurve), 0.2, 2.5);
         aLab *= denMul;
         bLab *= denMul;
+      }
+      if (applyHueLum && hueLum) {
+        const labMul = Math.cbrt(hueLuminanceGain(aLab, bLab, hueLum));
+        L *= labMul;
+        aLab *= labMul;
+        bLab *= labMul;
       }
       if (applyRef12 && ref12) {
         const satMul = refractionSatScale12(aLab, bLab, ref12);
@@ -259,7 +271,7 @@ export function applyLivePostModel2OnlyWithState(
 }
 
 /**
- * Live sliders: exposure → colour density → 12-node refraction → de-vignette.
+ * Live sliders: exposure → colour density → per-colour luminance → 12-node refraction → de-vignette.
  * Backward-compatible API for existing call sites.
  */
 export function applyLivePostModel2Only(

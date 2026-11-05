@@ -215,6 +215,11 @@ export interface LookParams {
    * Applied after colour density; Model 1 shadow/highlight refraction is separate.
    */
   refractionPostModel2?: number[];
+  /**
+   * Post–Model 2 only: twelve per-colour luminance offsets in stops (-2..+2), same hue
+   * nodes as refraction. Applied in linear light after colour density, before refraction.
+   */
+  hueLuminancePostModel2?: number[];
   /** Radial exposure lift to counter vignetting; inner disk unchanged. */
   devignette?: { innerDiameterNorm: number; strengthStops: number };
 }
