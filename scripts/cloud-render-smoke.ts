@@ -8,7 +8,8 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { computeTileEmbeddingsNode } from "@/lib/cloud/node/tile-embeddings";
-import { matchReference, renderCloudExport } from "@/lib/cloud/worker/render";
+import { encodeEditBase, matchReference, searchAllCandidates } from "@/lib/cloud/worker/edit-bases";
+import { buildCloudEditBase, renderCloudExport } from "@/lib/cloud/worker/render";
 import { DEFAULT_GRAIN_PARAMS } from "@/lib/grain/constants";
 import { LAB2_DEFAULT_LOOK_PARAMS } from "@/lib/lab2/constants";
 import type { Lab2TileBlend } from "@/lib/lab2/types";
@@ -33,9 +34,13 @@ async function main() {
   const embeddings = await computeTileEmbeddingsNode(source);
   console.log(`embeddings ${Date.now() - t}ms`);
 
+  t = Date.now();
+  const candidates = await searchAllCandidates(embeddings);
+  console.log(`candidate search ${Date.now() - t}ms`);
+
   for (const algorithm of algorithms) {
     t = Date.now();
-    const match = await matchReference(algorithm, embeddings);
+    const match = await matchReference(algorithm, candidates);
     const tm = Date.now() - t;
     t = Date.now();
     const result = await renderCloudExport(source, match.decodedRef, match.grading, {
@@ -52,7 +57,13 @@ async function main() {
     writeFileSync(join(outDir, `${name}.png`), result.png);
     writeFileSync(join(outDir, `${name}.jpg`), result.thumb);
     console.log(
-      `${algorithm}: match ${match.sample.id} ${tm}ms, render ${Date.now() - t}ms, ${result.width}x${result.height}, png ${(result.png.byteLength / 1e6).toFixed(1)}MB`
+      `${algorithm}: match ${match.slot.candidate.sampleId} ${tm}ms, render ${Date.now() - t}ms, ${result.width}x${result.height}, png ${(result.png.byteLength / 1e6).toFixed(1)}MB`
+    );
+    t = Date.now();
+    const base = buildCloudEditBase(source, match.decodedRef, LAB2_DEFAULT_LOOK_PARAMS, match.grading, 1, true);
+    const encoded = encodeEditBase(base);
+    console.log(
+      `${algorithm}: edit base ${Date.now() - t}ms, ${encoded.width}x${encoded.height}x${encoded.channels}, ${(encoded.gz.byteLength / 1e6).toFixed(1)}MB gz`
     );
   }
   console.log(`peak rss ${(peakRss / 1e9).toFixed(2)} GB`);

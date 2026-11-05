@@ -22,6 +22,20 @@ export type FinishParams = {
 
 // ---------------------------------------------------------------------------
 // Highlight Warmth
+//
+// Film-style highlight rolloff in OKLab (lightness untouched):
+//
+//   1. Desaturation ramp: the scene's own chroma fades out first. Hues that
+//      oppose the tint (blue sky vs a warm tint) fade completely; hues already
+//      aligned with it keep most of their colour.
+//   2. Tint ramp (lags the desaturation): the wheel colour fades in on top of
+//      the nearly neutral result, so blue → pale blue → grey-white → warm white
+//      and the tint never mixes with an opposing colour (no purple).
+//   3. Gamut: chroma is shrunk (never channel-clamped) when a channel would go
+//      negative, so there is no hue jump at the gamut edge.
+//
+// Both ramps are centred on the pivot c = 1 − threshold ("Top X%") with a
+// half-width set by softness.
 // ---------------------------------------------------------------------------
 
 /** Max OKLab chroma shift at amount = 1. */
@@ -30,14 +44,34 @@ export const WARMTH_MAX_CHROMA = 0.05;
 export const WARMTH_AMOUNT_EXPONENT = 1.5;
 export const WARMTH_THRESHOLD_MIN = 0.01;
 export const WARMTH_THRESHOLD_MAX = 0.5;
+export const WARMTH_SOFTNESS_DEFAULT = 0.5;
+/** Rolloff half-width as a multiple of the threshold, at softness 0 and 1. */
+export const WARMTH_SPAN_SCALE = [0.25, 1.0] as const;
+/** Threshold floor used for the half-width so small thresholds still fade smoothly. */
+export const WARMTH_MIN_SPAN = 0.1;
+/** Desaturation completes, and the tint starts, this fraction of the half-width from the pivot. */
+export const WARMTH_RAMP_OVERLAP = 0.2;
+/** Amount at which highlight desaturation reaches full strength. */
+export const WARMTH_DESAT_FULL_AT = 0.5;
+/** Desaturation kept for hues aligned with the tint (opposite hues get 1). */
+export const WARMTH_ALIGNED_DESAT = 0.35;
+/** Bisection steps when shrinking chroma back into gamut. */
+export const WARMTH_GAMUT_STEPS = 4;
 
 export type WarmthUniforms = {
-  /** OKLab a/b shift at full weight. */
-  da: number;
-  db: number;
-  /** smoothstep(lo, hi, L) defines the affected tonal region. */
-  lo: number;
-  hi: number;
+  /** Unit OKLab (a, b) direction of the tint. */
+  dirA: number;
+  dirB: number;
+  /** Tint chroma at full weight. */
+  k: number;
+  /** Desaturation strength at full weight (0..1). */
+  desat: number;
+  /** smoothstep(desatLo, desatHi, L): highlight desaturation weight. */
+  desatLo: number;
+  desatHi: number;
+  /** smoothstep(tintLo, tintHi, L): tint weight. */
+  tintLo: number;
+  tintHi: number;
 };
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -85,13 +119,20 @@ export function computeWarmthUniforms(
   const amount = clamp(p.amount ?? 0, 0, 1);
   if (amount <= 1e-4) return null;
   const T = clamp(p.threshold ?? 0.25, WARMTH_THRESHOLD_MIN, WARMTH_THRESHOLD_MAX);
+  const softness = clamp(p.softness ?? WARMTH_SOFTNESS_DEFAULT, 0, 1);
   const k = WARMTH_MAX_CHROMA * Math.pow(amount, WARMTH_AMOUNT_EXPONENT);
   const dir = wheelHueToOklabDirection(p.hue ?? 35);
+  const c = 1 - T;
+  const h = lerp(WARMTH_SPAN_SCALE[0], WARMTH_SPAN_SCALE[1], softness) * Math.max(T, WARMTH_MIN_SPAN);
   return {
-    da: dir.a * k,
-    db: dir.b * k,
-    lo: 1 - 1.5 * T,
-    hi: 1 - 0.5 * T,
+    dirA: dir.a,
+    dirB: dir.b,
+    k,
+    desat: smoothstep(0, WARMTH_DESAT_FULL_AT, amount),
+    desatLo: Math.max(0, c - h),
+    desatHi: c + WARMTH_RAMP_OVERLAP * h,
+    tintLo: c - WARMTH_RAMP_OVERLAP * h,
+    tintHi: c + h,
   };
 }
 
@@ -112,7 +153,12 @@ export function smoothstep(lo: number, hi: number, x: number): number {
 //   4. Conservative suppression inside the emitting region.
 //   5. Self-limiting exposure: HMAX·(1 − exp(−x / HMAX)).
 //   6. Extra exposure per film layer: red dominant, minority green, minimal blue.
-//   7. Differential film shoulder: out = E + F(E + h) − F(E). Added light shows
+//   7. Rolloff before the halo lands: the pixel's own colour fades toward its
+//      luminance when it opposes the halo hue (blue sky under a red halo), so
+//      it passes through neutral instead of mixing into purple. The fade
+//      completes while the halo's chroma is still small next to the pixel's;
+//      hues aligned with the halo keep their colour.
+//   8. Differential film shoulder: out = E + F(E + h) − F(E). Added light shows
 //      in dark neighbours and barely moves dense highlights; h = 0 is identity.
 // ---------------------------------------------------------------------------
 
@@ -146,6 +192,13 @@ export const HALATION_LAYER_GAIN = { r: 1.0, gMin: 0.18, gMax: 0.42, b: 0.04 } a
 export const HALATION_AMOUNT_SCALE = 1.33;
 /** White point of the film shoulder F(E) = W·(1 − exp(−E / W)). */
 export const HALATION_SHOULDER_WHITE = 1.0;
+/**
+ * Halo chroma / pixel chroma ratio at which an opposing colour has fully
+ * faded (chroma = linear RGB offset from luminance).
+ */
+export const HALATION_DESAT_FULL_RATIO = 0.25;
+/** Fade kept for hues aligned with the halo; hues 90° or more away get 1. */
+export const HALATION_ALIGNED_DESAT = 0;
 
 export type HalationUniforms = {
   amount: number;

@@ -14,8 +14,7 @@ import type { LookParams } from "@/src/lib/pipeline/stages/match";
 import type { ExposureLevel, ChromaDistribution } from "@/src/lib/pipeline/imageStats";
 import { EMBEDDING_DIM } from "@/src/lib/embeddings";
 import { SEMANTIC_EMBEDDING_DIM } from "@/src/lib/semanticEmbeddings";
-
-const BUCKET = "grading-samples";
+import { makeSampleThumb, sampleThumbPath, SAMPLES_BUCKET as BUCKET } from "@/lib/dataset/sample-thumbs";
 
 function validateLookParams(obj: unknown): obj is LookParams {
   if (!obj || typeof obj !== "object") return false;
@@ -171,11 +170,23 @@ export async function POST(request: Request) {
     data: { publicUrl },
   } = supabaseAdmin.storage.from(BUCKET).getPublicUrl(path);
 
+  let thumbUrl: string | null = null;
+  try {
+    const thumbPath = sampleThumbPath(path);
+    const { error: thumbErr } = await supabaseAdmin.storage
+      .from(BUCKET)
+      .upload(thumbPath, await makeSampleThumb(buf), { contentType: "image/jpeg", upsert: true });
+    if (!thumbErr) thumbUrl = supabaseAdmin.storage.from(BUCKET).getPublicUrl(thumbPath).data.publicUrl;
+  } catch (e) {
+    console.warn("sample thumbnail failed:", e instanceof Error ? e.message : e);
+  }
+
   const { data: row, error: insertErr } = await supabaseAdmin
     .from("grading_samples")
     .insert({
       name,
       image_url: publicUrl,
+      thumb_url: thumbUrl,
       look_params: lookParams,
       embedding,
       embedding_semantic: embeddingSemantic,

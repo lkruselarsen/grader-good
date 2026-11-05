@@ -9,7 +9,7 @@ import React, {
   useSyncExternalStore,
 } from "react";
 import Image from "next/image";
-import { ChevronDown, Loader2, MoreHorizontal } from "lucide-react";
+import { ChevronDown, Info, Loader2, MoreHorizontal } from "lucide-react";
 import { LoadingButton } from "@/components/app/loading-button";
 import { PageHeader } from "@/components/app/page-header";
 import { ProgressWithLabel } from "@/components/app/progress-with-label";
@@ -18,9 +18,13 @@ import {
   PanelSidebarContent,
   PanelSidebarInset,
   PanelSidebarProvider,
-  PanelSidebarTrigger,
 } from "@/components/app/panel-sidebar";
-import { Lab2ControlsPanel } from "@/components/lab2/lab2-controls-panel";
+import {
+  Lab2ControlsPanel,
+  type Lab2ControlsPanelProps,
+} from "@/components/lab2/lab2-controls-panel";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { useIsMobile } from "@/hooks/use-mobile";
 import { PreviewRendererToggle } from "@/components/lab2/preview-renderer-toggle";
 import { CloudBatchSheet } from "@/components/lab2/cloud-batch-sheet";
 import { CloudStorageToast } from "@/components/cloud/storage-toast";
@@ -372,7 +376,11 @@ async function buildThumbUrlFromFloatFrame(floatFrame: PixelFrameF32): Promise<s
   return dstCanvas.toDataURL("image/jpeg", 0.88);
 }
 
+const LAB2_DESCRIPTION =
+  'Model 2 match is full-res; live sliders run on preview-resolution linear float (~1600px). Highlight warmth + halation preview in WebGL and export at full decode resolution when their card is on. Actuance applies on "Apply" and on export only when enabled from the more menu (faster default export).';
+
 export default function Lab2Page() {
+  const isMobile = useIsMobile();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const sourceFileRef = useRef<File | null>(null);
   /** When true, source DNG/ERF is decoded via POST /api/decode/rd1 (server LibRaw). */
@@ -479,7 +487,12 @@ export default function Lab2Page() {
     () => null
   );
   /** Set while editing a cloud export: exports go to the cloud render instead of the local worker. */
-  const cloudEditRef = useRef<{ outputId: string; name: string } | null>(null);
+  const cloudEditRef = useRef<{
+    outputId: string;
+    name: string;
+    sampleId: string | null;
+    algorithm: Lab2TileBlend;
+  } | null>(null);
   const [cloudEdit, setCloudEdit] = useState<{
     outputId: string;
     name: string;
@@ -885,7 +898,12 @@ export default function Lab2Page() {
     (preview: PixelFrameF32, session: CloudEditSessionView) => {
       const settings = session.output.renderSettings;
       const look = deepMergeLab2(LAB2_DEFAULT_LOOK_PARAMS, session.output.lookParams);
-      cloudEditRef.current = { outputId: session.output.id, name: session.output.name };
+      cloudEditRef.current = {
+        outputId: session.output.id,
+        name: session.output.name,
+        sampleId: session.output.sampleId,
+        algorithm: session.output.algorithm,
+      };
       setCloudEdit({
         outputId: session.output.id,
         name: session.output.name,
@@ -911,7 +929,13 @@ export default function Lab2Page() {
       finishing.setEffectsEnabled(settings.effectsEnabled);
       effectsEnabledRef.current = settings.effectsEnabled;
       setMatchPreviews([]);
-      setShowUploadDropzones(true);
+      matchCandidatesRef.current = emptyMatchCandidateSlots();
+      const own = session.candidates.find((c) => c.sampleId === session.output.sampleId);
+      setActiveMatch({
+        tileBlend: own?.algorithm ?? session.output.algorithm,
+        rank: own?.rank ?? 1,
+      });
+      setShowUploadDropzones(false);
       liveLocalStateRef.current = ensureLab2LiveWorkState(
         liveLocalStateRef.current,
         preview.width,
@@ -931,6 +955,24 @@ export default function Lab2Page() {
     [drawFloatActive, finishing, initLiveWorker]
   );
   const cloudEditSession = useCloudEditSession(cloudOutputParam, loadCloudEditSession);
+  const cloudCandidates = cloudEditSession.candidates;
+  const displayedMatchPreviews = useMemo<MatchPreview[]>(
+    () =>
+      cloudEdit
+        ? cloudCandidates.map((c) => ({
+            tileBlend: c.algorithm,
+            rank: c.rank,
+            url: c.thumbUrl ?? "",
+            label:
+              c.status === "ready"
+                ? (c.name ?? "dataset match")
+                : c.status === "failed"
+                  ? `${c.name ?? "dataset match"} (unavailable)`
+                  : `${c.name ?? "dataset match"} (preparing…)`,
+          }))
+        : matchPreviews,
+    [cloudCandidates, cloudEdit, matchPreviews]
+  );
 
   const exitCloudEdit = useCallback(() => {
     if (!cloudEditRef.current) return;
@@ -980,6 +1022,51 @@ export default function Lab2Page() {
       ) {
         return;
       }
+      if (cloudEditRef.current) {
+        const cloudCandidate = cloudCandidates.find(
+          (c) => c.algorithm === tileBlend && c.rank === rank
+        );
+        if (!cloudCandidate) return;
+        const label = cloudCandidate.name ?? "dataset match";
+        setSwitchingMatch(true);
+        reportPipelineStatus(
+          cloudCandidate.status === "ready"
+            ? `Loading ${TILE_BLEND_SHORT_LABELS[tileBlend]} #${rank} (${label})…`
+            : `Preparing ${TILE_BLEND_SHORT_LABELS[tileBlend]} #${rank} (${label}) in the cloud…`
+        );
+        try {
+          const { preview, candidate } = await cloudEditSession.loadCandidate(cloudCandidate.sampleId);
+          const cloud = cloudEditRef.current;
+          if (!cloud || !candidate.finalGrading) return;
+          cloud.sampleId = candidate.sampleId;
+          cloud.algorithm = tileBlend;
+          setActiveMatch({ tileBlend, rank });
+          postM2BaseRef.current = preview;
+          postM2PreviewBaseRef.current = preview;
+          bakedRgbaRef.current = null;
+          setHasBaked(false);
+          setFinalGrading(candidate.finalGrading);
+          liveLocalStateRef.current = ensureLab2LiveWorkState(
+            liveLocalStateRef.current,
+            preview.width,
+            preview.height
+          );
+          initLiveWorker(preview);
+          const engine = buildEngineParamsFromLookParams(liveLookParams, candidate.finalGrading);
+          drawFloatActive(
+            applyLivePostModel2OnlyWithState(preview, engine, liveLocalStateRef.current),
+            liveLookParams
+          );
+          setStatus(
+            `Editing ${cloud.name} with ${TILE_BLEND_SHORT_LABELS[tileBlend]} #${rank} (${label}). Exports re-render the full DNG in the cloud.`
+          );
+        } catch (e) {
+          setStatus(e instanceof Error ? e.message : String(e));
+        } finally {
+          setSwitchingMatch(false);
+        }
+        return;
+      }
       const source = decodedSourceRef.current;
       const candidate = matchCandidatesRef.current[tileBlend][rank - 1];
       if (!source || !candidate) return;
@@ -1007,7 +1094,18 @@ export default function Lab2Page() {
         setSwitchingMatch(false);
       }
     },
-    [activeMatch.rank, activeMatch.tileBlend, renderPostModel2Preview, reportPipelineStatus, switchingMatch]
+    [
+      activeMatch.rank,
+      activeMatch.tileBlend,
+      cloudCandidates,
+      cloudEditSession,
+      drawFloatActive,
+      initLiveWorker,
+      liveLookParams,
+      renderPostModel2Preview,
+      reportPipelineStatus,
+      switchingMatch,
+    ]
   );
 
   const runAutoEmbeddingModel2Match = useCallback(async (
@@ -1921,16 +2019,20 @@ export default function Lab2Page() {
       setExportProgressLabel("Sending edits to the cloud");
       setStatus("Rendering the full DNG in the cloud…");
       try {
-        const queued = await startCloudRender(cloud.outputId, {
-          lookParams,
-          effectsEnabled,
-          exportActuance,
-          model2Strength,
-          model2Robust,
-          withGrain,
-          grain: params,
-          exportScale: request.scale,
-        });
+        const queued = await startCloudRender(
+          cloud.outputId,
+          {
+            lookParams,
+            effectsEnabled,
+            exportActuance,
+            model2Strength,
+            model2Robust,
+            withGrain,
+            grain: params,
+            exportScale: request.scale,
+          },
+          cloud.sampleId ? { sampleId: cloud.sampleId, algorithm: cloud.algorithm } : undefined
+        );
         setExportProgressPct(25);
         setExportProgressLabel(`Rendering ${queued.name} in the cloud`);
         let view = await fetchCloudOutput(queued.outputId);
@@ -2102,23 +2204,157 @@ export default function Lab2Page() {
     lastChangedControlRef.current = cost;
   }, []);
 
+  const controlsPanelProps: Omit<Lab2ControlsPanelProps, "mode" | "layout"> = {
+    lookParams,
+    tileBlend,
+    sourceDecodeRd1,
+    model2Strength,
+    model2Robust,
+    effectsEnabled,
+    liveRerenderEnabled,
+    showPerfDebug,
+    busy,
+    isExporting,
+    hasMatch,
+    showUploadDropzones,
+    status,
+    statusRef,
+    matchPreviews: displayedMatchPreviews,
+    activeMatch,
+    switchingMatch,
+    onTileBlendChange: setTileBlend,
+    onSourceDecodeRd1Change: (v) => {
+      setSourceDecodeRd1(v);
+      sourceDecodeRd1Ref.current = v;
+      const f = sourceFileRef.current;
+      const blendSnapshot = tileBlend;
+      setBulkRunning(false);
+      setBulkQueue([]);
+      setBulkProcessingIndex(0);
+      setBulkTotal(0);
+      setActiveBulkId(null);
+      if (f) {
+        void runAutoEmbeddingModel2Match(
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          blendSnapshot
+        );
+      }
+    },
+    onModel2StrengthChange: setModel2Strength,
+    onModel2RobustChange: setModel2Robust,
+    onEffectsEnabledChange: handleEffectsEnabledChange,
+    onLiveRerenderChange: setLiveRerenderEnabled,
+    onPerfDebugChange: setShowPerfDebug,
+    onSourceFiles: (files) => {
+      const f = files?.[0] ?? null;
+      const blendSnapshot = tileBlend;
+      exitCloudEdit();
+      setBulkRunning(false);
+      setBulkQueue([]);
+      setBulkProcessingIndex(0);
+      setBulkTotal(0);
+      setActiveBulkId(null);
+      sourceFileRef.current = f;
+      setHasMatch(false);
+      autoMatchedRefFrameRef.current = null;
+      autoMatchedRefLabelRef.current = "";
+      autoMatchedRefThumbUrlRef.current = "";
+      matchCandidatesRef.current = emptyMatchCandidateSlots();
+      setMatchPreviews([]);
+      setActiveMatch({ tileBlend: blendSnapshot, rank: 1 });
+      if (f) {
+        setShowUploadDropzones(false);
+        void runAutoEmbeddingModel2Match(
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          blendSnapshot
+        );
+      }
+    },
+    onBulkFiles: (files) => {
+      const fileList = Array.from(files ?? []);
+      if (!fileList.length) return;
+      exitCloudEdit();
+      startBulkUpload(fileList);
+    },
+    onReferenceFiles: (files) => {
+      refFileRef.current = files?.[0] ?? null;
+      setHasMatch(false);
+    },
+    onCloudFiles: (files) => {
+      setCloudFiles(files);
+      setCloudSheetOpen(true);
+    },
+    onUploadNewSource: () => setShowUploadDropzones(true),
+    onMatchSelect: (blend, rank) => void applyMatchCandidate(blend, rank),
+    onRunMatch: () => void runMatch(),
+    onRenderEdits: renderEditsNow,
+    onSaveDefaults: saveDefaults,
+    onResetDefaults: resetToLab2Defaults,
+    onMatchPointerDown: beginSliderDrag,
+    updateMatch,
+  };
+
+  // On mobile these render over the preview so they never move the controls under a finger.
+  const transientStatus = (
+    <>
+      {(liveBusy || (liveRerenderEnabled && liveDirty)) && (
+        <ProgressWithLabel indeterminate label="Updating preview…" />
+      )}
+      {!liveRerenderEnabled && liveDirty && !liveBusy && (
+        <p className="text-xs text-amber-600 dark:text-amber-400">edits not yet applied</p>
+      )}
+      {liveRerenderEnabled && expensiveDragBlocked && (
+        <p className="text-[11px] text-muted-foreground">
+          Expensive sliders render on pointer-up for responsiveness.
+        </p>
+      )}
+      {showPerfDebug && lastRenderTelemetry && (
+        <p className="text-[11px] text-muted-foreground">
+          render {lastRenderTelemetry.mode}: total {lastRenderTelemetry.totalMs.toFixed(0)}ms
+          {" | "}compute {lastRenderTelemetry.computeMs.toFixed(0)}ms
+          {" | "}pack {lastRenderTelemetry.packMs.toFixed(0)}ms
+          {" | "}transfer {lastRenderTelemetry.transferMs.toFixed(0)}ms
+          {" | "}draw {lastRenderTelemetry.drawMs.toFixed(0)}ms
+        </p>
+      )}
+      {(adaptiveQualityMode === "degraded" || adaptiveQualityMode === "aggressive") && (
+        <p className="text-[11px] text-amber-600 dark:text-amber-400">
+          interactive quality mode: {adaptiveQualityMode}
+        </p>
+      )}
+    </>
+  );
+
   return (
     <>
       <PanelSidebarProvider defaultOpen>
         <div className="flex min-h-0 w-full gap-0">
           <PanelSidebarInset>
-            <div className="mx-auto max-w-6xl space-y-6 pb-12">
-              <PageHeader
-                title="Lab 2"
-                href="/lab2"
-                description='Model 2 match is full-res; live sliders run on preview-resolution linear float (~1600px). Highlight warmth + halation preview in WebGL and export at full decode resolution when their card is on. Actuance applies on "Apply" and on export only when enabled from the more menu (faster default export).'
-              />
+            <div
+              className={cn(
+                "mx-auto max-w-6xl",
+                isMobile
+                  ? "flex h-[calc(100dvh-5.5rem)] flex-col overflow-hidden"
+                  : "space-y-6 pb-12"
+              )}
+            >
+              {!isMobile && (
+                <PageHeader title="Lab 2" href="/lab2" description={LAB2_DESCRIPTION} />
+              )}
 
-              <div className="space-y-3">
-            <div className="flex items-center gap-2 md:hidden">
-              <PanelSidebarTrigger />
-              <span className="text-sm text-muted-foreground">Controls</span>
-            </div>
+              <div
+                className={cn(
+                  isMobile
+                    ? "flex min-h-0 flex-1 flex-col gap-2 [&>*]:shrink-0"
+                    : "space-y-3"
+                )}
+              >
             {!!bulkItems.length && (
               <Card className="space-y-2 border bg-muted/30 p-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -2168,7 +2404,8 @@ export default function Lab2Page() {
                         key={item.id}
                         type="button"
                         className={cn(
-                          "shrink-0 w-[180px] rounded border text-left transition-colors",
+                          "shrink-0 rounded border text-left transition-colors",
+                          isMobile ? "w-[96px]" : "w-[180px]",
                           isActive
                             ? "border-primary bg-accent"
                             : "border bg-muted/40 hover:bg-muted/60"
@@ -2180,7 +2417,12 @@ export default function Lab2Page() {
                         }}
                         title="Right-click to delete from carousel"
                       >
-                        <div className="h-[110px] w-full bg-muted overflow-hidden rounded-t">
+                        <div
+                          className={cn(
+                            "w-full bg-muted overflow-hidden rounded-t",
+                            isMobile ? "h-[56px]" : "h-[110px]"
+                          )}
+                        >
                           {item.thumbUrl ? (
                             <Image
                               src={item.thumbUrl}
@@ -2196,11 +2438,13 @@ export default function Lab2Page() {
                             </div>
                           )}
                         </div>
-                        <div className="p-2 space-y-1">
+                        <div className={cn("space-y-1", isMobile ? "p-1" : "p-2")}>
                           <p className="text-[11px] text-foreground truncate">
                             {idx + 1}. {item.originalName}
                           </p>
-                          <p className="text-[10px] text-muted-foreground truncate">{item.status}</p>
+                          {!isMobile && (
+                            <p className="text-[10px] text-muted-foreground truncate">{item.status}</p>
+                          )}
                         </div>
                       </button>
                     );
@@ -2216,53 +2460,59 @@ export default function Lab2Page() {
                 </span>
               </Card>
             )}
-            {cloudEdit && (
-              <Card className="flex flex-wrap items-center justify-between gap-2 border bg-muted/30 p-3 text-sm">
-                <span>
-                  Cloud edit · <span className="font-mono">{cloudEdit.name}</span> — exports
-                  re-render the full DNG in the cloud.
-                </span>
-                {cloudEdit.slug && (
-                  <Button asChild size="sm" variant="outline">
-                    <a href={`/c/${cloudEdit.slug}`}>Back to download page</a>
-                  </Button>
-                )}
-              </Card>
-            )}
-            <canvas
-              ref={canvasRef}
-              className={cn(
-                "w-full max-h-[70vh] rounded-lg border bg-black object-contain",
-                previewRenderer === "webgl" && "hidden"
-              )}
-            />
-            {previewRenderer === "webgl" && (
+            {cloudEdit &&
+              (isMobile ? (
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <span className="min-w-0 flex-1 truncate">
+                    Cloud edit · <span className="font-mono">{cloudEdit.name}</span>
+                  </span>
+                  {cloudEdit.slug && (
+                    <Button asChild size="sm" variant="ghost" className="h-7 shrink-0 px-2">
+                      <a href={`/c/${cloudEdit.slug}`}>Downloads</a>
+                    </Button>
+                  )}
+                </div>
+              ) : (
+                <Card className="flex flex-wrap items-center justify-between gap-2 border bg-muted/30 p-3 text-sm">
+                  <span>
+                    Cloud edit · <span className="font-mono">{cloudEdit.name}</span> — exports
+                    re-render the full DNG in the cloud.
+                  </span>
+                  {cloudEdit.slug && (
+                    <Button asChild size="sm" variant="outline">
+                      <a href={`/c/${cloudEdit.slug}`}>Back to download page</a>
+                    </Button>
+                  )}
+                </Card>
+              ))}
+            <div className={cn(isMobile && "relative")}>
               <canvas
-                ref={finishing.webglCanvasRef}
-                className="w-full max-h-[70vh] rounded-lg border bg-black object-contain"
+                ref={canvasRef}
+                className={cn(
+                  "w-full rounded-lg border bg-black object-contain",
+                  isMobile ? "max-h-[45dvh]" : "max-h-[70vh]",
+                  previewRenderer === "webgl" && "hidden"
+                )}
               />
-            )}
-            {(liveBusy || (liveRerenderEnabled && liveDirty)) && (
-              <ProgressWithLabel indeterminate label="Updating preview…" />
-            )}
-            {!liveRerenderEnabled && liveDirty && !liveBusy && (
-              <p className="text-xs text-amber-600 dark:text-amber-400">edits not yet applied</p>
-            )}
-            {liveRerenderEnabled && expensiveDragBlocked && (
-              <p className="text-[11px] text-muted-foreground">
-                Expensive sliders render on pointer-up for responsiveness.
-              </p>
-            )}
-            <p className="text-xs text-muted-foreground">{status}</p>
-            {showPerfDebug && lastRenderTelemetry && (
-              <p className="text-[11px] text-muted-foreground">
-                render {lastRenderTelemetry.mode}: total {lastRenderTelemetry.totalMs.toFixed(0)}ms
-                {" | "}compute {lastRenderTelemetry.computeMs.toFixed(0)}ms
-                {" | "}pack {lastRenderTelemetry.packMs.toFixed(0)}ms
-                {" | "}transfer {lastRenderTelemetry.transferMs.toFixed(0)}ms
-                {" | "}draw {lastRenderTelemetry.drawMs.toFixed(0)}ms
-              </p>
-            )}
+              {previewRenderer === "webgl" && (
+                <canvas
+                  ref={finishing.webglCanvasRef}
+                  className={cn(
+                    "w-full rounded-lg border bg-black object-contain",
+                    isMobile ? "max-h-[45dvh]" : "max-h-[70vh]"
+                  )}
+                />
+              )}
+              {isMobile && (
+                <div className="pointer-events-none absolute inset-x-px bottom-px space-y-1 rounded-b-lg bg-black/60 px-2 py-1.5 empty:hidden [&_p]:truncate">
+                  {transientStatus}
+                </div>
+              )}
+            </div>
+            {!isMobile && transientStatus}
+            <p className={cn("text-xs text-muted-foreground", isMobile && "h-4 truncate")}>
+              {status}
+            </p>
             {showPerfDebug && (
               <Button
                 type="button"
@@ -2273,11 +2523,6 @@ export default function Lab2Page() {
               >
                 GPU vs CPU
               </Button>
-            )}
-            {(adaptiveQualityMode === "degraded" || adaptiveQualityMode === "aggressive") && (
-              <p className="text-[11px] text-amber-600 dark:text-amber-400">
-                interactive quality mode: {adaptiveQualityMode}
-              </p>
             )}
             <div className="flex flex-wrap items-center gap-2 w-full max-w-xl">
               <DropdownMenu>
@@ -2390,111 +2635,44 @@ export default function Lab2Page() {
                 value={previewRenderer}
                 onChange={handlePreviewRendererChange}
               />
+              {isMobile && (
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="ml-auto"
+                      aria-label="About Lab 2"
+                    >
+                      <Info className="size-4" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent align="end" className="text-xs leading-relaxed text-muted-foreground">
+                    {LAB2_DESCRIPTION}
+                  </PopoverContent>
+                </Popover>
+              )}
               </div>
+              {isMobile && (
+                <Lab2ControlsPanel
+                  mode="full"
+                  layout="carousel"
+                  className="flex-1"
+                  {...controlsPanelProps}
+                />
+              )}
             </div>
             </div>
           </PanelSidebarInset>
 
-          <PanelSidebar collapsible="icon">
-            <PanelSidebarContent>
-              <Lab2ControlsPanel
-                mode="full"
-                lookParams={lookParams}
-                tileBlend={tileBlend}
-                sourceDecodeRd1={sourceDecodeRd1}
-                model2Strength={model2Strength}
-                model2Robust={model2Robust}
-                effectsEnabled={effectsEnabled}
-                liveRerenderEnabled={liveRerenderEnabled}
-                showPerfDebug={showPerfDebug}
-                busy={busy}
-                isExporting={isExporting}
-                hasMatch={hasMatch}
-                showUploadDropzones={showUploadDropzones}
-                status={status}
-                statusRef={statusRef}
-                matchPreviews={matchPreviews}
-                activeMatch={activeMatch}
-                switchingMatch={switchingMatch}
-                onTileBlendChange={setTileBlend}
-                onSourceDecodeRd1Change={(v) => {
-                  setSourceDecodeRd1(v);
-                  sourceDecodeRd1Ref.current = v;
-                  const f = sourceFileRef.current;
-                  const blendSnapshot = tileBlend;
-                  setBulkRunning(false);
-                  setBulkQueue([]);
-                  setBulkProcessingIndex(0);
-                  setBulkTotal(0);
-                  setActiveBulkId(null);
-                  if (f) {
-                    void runAutoEmbeddingModel2Match(
-                      undefined,
-                      undefined,
-                      undefined,
-                      undefined,
-                      blendSnapshot
-                    );
-                  }
-                }}
-                onModel2StrengthChange={setModel2Strength}
-                onModel2RobustChange={setModel2Robust}
-                onEffectsEnabledChange={handleEffectsEnabledChange}
-                onLiveRerenderChange={setLiveRerenderEnabled}
-                onPerfDebugChange={setShowPerfDebug}
-                onSourceFiles={(files) => {
-                  const f = files?.[0] ?? null;
-                  const blendSnapshot = tileBlend;
-                  exitCloudEdit();
-                  setBulkRunning(false);
-                  setBulkQueue([]);
-                  setBulkProcessingIndex(0);
-                  setBulkTotal(0);
-                  setActiveBulkId(null);
-                  sourceFileRef.current = f;
-                  setHasMatch(false);
-                  autoMatchedRefFrameRef.current = null;
-                  autoMatchedRefLabelRef.current = "";
-                  autoMatchedRefThumbUrlRef.current = "";
-                  matchCandidatesRef.current = emptyMatchCandidateSlots();
-                  setMatchPreviews([]);
-                  setActiveMatch({ tileBlend: blendSnapshot, rank: 1 });
-                  if (f) {
-                    setShowUploadDropzones(false);
-                    void runAutoEmbeddingModel2Match(
-                      undefined,
-                      undefined,
-                      undefined,
-                      undefined,
-                      blendSnapshot
-                    );
-                  }
-                }}
-                onBulkFiles={(files) => {
-                  const fileList = Array.from(files ?? []);
-                  if (!fileList.length) return;
-                  exitCloudEdit();
-                  startBulkUpload(fileList);
-                }}
-                onReferenceFiles={(files) => {
-                  refFileRef.current = files?.[0] ?? null;
-                  setHasMatch(false);
-                }}
-                onCloudFiles={(files) => {
-                  setCloudFiles(files);
-                  setCloudSheetOpen(true);
-                }}
-                onUploadNewSource={() => setShowUploadDropzones(true)}
-                onMatchSelect={(blend, rank) => void applyMatchCandidate(blend, rank)}
-                onRunMatch={() => void runMatch()}
-                onRenderEdits={renderEditsNow}
-                onSaveDefaults={saveDefaults}
-                onResetDefaults={resetToLab2Defaults}
-                onMatchPointerDown={beginSliderDrag}
-                updateMatch={updateMatch}
-              />
-            </PanelSidebarContent>
-          </PanelSidebar>
+          {!isMobile && (
+            <PanelSidebar collapsible="icon">
+              <PanelSidebarContent>
+                <Lab2ControlsPanel mode="full" {...controlsPanelProps} />
+              </PanelSidebarContent>
+            </PanelSidebar>
+          )}
         </div>
       </PanelSidebarProvider>
       <GrainOptionsDialog

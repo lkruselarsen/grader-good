@@ -17,7 +17,7 @@ async function nextWork(): Promise<(() => Promise<void>) | null> {
   const { data: session } = await supabase
     .from("cloud_edit_sessions")
     .select("id")
-    .eq("status", "pending")
+    .or("status.eq.pending,warm_status.eq.pending")
     .order("created_at")
     .limit(1)
     .maybeSingle();

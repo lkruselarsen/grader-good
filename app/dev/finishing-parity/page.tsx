@@ -18,6 +18,16 @@ const CASES: { name: string; scene: "mixed" | "lamps"; finish: FinishParams | nu
   { name: "passthrough", scene: "mixed", finish: null },
   { name: "warmth-default", scene: "mixed", finish: { highlightWarmth: { hue: 35, amount: 0.15, threshold: 0.25 } } },
   { name: "warmth-max", scene: "mixed", finish: { highlightWarmth: { hue: 35, amount: 1, threshold: 0.5 } } },
+  {
+    name: "warmth-hard",
+    scene: "mixed",
+    finish: { highlightWarmth: { hue: 35, amount: 0.8, threshold: 0.05, softness: 0 } },
+  },
+  {
+    name: "warmth-soft-cool",
+    scene: "mixed",
+    finish: { highlightWarmth: { hue: 210, amount: 0.6, threshold: 0.35, softness: 1 } },
+  },
   { name: "halation-default", scene: "mixed", finish: { halation: HALATION_DEFAULT } },
   { name: "halation-max", scene: "mixed", finish: { halation: HALATION_MAX } },
   { name: "lamps-default", scene: "lamps", finish: { halation: HALATION_DEFAULT } },

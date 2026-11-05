@@ -1,6 +1,7 @@
 /**
- * GET    /api/cloud/storage — used bytes (DNGs vs exports) against the quota.
- * DELETE /api/cloud/storage?scope=dngs|exports|all — remove stored files.
+ * GET    /api/cloud/storage — used bytes (DNGs, edit previews, exports) against the quota.
+ * DELETE /api/cloud/storage?scope=dngs|exports|all — remove stored files. Clearing
+ * DNGs also removes the cached edit previews, which cannot be used without them.
  */
 
 import { NextResponse } from "next/server";
@@ -17,6 +18,7 @@ export const dynamic = "force-dynamic";
 
 const PAGE = 1000;
 const REMOVE_CHUNK = 500;
+const EDIT_BASES_PREFIX = "edits/items/";
 
 async function selectAll<T>(
   table: string,
@@ -36,18 +38,37 @@ async function selectAll<T>(
   }
 }
 
+/** Sessions opened from a cached edit base share its file instead of owning one. */
+function isSharedBasePath(path: string | null | undefined): boolean {
+  return !!path && path.startsWith(EDIT_BASES_PREFIX);
+}
+
 async function usage(): Promise<CloudStorageUsage> {
-  const [items, outputs, sessions] = await Promise.all([
+  const [items, outputs, sessions, bases] = await Promise.all([
     selectAll<{ dng_bytes: number }>("cloud_items", "dng_bytes", "dng_path"),
     selectAll<{ png_bytes: number; thumb_bytes: number }>("cloud_outputs", "png_bytes, thumb_bytes", "png_path"),
-    selectAll<{ preview_bytes: number }>("cloud_edit_sessions", "preview_bytes", "preview_path"),
+    selectAll<{ preview_bytes: number; preview_path: string }>(
+      "cloud_edit_sessions",
+      "preview_bytes, preview_path",
+      "preview_path"
+    ),
+    selectAll<{ preview_bytes: number }>("cloud_edit_bases", "preview_bytes", "preview_path"),
   ]);
   const dngBytes = items.reduce((s, r) => s + Number(r.dng_bytes ?? 0), 0);
+  const editBytes = bases.reduce((s, r) => s + Number(r.preview_bytes ?? 0), 0);
   const exportBytes =
     outputs.reduce((s, r) => s + Number(r.png_bytes ?? 0) + Number(r.thumb_bytes ?? 0), 0) +
-    sessions.reduce((s, r) => s + Number(r.preview_bytes ?? 0), 0);
+    sessions
+      .filter((r) => !isSharedBasePath(r.preview_path))
+      .reduce((s, r) => s + Number(r.preview_bytes ?? 0), 0);
   const quotaGb = Number(process.env.CLOUD_STORAGE_QUOTA_GB ?? 100) || 100;
-  return { dngBytes, exportBytes, usedBytes: dngBytes + exportBytes, quotaBytes: quotaGb * 1024 ** 3 };
+  return {
+    dngBytes,
+    editBytes,
+    exportBytes,
+    usedBytes: dngBytes + editBytes + exportBytes,
+    quotaBytes: quotaGb * 1024 ** 3,
+  };
 }
 
 async function removePaths(bucket: string, paths: string[]) {
@@ -60,12 +81,20 @@ async function removePaths(bucket: string, paths: string[]) {
 async function clearDngs() {
   const items = await selectAll<{ id: string; dng_path: string }>("cloud_items", "id, dng_path", "dng_path");
   await removePaths(CLOUD_DNG_BUCKET, items.map((i) => i.dng_path));
+  const supabase = cloudSupabase();
   if (items.length) {
-    await cloudSupabase()
+    await supabase
       .from("cloud_items")
       .update({ dng_path: null, dng_bytes: 0 })
       .not("dng_path", "is", null);
   }
+  const bases = await selectAll<{ preview_path: string }>("cloud_edit_bases", "preview_path", "preview_path");
+  await removePaths(CLOUD_EXPORT_BUCKET, [...new Set(bases.map((b) => b.preview_path))]);
+  await supabase.from("cloud_edit_bases").delete().not("id", "is", null);
+  await supabase
+    .from("cloud_edit_sessions")
+    .update({ preview_path: null, preview_bytes: 0 })
+    .like("preview_path", `${EDIT_BASES_PREFIX}%`);
   return items.length;
 }
 
@@ -76,7 +105,7 @@ async function clearExports() {
   ]);
   await removePaths(CLOUD_EXPORT_BUCKET, [
     ...outputs.flatMap((o) => [o.png_path, o.thumb_path].filter((p): p is string => !!p)),
-    ...sessions.map((s) => s.preview_path),
+    ...sessions.map((s) => s.preview_path).filter((p) => !isSharedBasePath(p)),
   ]);
   const supabase = cloudSupabase();
   await supabase
@@ -86,7 +115,8 @@ async function clearExports() {
   await supabase
     .from("cloud_edit_sessions")
     .update({ preview_path: null, preview_bytes: 0 })
-    .not("preview_path", "is", null);
+    .not("preview_path", "is", null)
+    .not("preview_path", "like", `${EDIT_BASES_PREFIX}%`);
   return outputs.length;
 }
 

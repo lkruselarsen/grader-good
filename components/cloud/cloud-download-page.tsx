@@ -23,7 +23,7 @@ import {
   savePngFiles,
 } from "@/lib/cloud/client";
 import type { CloudJobView, CloudOutputView } from "@/lib/cloud/types";
-import { TILE_BLEND_SHORT_LABELS, type Lab2TileBlend } from "@/lib/lab2/types";
+import { ALL_TILE_BLENDS, TILE_BLEND_SHORT_LABELS, type Lab2TileBlend } from "@/lib/lab2/types";
 import { cn } from "@/lib/utils";
 import { CloudStorageToast } from "./storage-toast";
 
@@ -101,7 +101,13 @@ export function CloudDownloadPage({ slug }: { slug: string }) {
 
   const folders = useMemo(() => {
     if (!job) return [] as Array<{ algorithm: Lab2TileBlend; outputs: CloudOutputView[] }>;
-    return job.settings.algorithms.map((algorithm) => ({
+    const algorithms = [
+      ...job.settings.algorithms,
+      ...ALL_TILE_BLENDS.filter(
+        (a) => !job.settings.algorithms.includes(a) && job.outputs.some((o) => o.algorithm === a)
+      ),
+    ];
+    return algorithms.map((algorithm) => ({
       algorithm,
       outputs: job.outputs
         .filter((o) => o.algorithm === algorithm)

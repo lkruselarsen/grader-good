@@ -12,6 +12,7 @@ import {
   defaultRefractionWheel,
   defaultContrastCurve,
   halationFromLook,
+  highlightWarmthFromLook,
 } from "./look-params";
 import type { GradingParams } from "@/src/lib/pipeline/types";
 
@@ -69,12 +70,7 @@ export function buildEngineParamsFromLookParams(
       upperHigh: m.bandUpperHighTemp ?? 0,
     },
   };
-  const dm = DEFAULT_LOOK_PARAMS.match;
-  engine.highlightWarmth = {
-    hue: m.highlightWarmthHue ?? dm.highlightWarmthHue ?? 35,
-    amount: m.highlightWarmthAmount ?? dm.highlightWarmthAmount ?? 0,
-    threshold: m.highlightWarmthThreshold ?? dm.highlightWarmthThreshold ?? 0.25,
-  };
+  engine.highlightWarmth = highlightWarmthFromLook(m);
   engine.halation = halationFromLook(m);
   engine.refractionShadow = (m.refractionShadow ?? defaultRefractionWheel()) as typeof engine.refractionShadow;
   engine.refractionHighlight = (m.refractionHighlight ?? defaultRefractionWheel()) as typeof engine.refractionHighlight;

@@ -88,6 +88,7 @@ function clampMatchParam(key: string, value: number): number {
     case "highlightWarmthHue":
       return ((value % 360) + 360) % 360;
     case "highlightWarmthAmount":
+    case "highlightWarmthSoftness":
     case "halationAmount":
     case "halationSensitivity":
     case "halationRadius":

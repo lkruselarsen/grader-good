@@ -21,7 +21,7 @@ const SCOPE_LABELS = {
 } as const;
 
 const SCOPE_CONFIRM = {
-  dngs: "Delete every uploaded DNG? Photos can no longer be re-edited afterwards.",
+  dngs: "Delete every uploaded DNG and cached edit preview? Photos can no longer be re-edited afterwards.",
   exports: "Delete every exported PNG? Download pages will show them as cleared.",
   all: "Delete all DNGs and exported PNGs from cloud storage?",
 } as const;
@@ -35,7 +35,8 @@ function showUsage(usage: CloudStorageUsage) {
           Cloud storage: {formatBytes(usage.usedBytes)} of {formatBytes(usage.quotaBytes)} ({pct}%)
         </p>
         <p className="text-xs text-muted-foreground">
-          DNGs {formatBytes(usage.dngBytes)} · exports {formatBytes(usage.exportBytes)}
+          DNGs {formatBytes(usage.dngBytes)} · edit previews {formatBytes(usage.editBytes ?? 0)} ·
+          exports {formatBytes(usage.exportBytes)}
         </p>
         <div className="flex flex-wrap gap-1.5">
           {(Object.keys(SCOPE_LABELS) as Array<keyof typeof SCOPE_LABELS>).map((scope) => (

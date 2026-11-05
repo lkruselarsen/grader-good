@@ -19,9 +19,10 @@ import {
 import { REFRACTION_HUE_NAMES } from "@/lib/lab2/constants";
 import { cn } from "@/lib/utils";
 import { REFRACTION_POST_MODEL2_HUES_DEG } from "@/src/lib/pipeline/stages/refractionPostModel2";
+import type { ReactNode } from "react";
 import { HueSatWheel } from "./hue-sat-wheel";
 
-const SLIDER_CLASS = "w-full touch-manipulation";
+const SLIDER_CLASS = "w-full";
 
 export type UpdateLookMatch = <K extends keyof LookParamsT["match"]>(
   key: K,
@@ -29,27 +30,30 @@ export type UpdateLookMatch = <K extends keyof LookParamsT["match"]>(
   cost?: "expensive" | "normal"
 ) => void;
 
-/** Look slider sections (masters → actuance); render inside an <Accordion>. */
-export function Lab2LookAccordionItems({
-  lookParams,
-  updateMatch,
-  beginDrag,
-}: {
+export type Lab2Section = {
+  id: string;
+  title: string;
+  /** Sliders in this section re-run the expensive full-preview path. */
+  expensive?: boolean;
+  /** Content renders its own heading, so the carousel skips the slide title. */
+  headerless?: boolean;
+  content: ReactNode;
+};
+
+type LookSectionArgs = {
   lookParams: LookParamsT;
   updateMatch: UpdateLookMatch;
-  beginDrag: (cost: "expensive" | "normal") => void;
-}) {
-  return (
-    <>
-      <AccordionItem value="masters">
-        <AccordionTrigger className="py-3 text-xs font-medium text-muted-foreground/80 hover:no-underline">
-          Masters
-        </AccordionTrigger>
-        <AccordionContent
-          className="space-y-3"
-          onPointerDownCapture={() => beginDrag("expensive")}
-          onTouchStart={() => beginDrag("expensive")}
-        >
+};
+
+/** Look slider sections (masters → actuance), shared by the accordion and the mobile carousel. */
+export function getLab2LookSections({ lookParams, updateMatch }: LookSectionArgs): Lab2Section[] {
+  return [
+    {
+      id: "masters",
+      title: "Masters",
+      expensive: true,
+      content: (
+        <>
           <div className="space-y-2">
             <div className="flex justify-between text-xs text-muted-foreground">
               <span>Overall exposure (× all 7 handles)</span>
@@ -82,18 +86,15 @@ export function Lab2LookAccordionItems({
               }
             />
           </div>
-        </AccordionContent>
-      </AccordionItem>
-
-      <AccordionItem value="exposure">
-        <AccordionTrigger className="py-3 text-xs font-medium text-muted-foreground/80 hover:no-underline">
-          Exposure handles
-        </AccordionTrigger>
-        <AccordionContent
-          className="space-y-3"
-          onPointerDownCapture={() => beginDrag("expensive")}
-          onTouchStart={() => beginDrag("expensive")}
-        >
+        </>
+      ),
+    },
+    {
+      id: "exposure",
+      title: "Exposure handles",
+      expensive: true,
+      content: (
+        <>
           {(lookParams.match.exposureCurve ?? defaultExposureCurve()).L_out.map(
             (_, idx) => {
               const curve = lookParams.match.exposureCurve ?? defaultExposureCurve();
@@ -124,18 +125,15 @@ export function Lab2LookAccordionItems({
               );
             }
           )}
-        </AccordionContent>
-      </AccordionItem>
-
-      <AccordionItem value="color-density">
-        <AccordionTrigger className="py-3 text-xs font-medium text-muted-foreground/80 hover:no-underline">
-          Colour density
-        </AccordionTrigger>
-        <AccordionContent
-          className="space-y-3"
-          onPointerDownCapture={() => beginDrag("expensive")}
-          onTouchStart={() => beginDrag("expensive")}
-        >
+        </>
+      ),
+    },
+    {
+      id: "color-density",
+      title: "Colour density",
+      expensive: true,
+      content: (
+        <>
           {(lookParams.match.colorDensityCurve ?? defaultColorDensityCurve()).scale.map(
             (_, idx) => {
               const cur =
@@ -167,14 +165,14 @@ export function Lab2LookAccordionItems({
               );
             }
           )}
-        </AccordionContent>
-      </AccordionItem>
-
-      <AccordionItem value="refraction">
-        <AccordionTrigger className="py-3 text-xs font-medium text-muted-foreground/80 hover:no-underline">
-          Refraction post–M2 (12 × sat)
-        </AccordionTrigger>
-        <AccordionContent className="space-y-3">
+        </>
+      ),
+    },
+    {
+      id: "refraction",
+      title: "Refraction post–M2 (12 × sat)",
+      content: (
+        <>
           <p className="text-xs text-muted-foreground">
             Hues fixed every 30°. Only saturation is adjustable.
           </p>
@@ -204,14 +202,14 @@ export function Lab2LookAccordionItems({
               </div>
             )
           )}
-        </AccordionContent>
-      </AccordionItem>
-
-      <AccordionItem value="devignette">
-        <AccordionTrigger className="py-3 text-xs font-medium text-muted-foreground/80 hover:no-underline">
-          De-vignette
-        </AccordionTrigger>
-        <AccordionContent className="space-y-3">
+        </>
+      ),
+    },
+    {
+      id: "devignette",
+      title: "De-vignette",
+      content: (
+        <>
           <div className="space-y-2">
             <div className="flex justify-between text-xs text-muted-foreground">
               <span>Inner diameter / min side</span>
@@ -253,14 +251,14 @@ export function Lab2LookAccordionItems({
               }
             />
           </div>
-        </AccordionContent>
-      </AccordionItem>
-
-      <AccordionItem value="highlights">
-        <AccordionTrigger className="py-3 text-xs font-medium text-muted-foreground/80 hover:no-underline">
-          Highlights post–M2
-        </AccordionTrigger>
-        <AccordionContent className="space-y-3">
+        </>
+      ),
+    },
+    {
+      id: "highlights",
+      title: "Highlights post–M2",
+      content: (
+        <>
           <div className="space-y-2">
             <div className="flex justify-between text-xs text-muted-foreground">
               <span>Highlight smoothing</span>
@@ -277,14 +275,14 @@ export function Lab2LookAccordionItems({
               }
             />
           </div>
-        </AccordionContent>
-      </AccordionItem>
-
-      <AccordionItem value="actuance">
-        <AccordionTrigger className="py-3 text-xs font-medium text-muted-foreground/80 hover:no-underline">
-          Actuance (apply only)
-        </AccordionTrigger>
-        <AccordionContent className="space-y-3">
+        </>
+      ),
+    },
+    {
+      id: "actuance",
+      title: "Actuance (apply only)",
+      content: (
+        <>
           <div className="space-y-2">
             <div className="flex justify-between text-xs text-muted-foreground">
               <span>Strength</span>
@@ -329,8 +327,36 @@ export function Lab2LookAccordionItems({
               }
             />
           </div>
-        </AccordionContent>
-      </AccordionItem>
+        </>
+      ),
+    },
+  ];
+}
+
+/** Look slider sections rendered as items; place inside an <Accordion>. */
+export function Lab2LookAccordionItems({
+  lookParams,
+  updateMatch,
+  beginDrag,
+}: LookSectionArgs & {
+  beginDrag: (cost: "expensive" | "normal") => void;
+}) {
+  return (
+    <>
+      {getLab2LookSections({ lookParams, updateMatch }).map((section) => (
+        <AccordionItem key={section.id} value={section.id}>
+          <AccordionTrigger className="py-3 text-xs font-medium text-muted-foreground/80 hover:no-underline">
+            {section.title}
+          </AccordionTrigger>
+          <AccordionContent
+            className="space-y-3"
+            onPointerDownCapture={section.expensive ? () => beginDrag("expensive") : undefined}
+            onTouchStart={section.expensive ? () => beginDrag("expensive") : undefined}
+          >
+            {section.content}
+          </AccordionContent>
+        </AccordionItem>
+      ))}
     </>
   );
 }
@@ -352,6 +378,7 @@ export function FinishingEffectsCard({
   const hue = m.highlightWarmthHue ?? DEFAULT_WARMTH_HUE;
   const amount = m.highlightWarmthAmount ?? 0;
   const thresholdPct = Math.round((m.highlightWarmthThreshold ?? 0.25) * 100);
+  const softnessPct = Math.round((m.highlightWarmthSoftness ?? 0.5) * 100);
   const halation = halationFromLook(m);
   const halationSliders: {
     key: Extract<
@@ -407,6 +434,22 @@ export function FinishingEffectsCard({
               value={[thresholdPct]}
               onValueChange={(v) =>
                 updateMatch("highlightWarmthThreshold", (v[0] ?? 25) / 100)
+              }
+            />
+          </div>
+          <div className="space-y-2">
+            <div className="flex justify-between text-xs text-muted-foreground">
+              <span>Softness</span>
+              <span>{softnessPct}%</span>
+            </div>
+            <Slider
+              className={SLIDER_CLASS}
+              min={0}
+              max={100}
+              step={1}
+              value={[softnessPct]}
+              onValueChange={(v) =>
+                updateMatch("highlightWarmthSoftness", (v[0] ?? 50) / 100)
               }
             />
           </div>

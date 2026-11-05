@@ -17,7 +17,13 @@ import { Slider } from "@/components/ui/slider";
 import type { LookParams as LookParamsT } from "@/lib/look-params";
 import type { BulkQueueProgress, Lab2TileBlend } from "@/lib/lab2/types";
 import { CloudUpload } from "lucide-react";
-import { FinishingEffectsCard, Lab2LookAccordionItems } from "./lab2-look-sections";
+import { Lab2ControlsCarousel } from "./lab2-controls-carousel";
+import {
+  FinishingEffectsCard,
+  getLab2LookSections,
+  Lab2LookAccordionItems,
+  type Lab2Section,
+} from "./lab2-look-sections";
 import { MatchThumbnailPicker } from "./match-thumbnail-picker";
 import { useRef, type ComponentProps, type RefObject } from "react";
 
@@ -55,10 +61,13 @@ function CloudUploadButton({ onFiles }: { onFiles: (files: File[]) => void }) {
   );
 }
 
-const SLIDER_CLASS = "w-full touch-manipulation";
+const SLIDER_CLASS = "w-full";
 
 export type Lab2ControlsPanelProps = {
   mode: "full" | "bulk-upload";
+  /** "carousel" renders full mode as horizontally swiped sections (mobile). */
+  layout?: "accordion" | "carousel";
+  className?: string;
   lookParams: LookParamsT;
   tileBlend: Lab2TileBlend;
   sourceDecodeRd1: boolean;
@@ -106,6 +115,8 @@ export type Lab2ControlsPanelProps = {
 
 export function Lab2ControlsPanel({
   mode,
+  layout = "accordion",
+  className,
   lookParams,
   tileBlend,
   sourceDecodeRd1,
@@ -220,33 +231,8 @@ export function Lab2ControlsPanel({
     );
   }
 
-  return (
-    <div className="flex h-full flex-col overflow-hidden">
-      <div className="max-h-full overflow-y-auto overflow-x-hidden">
-        <div
-          className="space-y-4 p-4"
-          onPointerDownCapture={() => beginDrag("normal")}
-          onTouchStart={() => beginDrag("normal")}
-        >
-          <Accordion
-            type="multiple"
-            defaultValue={[
-              "source-match",
-              "masters",
-              "exposure",
-              "color-density",
-              "refraction",
-              "devignette",
-              "highlights",
-              "actuance",
-            ]}
-            className="w-full"
-          >
-            <AccordionItem value="source-match">
-              <AccordionTrigger className="py-3 text-sm font-medium text-muted-foreground hover:no-underline">
-                Source &amp; match
-              </AccordionTrigger>
-              <AccordionContent className="space-y-3">
+  const sourceMatchContent = (
+              <>
                 <div className="flex items-center gap-2 min-h-11 touch-manipulation">
                   <Checkbox
                     id="tile-blend-semantic"
@@ -409,6 +395,79 @@ export function Lab2ControlsPanel({
                     Render edits
                   </LoadingButton>
                 )}
+              </>
+  );
+
+  const effectsCard = (
+    <FinishingEffectsCard
+      lookParams={lookParams}
+      enabled={effectsEnabled}
+      onEnabledChange={onEffectsEnabledChange}
+      updateMatch={updateMatch}
+    />
+  );
+
+  const defaultsContent = (
+    <div className="space-y-2">
+      <Button
+        type="button"
+        variant="secondary"
+        className="w-full min-h-11"
+        onClick={onSaveDefaults}
+      >
+        Make current parameters default
+      </Button>
+      <Button
+        type="button"
+        variant="outline"
+        className="w-full min-h-11"
+        onClick={onResetDefaults}
+      >
+        Reset to Lab2 baseline defaults
+      </Button>
+    </div>
+  );
+
+  if (layout === "carousel") {
+    const sections: Lab2Section[] = [
+      { id: "source-match", title: "Source & match", content: sourceMatchContent },
+      ...getLab2LookSections({ lookParams, updateMatch }),
+      { id: "effects", title: "Highlight Warmth + Halation", headerless: true, content: effectsCard },
+      { id: "defaults", title: "Defaults", content: defaultsContent },
+    ];
+    return (
+      <Lab2ControlsCarousel sections={sections} beginDrag={beginDrag} className={className} />
+    );
+  }
+
+  return (
+    <div className="flex h-full flex-col overflow-hidden">
+      <div className="max-h-full overflow-y-auto overflow-x-hidden">
+        <div
+          className="space-y-4 p-4"
+          onPointerDownCapture={() => beginDrag("normal")}
+          onTouchStart={() => beginDrag("normal")}
+        >
+          <Accordion
+            type="multiple"
+            defaultValue={[
+              "source-match",
+              "masters",
+              "exposure",
+              "color-density",
+              "refraction",
+              "devignette",
+              "highlights",
+              "actuance",
+            ]}
+            className="w-full"
+          >
+            <AccordionItem value="source-match">
+              <AccordionTrigger className="py-3 text-sm font-medium text-muted-foreground hover:no-underline">
+                Source &amp; match
+              </AccordionTrigger>
+              <AccordionContent className="space-y-3">
+                {sourceMatchContent}
               </AccordionContent>
             </AccordionItem>
 
@@ -417,36 +476,13 @@ export function Lab2ControlsPanel({
               updateMatch={updateMatch}
               beginDrag={beginDrag}
             />
-
           </Accordion>
 
-          <FinishingEffectsCard
-            lookParams={lookParams}
-            enabled={effectsEnabled}
-            onEnabledChange={onEffectsEnabledChange}
-            updateMatch={updateMatch}
-          />
+          {effectsCard}
 
           <Separator />
 
-          <div className="space-y-2">
-            <Button
-              type="button"
-              variant="secondary"
-              className="w-full min-h-11"
-              onClick={onSaveDefaults}
-            >
-              Make current parameters default
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              className="w-full min-h-11"
-              onClick={onResetDefaults}
-            >
-              Reset to Lab2 baseline defaults
-            </Button>
-          </div>
+          {defaultsContent}
         </div>
       </div>
     </div>

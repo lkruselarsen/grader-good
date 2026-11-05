@@ -169,6 +169,8 @@ export interface LookParams {
     amount: number;
     /** 0.01..0.5, upper fraction of the tonal range affected. */
     threshold: number;
+    /** 0..1, width of the blue → neutral → warm rolloff around the threshold. */
+    softness?: number;
   };
   /**
    * Finishing stage: film halation (scattered exposure around intense highlights).
