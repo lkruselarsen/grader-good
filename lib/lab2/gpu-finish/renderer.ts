@@ -306,8 +306,11 @@ export class GpuFinishRenderer {
       gl.useProgram(p.prog);
       this.bindTex(0, src, p, "u_src");
       gl.uniform1i(p.loc("u_enabled"), 1);
-      gl.uniform2f(p.loc("u_dab"), warmth.da, warmth.db);
-      gl.uniform2f(p.loc("u_range"), warmth.lo, warmth.hi);
+      gl.uniform2f(p.loc("u_dir"), warmth.dirA, warmth.dirB);
+      gl.uniform1f(p.loc("u_k"), warmth.k);
+      gl.uniform1f(p.loc("u_desat"), warmth.desat);
+      gl.uniform2f(p.loc("u_desatRange"), warmth.desatLo, warmth.desatHi);
+      gl.uniform2f(p.loc("u_tintRange"), warmth.tintLo, warmth.tintHi);
       this.draw(p, this.warm, this.warm.w, this.warm.h);
       current = this.warm.tex;
     }

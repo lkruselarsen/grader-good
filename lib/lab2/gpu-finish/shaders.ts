@@ -13,6 +13,8 @@ import {
   HALATION_SOURCE_MAX,
   HALATION_SOURCE_SUPPRESSION,
   HALATION_SPECTRAL,
+  WARMTH_ALIGNED_DESAT,
+  WARMTH_GAMUT_STEPS,
 } from "@/src/lib/pipeline/finishing/model";
 
 const f = (v: number) => {
@@ -66,16 +68,39 @@ in vec2 v_uv;
 out vec4 o;
 uniform sampler2D u_src;
 uniform int u_enabled;
-uniform vec2 u_dab;
-uniform vec2 u_range;
+uniform vec2 u_dir;
+uniform float u_k;
+uniform float u_desat;
+uniform vec2 u_desatRange;
+uniform vec2 u_tintRange;
 ${OKLAB_GLSL}
+float ramp(float lo, float hi, float x) {
+  float t = clamp((x - lo) / max(1e-9, hi - lo), 0.0, 1.0);
+  return t * t * (3.0 - 2.0 * t);
+}
+float minc(vec3 v) { return min(v.r, min(v.g, v.b)); }
 void main() {
   vec4 c = texture(u_src, v_uv);
   if (u_enabled == 0) { o = c; return; }
   vec3 lab = linearToOklab(c.rgb);
-  float w = smoothstep(u_range.x, u_range.y, lab.x);
-  if (w <= 0.0) { o = c; return; }
-  vec3 rgb = oklabToLinear(vec3(lab.x, lab.yz + u_dab * w));
+  if (lab.x <= u_desatRange.x) { o = c; return; }
+  float wd = ramp(u_desatRange.x, u_desatRange.y, lab.x);
+  float wt = ramp(u_tintRange.x, u_tintRange.y, lab.x);
+  float C = length(lab.yz);
+  float cosA = C > 1e-6 ? dot(lab.yz, u_dir) / C : 0.0;
+  float opp = ${f(WARMTH_ALIGNED_DESAT)} + (1.0 - ${f(WARMTH_ALIGNED_DESAT)}) * 0.5 * (1.0 - cosA);
+  vec2 ab = lab.yz * (1.0 - wd * u_desat * opp) + u_dir * (u_k * wt);
+  vec3 rgb = oklabToLinear(vec3(lab.x, ab));
+  if (minc(rgb) < 0.0) {
+    float lo = 0.0;
+    float hi = 1.0;
+    for (int s = 0; s < ${WARMTH_GAMUT_STEPS}; s++) {
+      float mid = 0.5 * (lo + hi);
+      if (minc(oklabToLinear(vec3(lab.x, ab * mid))) < 0.0) hi = mid;
+      else lo = mid;
+    }
+    rgb = oklabToLinear(vec3(lab.x, ab * lo));
+  }
   o = vec4(max(rgb, vec3(0.0)), c.a);
 }`;
 

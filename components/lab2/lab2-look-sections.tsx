@@ -352,6 +352,7 @@ export function FinishingEffectsCard({
   const hue = m.highlightWarmthHue ?? DEFAULT_WARMTH_HUE;
   const amount = m.highlightWarmthAmount ?? 0;
   const thresholdPct = Math.round((m.highlightWarmthThreshold ?? 0.25) * 100);
+  const softnessPct = Math.round((m.highlightWarmthSoftness ?? 0.5) * 100);
   const halation = halationFromLook(m);
   const halationSliders: {
     key: Extract<
@@ -407,6 +408,22 @@ export function FinishingEffectsCard({
               value={[thresholdPct]}
               onValueChange={(v) =>
                 updateMatch("highlightWarmthThreshold", (v[0] ?? 25) / 100)
+              }
+            />
+          </div>
+          <div className="space-y-2">
+            <div className="flex justify-between text-xs text-muted-foreground">
+              <span>Softness</span>
+              <span>{softnessPct}%</span>
+            </div>
+            <Slider
+              className={SLIDER_CLASS}
+              min={0}
+              max={100}
+              step={1}
+              value={[softnessPct]}
+              onValueChange={(v) =>
+                updateMatch("highlightWarmthSoftness", (v[0] ?? 50) / 100)
               }
             />
           </div>

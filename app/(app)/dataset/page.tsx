@@ -10,6 +10,7 @@ import { Card } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { DatasetLibrary } from "@/components/dataset/dataset-library";
 import { frameToImageData, computeImageStats } from "@/src/lib/pipeline";
 import { decode } from "@/src/lib/pipeline/decode";
 import { fitLookParamsFromReference } from "@/src/lib/pipeline/stages/match";
@@ -60,6 +61,7 @@ export default function DatasetPage() {
   const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(
     null
   );
+  const [libraryKey, setLibraryKey] = useState(0);
 
   const handleFiles = useCallback(
     async (files: FileList | null) => {
@@ -181,6 +183,7 @@ export default function DatasetPage() {
       }
       setIsProcessing(false);
       setUploadProgress(null);
+      setLibraryKey((k) => k + 1);
     },
     [includeTiles]
   );
@@ -205,7 +208,7 @@ export default function DatasetPage() {
     : "";
 
   return (
-    <div className="max-w-2xl">
+    <div className="max-w-4xl">
       <PageHeader
         title="Dataset"
         href="/dataset"
@@ -272,6 +275,10 @@ export default function DatasetPage() {
           />
         )}
       </Card>
+
+      <div className="mt-6">
+        <DatasetLibrary refreshKey={libraryKey} />
+      </div>
 
       <p className="mt-6 text-xs text-muted-foreground">
         Configure{" "}
