@@ -102,6 +102,10 @@ export function buildEngineParamsFromLookParams(
     m.refractionPostModel2?.length === 12
       ? [...m.refractionPostModel2]
       : Array.from({ length: 12 }, () => 1);
+  engine.hueLuminancePostModel2 =
+    m.hueLuminancePostModel2?.length === 12
+      ? [...m.hueLuminancePostModel2]
+      : Array.from({ length: 12 }, () => 0);
   if (m.devignette) {
     engine.devignette = {
       innerDiameterNorm: m.devignette.innerDiameterNorm,

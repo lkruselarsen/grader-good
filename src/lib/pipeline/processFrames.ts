@@ -15,6 +15,7 @@ import { applyHighlightWarmthFloat } from "./finishing/highlight-warmth";
 import { match, matchFloat } from "./match";
 import { applyExposureCurveFloat } from "./stages/exposureCurvePost";
 import { applyDevignetteFloat } from "./stages/devignette";
+import { applyHueLuminancePostModel2Float } from "./stages/hueLuminancePostModel2";
 import { applyRefractionPostModel2Float } from "./stages/refractionPostModel2";
 import {
   applyColorDensityCurveFloat,
@@ -74,6 +75,10 @@ export function processFramesFloat(
         params.grading.colorDensityCurve
       );
     }
+    afterMatch = applyHueLuminancePostModel2Float(
+      afterMatch,
+      params.grading.hueLuminancePostModel2
+    );
     const r12 = params.grading.refractionPostModel2;
     if (r12?.length === 12) {
       afterMatch = applyRefractionPostModel2Float(afterMatch, r12);

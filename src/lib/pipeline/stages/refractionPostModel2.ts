@@ -17,7 +17,7 @@ function chroma(a: number, b: number): number {
 }
 
 /**
- * Remap (a,b) using 12 fixed hues and per-node saturation multipliers (piecewise linear between nodes).
+ * Scale (a,b) by per-node saturation multipliers, piecewise linear between the 12 fixed hues.
  * Same OKLab hue convention as applyRefractionWheel in match.ts (wheel ↔ lab hue + 180°).
  */
 function applyRefractionSatOnly12(
@@ -34,19 +34,10 @@ function applyRefractionSatOnly12(
   const i0 = Math.floor(seg) % 12;
   const i1 = (i0 + 1) % 12;
   const t = seg - Math.floor(seg);
-  const h0 = REFRACTION_POST_MODEL2_HUES_DEG[i0] ?? 0;
-  const h1 = REFRACTION_POST_MODEL2_HUES_DEG[i1] ?? 0;
-  const targetHueDeg = h0 * (1 - t) + h1 * t;
   const s0 = saturations[i0] ?? 1;
   const s1 = saturations[i1] ?? 1;
-  const targetSatScale = s0 * (1 - t) + s1 * t;
-  const Cnew = C * Math.max(0, Math.min(3, targetSatScale));
-  const outputHueDeg = (targetHueDeg + 180) % 360;
-  const newHueRad = (outputHueDeg / 360) * 2 * Math.PI - Math.PI;
-  return {
-    a: Cnew * Math.cos(newHueRad),
-    b: Cnew * Math.sin(newHueRad),
-  };
+  const satScale = Math.max(0, Math.min(3, s0 * (1 - t) + s1 * t));
+  return { a: a * satScale, b: b * satScale };
 }
 
 /** Default: twelve saturations of 1 (identity). */
