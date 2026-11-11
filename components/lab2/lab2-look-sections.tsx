@@ -16,7 +16,7 @@ import {
   type LookParams as LookParamsT,
   type LookParamsMatch,
 } from "@/lib/look-params";
-import { REFRACTION_HUE_NAMES } from "@/lib/lab2/constants";
+import { REFRACTION_HUE_NAMES, withLab2ShadowHandle } from "@/lib/lab2/constants";
 import { cn } from "@/lib/utils";
 import {
   defaultHueLuminancePostModel2,
@@ -100,9 +100,11 @@ export function getLab2LookSections({ lookParams, updateMatch }: LookSectionArgs
       expensive: true,
       content: (
         <>
-          {(lookParams.match.exposureCurve ?? defaultExposureCurve()).L_out.map(
+          {withLab2ShadowHandle(lookParams.match.exposureCurve ?? defaultExposureCurve()).L_out.map(
             (_, idx) => {
-              const curve = lookParams.match.exposureCurve ?? defaultExposureCurve();
+              const curve = withLab2ShadowHandle(
+                lookParams.match.exposureCurve ?? defaultExposureCurve()
+              );
               const L_out = [...curve.L_out];
               return (
                 <div key={idx} className="space-y-1">
