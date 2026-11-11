@@ -32,6 +32,7 @@ const CASES: { name: string; scene: "mixed" | "lamps"; finish: FinishParams | nu
   { name: "halation-max", scene: "mixed", finish: { halation: HALATION_MAX } },
   { name: "lamps-default", scene: "lamps", finish: { halation: HALATION_DEFAULT } },
   { name: "lamps-max", scene: "lamps", finish: { halation: HALATION_MAX } },
+  { name: "lamps-neutral", scene: "lamps", finish: { halation: { ...HALATION_MAX, warmth: 0 } } },
   {
     name: "both-max",
     scene: "mixed",

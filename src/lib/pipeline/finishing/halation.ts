@@ -21,7 +21,6 @@ import { gaussianBlurCascade, gaussianBlurPlane } from "./box-blur";
 import {
   HALATION_ALIGNED_DESAT,
   HALATION_DESAT_FULL_RATIO,
-  HALATION_LAYER_LOBES,
   HALATION_LIMIT,
   HALATION_SHOULDER_WHITE,
   HALATION_SOURCE_SUPPRESSION,
@@ -89,9 +88,9 @@ export function applyHalationFloat(
   gaussianBlurCascade(lobe1, lobe2, scratch, width, height, Math.sqrt(Math.max(0, s2 * s2 - s1 * s1)));
 
   // 3 + 4. Per-layer halo, suppression, limiter, film shoulder.
-  const [wr0, wr1, wr2] = HALATION_LAYER_LOBES.r;
-  const [wg0, wg1, wg2] = HALATION_LAYER_LOBES.g;
-  const [wb0, wb1, wb2] = HALATION_LAYER_LOBES.b;
+  const [wr0, wr1, wr2] = u.lobes.r;
+  const [wg0, wg1, wg2] = u.lobes.g;
+  const [wb0, wb1, wb2] = u.lobes.b;
   const [gr, gg, gb] = u.gain;
   const hmax = HALATION_LIMIT;
   const invHmax = 1 / hmax;

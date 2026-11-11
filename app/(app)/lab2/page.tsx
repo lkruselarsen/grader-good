@@ -51,11 +51,12 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
+import { type LookParams as LookParamsT } from "@/lib/look-params";
 import {
-  DEFAULT_LOOK_PARAMS,
-  defaultExposureCurve,
-  type LookParams as LookParamsT,
-} from "@/lib/look-params";
+  cloneLab2LookParams,
+  deepMergeLab2,
+  LAB2_DEFAULT_LOOK_PARAMS,
+} from "@/lib/lab2/constants";
 import {
   buildEngineParamsFromLookParams,
   gateFinishingEffects,
@@ -113,51 +114,6 @@ const INTERACTIVE_PREVIEW_SCALE = 0.32;
 const INTERACTIVE_PREVIEW_SCALE_AGGRESSIVE = 0.25;
 const ADAPTIVE_SLOW_MS = 220;
 const ADAPTIVE_VERY_SLOW_MS = 420;
-const LAB2_DEFAULT_EXPOSURE_CURVE = defaultExposureCurve();
-const LAB2_DEFAULT_LOOK_PARAMS: LookParamsT = {
-  ...DEFAULT_LOOK_PARAMS,
-  match: {
-    ...DEFAULT_LOOK_PARAMS.match,
-    colorDensityCurveMasterMul: 1.0,
-    exposureCurve: {
-      ...LAB2_DEFAULT_EXPOSURE_CURVE,
-      L_out: [
-        0.35,
-        0.5,
-        0.65,
-        ...(LAB2_DEFAULT_EXPOSURE_CURVE.L_out.slice(3)),
-      ],
-    },
-    devignette: {
-      ...(DEFAULT_LOOK_PARAMS.match.devignette ?? {
-        innerDiameterNorm: 0.65,
-        strengthStops: 0,
-      }),
-      strengthStops: 1.88,
-    },
-  },
-};
-
-function deepMergeLab2(
-  base: LookParamsT,
-  saved: Partial<LookParamsT>
-): LookParamsT {
-  return {
-    ...base,
-    ...saved,
-    match: { ...base.match, ...saved.match },
-    grading: { ...base.grading, ...saved.grading },
-    halation: saved.halation
-      ? { ...base.halation, ...saved.halation }
-      : base.halation,
-    grain: saved.grain ? { ...base.grain, ...saved.grain } : base.grain,
-  };
-}
-
-function cloneLab2LookParams(params: LookParamsT): LookParamsT {
-  return JSON.parse(JSON.stringify(params)) as LookParamsT;
-}
-
 type RgbaFrame = ReturnType<typeof pixelFrameF32ToPixelFrameRGBA>;
 
 /** Tile match preset at enqueue/auto-match time — semantic-only vs hybrid weights. */

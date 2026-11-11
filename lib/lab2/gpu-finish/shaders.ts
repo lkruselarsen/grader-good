@@ -8,7 +8,6 @@
 import {
   HALATION_ALIGNED_DESAT,
   HALATION_DESAT_FULL_RATIO,
-  HALATION_LAYER_LOBES,
   HALATION_LIMIT,
   HALATION_REF_GREY,
   HALATION_SHOULDER_WHITE,
@@ -166,15 +165,15 @@ uniform int u_halation;
 uniform int u_flipY;
 uniform int u_inputSrgb;
 uniform vec3 u_gain;
+uniform vec3 u_lobeR;
+uniform vec3 u_lobeG;
+uniform vec3 u_lobeB;
 ${ACTIVATION_GLSL}
 vec3 linearToSrgb(vec3 c) {
   c = clamp(c, 0.0, 1.0);
   return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), c));
 }
 
-const vec3 LR = vec3(${f(HALATION_LAYER_LOBES.r[0])}, ${f(HALATION_LAYER_LOBES.r[1])}, ${f(HALATION_LAYER_LOBES.r[2])});
-const vec3 LG = vec3(${f(HALATION_LAYER_LOBES.g[0])}, ${f(HALATION_LAYER_LOBES.g[1])}, ${f(HALATION_LAYER_LOBES.g[2])});
-const vec3 LB = vec3(${f(HALATION_LAYER_LOBES.b[0])}, ${f(HALATION_LAYER_LOBES.b[1])}, ${f(HALATION_LAYER_LOBES.b[2])});
 const float HMAX = ${f(HALATION_LIMIT)};
 const float SW = ${f(HALATION_SHOULDER_WHITE)};
 const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
@@ -189,7 +188,7 @@ void main() {
     if (l.x + l.y + l.z >= 1e-6) {
       float Y = dot(rgb, LUMA);
       float vis = 1.0 - ${f(HALATION_SOURCE_SUPPRESSION)} * halationActivation(Y);
-      vec3 halo = vec3(dot(LR, l), dot(LG, l), dot(LB, l)) * vis;
+      vec3 halo = vec3(dot(u_lobeR, l), dot(u_lobeG, l), dot(u_lobeB, l)) * vis;
       vec3 h = u_gain * HMAX * (1.0 - exp(-halo / HMAX));
       vec3 d = exp(-max(rgb, vec3(0.0)) / SW) * SW * (1.0 - exp(-h / SW));
       vec3 cb = rgb - Y;

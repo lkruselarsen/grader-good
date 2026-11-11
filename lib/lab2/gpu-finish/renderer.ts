@@ -389,6 +389,12 @@ export class GpuFinishRenderer {
     gl.uniform2f(p.loc("u_ev"), halation?.startEV ?? 0, halation?.invSpanEV ?? 0);
     const gain = halation?.gain ?? [0, 0, 0];
     gl.uniform3f(p.loc("u_gain"), gain[0], gain[1], gain[2]);
+    if (halation) {
+      const { r, g, b } = halation.lobes;
+      gl.uniform3f(p.loc("u_lobeR"), r[0], r[1], r[2]);
+      gl.uniform3f(p.loc("u_lobeG"), g[0], g[1], g[2]);
+      gl.uniform3f(p.loc("u_lobeB"), b[0], b[1], b[2]);
+    }
     this.draw(p, target, vw, vh);
   }
 
