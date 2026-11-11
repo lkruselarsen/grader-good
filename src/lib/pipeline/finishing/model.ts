@@ -153,6 +153,8 @@ export function smoothstep(lo: number, hi: number, x: number): number {
 //   4. Conservative suppression inside the emitting region.
 //   5. Self-limiting exposure: HMAX·(1 − exp(−x / HMAX)).
 //   6. Extra exposure per film layer: red dominant, minority green, minimal blue.
+//      Warmth sets the layer balance: 0 = equal gains and shared lobes (a white
+//      halo, no coloured edge), 0.5 = the film default, 1 = deep red.
 //   7. Rolloff before the halo lands: the pixel's own colour fades toward its
 //      luminance when it opposes the halo hue (blue sky under a red halo), so
 //      it passes through neutral instead of mixing into purple. The fade
@@ -176,18 +178,29 @@ export const HALATION_SOURCE_MAX = 4;
 export const HALATION_SIGMAS = [0.0015, 0.006, 0.018] as const;
 /** Sigma multiplier at radius 0 and 1. */
 export const HALATION_RADIUS_SCALE = [0.5, 1.8] as const;
-/** Per-layer lobe weights (each sums to 1). Red spreads widest. */
+/** Film per-layer lobe weights (each sums to 1). Red spreads widest. */
 export const HALATION_LAYER_LOBES = {
   r: [0.55, 0.32, 0.13],
   g: [0.7, 0.25, 0.05],
   b: [0.85, 0.15, 0.0],
 } as const;
+/** Lobe weights every layer shares at warmth 0, so the halo edge carries no colour. */
+export const HALATION_NEUTRAL_LOBES = HALATION_LAYER_LOBES.g;
 /** Fraction of the halo suppressed where the pixel itself fully emits. */
 export const HALATION_SOURCE_SUPPRESSION = 0.6;
 /** Ceiling of the self-limited halo exposure (linear). */
 export const HALATION_LIMIT = 0.16;
-/** Exposure gain per film layer; green spans warmth 0 → 1. */
-export const HALATION_LAYER_GAIN = { r: 1.0, gMin: 0.18, gMax: 0.42, b: 0.04 } as const;
+/**
+ * Exposure gain per film layer at warmth 0.5 (the default film halo). Below
+ * 0.5 gains and lobes blend toward a neutral halo of equal luminance; above
+ * it green drops toward HALATION_DEEP_RED_G.
+ */
+export const HALATION_LAYER_GAIN = { r: 1.0, g: 0.3, b: 0.04 } as const;
+/** Green layer gain at warmth 1. */
+export const HALATION_DEEP_RED_G = 0.18;
+/** Equal per-layer gain at warmth 0: the Rec.709 luminance of the film gains. */
+export const HALATION_NEUTRAL_GAIN =
+  0.2126 * HALATION_LAYER_GAIN.r + 0.7152 * HALATION_LAYER_GAIN.g + 0.0722 * HALATION_LAYER_GAIN.b;
 /** Exposure multiplier at amount = 1. */
 export const HALATION_AMOUNT_SCALE = 1.33;
 /** White point of the film shoulder F(E) = W·(1 − exp(−E / W)). */
@@ -211,7 +224,45 @@ export type HalationUniforms = {
   sigmas: [number, number, number];
   /** amount · per-layer exposure gain. */
   gain: [number, number, number];
+  /** Per-layer lobe weights (each sums to 1). */
+  lobes: {
+    r: [number, number, number];
+    g: [number, number, number];
+    b: [number, number, number];
+  };
 };
+
+type Vec3 = [number, number, number];
+
+function lerp3(a: readonly number[], b: readonly number[], t: number): Vec3 {
+  return [lerp(a[0]!, b[0]!, t), lerp(a[1]!, b[1]!, t), lerp(a[2]!, b[2]!, t)];
+}
+
+/** Per-layer gain (before amount) and lobes for a warmth in [0, 1]. */
+function halationLayers(warmth: number): { gain: Vec3; lobes: HalationUniforms["lobes"] } {
+  const film: Vec3 = [HALATION_LAYER_GAIN.r, HALATION_LAYER_GAIN.g, HALATION_LAYER_GAIN.b];
+  if (warmth >= 0.5) {
+    const t = (warmth - 0.5) * 2;
+    return {
+      gain: [film[0], lerp(film[1], HALATION_DEEP_RED_G, t), film[2]],
+      lobes: {
+        r: [...HALATION_LAYER_LOBES.r],
+        g: [...HALATION_LAYER_LOBES.g],
+        b: [...HALATION_LAYER_LOBES.b],
+      },
+    };
+  }
+  const t = warmth * 2;
+  const N = HALATION_NEUTRAL_GAIN;
+  return {
+    gain: lerp3([N, N, N], film, t),
+    lobes: {
+      r: lerp3(HALATION_NEUTRAL_LOBES, HALATION_LAYER_LOBES.r, t),
+      g: lerp3(HALATION_NEUTRAL_LOBES, HALATION_LAYER_LOBES.g, t),
+      b: lerp3(HALATION_NEUTRAL_LOBES, HALATION_LAYER_LOBES.b, t),
+    },
+  };
+}
 
 export function computeHalationUniforms(
   p: HalationParams | undefined | null
@@ -225,17 +276,15 @@ export function computeHalationUniforms(
   const rs = lerp(HALATION_RADIUS_SCALE[0], HALATION_RADIUS_SCALE[1], radius);
   const startEV = lerp(HALATION_START_EV[0], HALATION_START_EV[1], sensitivity);
   const a = amount * HALATION_AMOUNT_SCALE;
+  const layers = halationLayers(warmth);
   return {
     amount,
     startEV,
     invSpanEV: 1 / HALATION_EV_SPAN,
     startY: HALATION_REF_GREY * 2 ** startEV,
     sigmas: [HALATION_SIGMAS[0] * rs, HALATION_SIGMAS[1] * rs, HALATION_SIGMAS[2] * rs],
-    gain: [
-      a * HALATION_LAYER_GAIN.r,
-      a * lerp(HALATION_LAYER_GAIN.gMin, HALATION_LAYER_GAIN.gMax, warmth),
-      a * HALATION_LAYER_GAIN.b,
-    ],
+    gain: [a * layers.gain[0], a * layers.gain[1], a * layers.gain[2]],
+    lobes: layers.lobes,
   };
 }
 
